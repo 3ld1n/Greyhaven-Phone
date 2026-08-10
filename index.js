@@ -1,5 +1,5 @@
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '1.1.0';
+const GHP_VERSION = '1.1.1';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -51,6 +51,7 @@ let refreshBusy=false, replyBusy=false, islandText='', islandIcon='';
 let composeRequest={threadId:'',kind:''};
 let mediaDbPromise=null;
 const mediaObjectUrls=new Map();
+const mediaDimensionCache=new Map();
 const mediaMemoryFallback=new Map();
 
 function ctx(){try{return globalThis.SillyTavern?.getContext?.()||null}catch(e){console.warn(`[${GHP_MODULE}] context`,e);return null}}
@@ -149,6 +150,8 @@ function normalizeMessage(m={}){
   m.type=['text','photo','video'].includes(m.type)?m.type:'text';
   m.mediaDescription=String(m.mediaDescription||m.description||'');
   m.mediaKey=String(m.mediaKey||'');
+  m.mediaWidth=Math.max(0,Number(m.mediaWidth||0)||0);
+  m.mediaHeight=Math.max(0,Number(m.mediaHeight||0)||0);
   m.requestMedia=['photo','video'].includes(m.requestMedia)?m.requestMedia:'';
   m.mirrorId=String(m.mirrorId||'');
   return m;
@@ -290,12 +293,37 @@ async function mediaBlob(key){
   if(!key)return null;if(mediaMemoryFallback.has(key))return mediaMemoryFallback.get(key);
   try{const db=await mediaDb();return await new Promise((resolve,reject)=>{const tx=db.transaction(MEDIA_STORE,'readonly'),req=tx.objectStore(MEDIA_STORE).get(key);req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error)})}catch{return null}
 }
+async function probeMediaDimensions(blob,key='',kind=''){
+  if(!blob)return null;
+  if(key&&mediaDimensionCache.has(key))return mediaDimensionCache.get(key);
+  try{
+    const url=URL.createObjectURL(blob);
+    const meta=await new Promise(resolve=>{
+      const finalize=(width,height)=>{try{URL.revokeObjectURL(url)}catch{}const out=width&&height?{width:Number(width)||0,height:Number(height)||0}:null;if(key&&out)mediaDimensionCache.set(key,out);resolve(out)};
+      const isVideo=kind==='video'||String(blob.type||'').startsWith('video/');
+      if(isVideo){
+        const video=document.createElement('video');video.preload='metadata';video.muted=true;video.onloadedmetadata=()=>finalize(video.videoWidth,video.videoHeight);video.onerror=()=>finalize(0,0);video.src=url;
+      }else{
+        const img=new Image();img.onload=()=>finalize(img.naturalWidth,img.naturalHeight);img.onerror=()=>finalize(0,0);img.src=url;
+      }
+    });
+    return meta;
+  }catch{return null}
+}
 async function hydrateMediaPreviews(){
   const o=document.querySelector('#ghp-overlay');if(!o||o.hidden)return;
   for(const el of o.querySelectorAll('[data-media-key]')){
-    const key=el.dataset.mediaKey;if(!key||el.dataset.loaded==='1')continue;let url=mediaObjectUrls.get(key);
-    if(!url){const blob=await mediaBlob(key);if(blob){url=URL.createObjectURL(blob);mediaObjectUrls.set(key,url)}}
-    if(url){el.src=url;el.dataset.loaded='1';el.closest('.ghp-media-visual')?.classList.add('has-local')}
+    const key=el.dataset.mediaKey;if(!key)continue;let url=mediaObjectUrls.get(key),blob=null;
+    if(!url){blob=await mediaBlob(key);if(blob){url=URL.createObjectURL(blob);mediaObjectUrls.set(key,url)}}
+    else if(!mediaDimensionCache.has(key))blob=await mediaBlob(key);
+    if(url){
+      el.src=url;el.dataset.loaded='1';
+      const wrap=el.closest('.ghp-media-visual');
+      wrap?.classList.add('has-local');
+      const kind=el.tagName==='VIDEO'?'video':'photo';
+      const meta=mediaDimensionCache.get(key)||(blob?await probeMediaDimensions(blob,key,kind):null);
+      if(meta?.width&&meta?.height)wrap?.style.setProperty('--ghp-media-ar',`${meta.width}/${meta.height}`);
+    }
   }
 }
 
@@ -499,7 +527,23 @@ function cleanPlainReply(raw){
   let text=String(raw||'').trim().replace(/^```(?:text|txt)?\s*/i,'').replace(/\s*```$/,'').trim();
   if(!text||text==='{}'||text==='[]')return'';text=text.replace(/^["“](.*)["”]$/s,'$1').trim();return text;
 }
-function parseDirectReply(raw){
+function inferMediaFromText(text,requested=''){
+  const raw=String(text||'').trim();if(!raw)return null;
+  if(/\b(?:not sending|won't send|would rather not|don't feel comfortable|not comfortable|not ready|maybe later|wait until you|get home to see|not gonna send|i'm not sending)\b/i.test(raw))return null;
+  const kind=requested==='video'||(/\b(?:video|clip)\b/i.test(raw)&&!/\b(?:photo|picture|pic|selfie)\b/i.test(raw))?'video':'photo';
+  const cue=kind==='video'?/\b(?:video|clip)\b/i:/\b(?:photo|picture|pic|selfie)\b/i;
+  const invite=/(?:here(?:'s| is)|sending|i(?:'| a)?m sending|i can take a break to send|another one|take a break to send|selfie|clip)/i;
+  if(!(requested||cue.test(raw))||!invite.test(raw))return null;
+  let desc=raw
+    .replace(/^(?:sure|okay|ok|fine|alright|haha|hehe|lol|lmao|well|mm+|mhm|yep|yeah|of course|definitely|i can|i could|i'll be happy to)\b[^.!?]*[.!?]?\s*/i,'')
+    .replace(/^(?:here(?:'s| is)|sending|i(?:'| a)?m sending|i can take a break to send|take a break to send|let me send you)\s+(?:another\s+)?(?:a\s+)?(?:photo|picture|pic|selfie|video|clip)\s*(?:of)?\s*/i,'')
+    .replace(/^(?:me|myself)\s+/i,'')
+    .trim();
+  desc=desc.replace(/^[:\-–]+\s*/,'').trim();
+  if(!desc)return null;
+  return {type:kind,mediaDescription:desc,text:''};
+}
+function parseDirectReply(raw,requested=''){
   const text=cleanPlainReply(raw);if(!text)return[];
   const out=[];
   for(const line of text.split(/\n+/)){
@@ -507,7 +551,14 @@ function parseDirectReply(raw){
     const kind=m[1].toLowerCase(),value=String(m[2]||'').trim();if(!value)continue;
     if(kind==='text')out.push({type:'text',text:value});else out.push({type:kind,mediaDescription:value,text:''});
   }
-  if(!out.length)out.push({type:'text',text});return out.slice(0,4);
+  if(!out.length){
+    const inferred=inferMediaFromText(text,requested);
+    if(inferred)out.push(inferred);else out.push({type:'text',text});
+  }else if(requested&&!out.some(x=>x.type===requested)){
+    const inferred=inferMediaFromText(text,requested);
+    if(inferred)out.push(inferred);
+  }
+  return out.slice(0,4);
 }
 function parseGroupReply(raw,contacts){
   const allowed=new Map(contacts.map(c=>[lc(c.name),c])),out=[];
@@ -554,7 +605,11 @@ Give ${c.name}'s next spoken reply now.`;
 Preserve ${c.name}'s established personality, relationship and knowledge.
 Use Greyhaven Life as authoritative current world/time context when available.
 You may reply with text, a fictional photo, a fictional video, or text plus one media item.
-If ${owner.name} explicitly requested a photo/video, you are NOT forced to send it. Decide in character. Refusal, teasing, delay, changing the subject, or sending something different are valid when appropriate.
+If ${owner.name} explicitly requested a photo/video, decide based on relationship, trust, consent, current mood, teasing level, and the recent conversation. Do NOT refuse by default.
+For close romantic partners, established hookups, or clearly mutual flirty/intimate dynamics, and especially when the scene already feels consensual, aroused, playful, or teasing, default toward actually sending something rather than refusing. The media can be modest, playful, suggestive, or explicit depending on what fits ${c.name} and the current mood.
+For close friends with strong teasing chemistry, it is also normal to sometimes comply after some back-and-forth.
+Reserve refusal mainly for low-trust contacts, strangers, mismatched mood, clear boundaries, or when the request would feel out of character.
+If you choose to send media, actually use a PHOTO: or VIDEO: line instead of only describing it in TEXT.
 If you send media, describe only what the recipient would actually see. Do not claim the AI viewed a real uploaded file.
 Return 1-3 lines using ONLY these formats:
 TEXT: message text
@@ -580,11 +635,11 @@ TEXT THREAD:
 ${JSON.stringify(conversationTail(conversation,26))}
 
 LATEST REQUEST MODE:
-${requested?`The latest message explicitly requested a ${requested}. You may comply or refuse naturally.`:'No explicit media request.'}
+${requested?`The latest owner message explicitly requested a ${requested}. If the relationship/mood makes that request plausible, prefer complying with an actual ${requested.toUpperCase()}: reply instead of refusing by default. Refusal is still allowed when it genuinely fits ${c.name}.`:'No explicit media request.'}
 
 Continue the conversation naturally.`;
-        let raw=await generate({prompt,systemPrompt,responseLength:700}),items=parseDirectReply(raw);
-        if(!items.length){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. Return TEXT: followed by a natural reply.`,systemPrompt:`You are ${c.name}.`,responseLength:350});items=parseDirectReply(raw)}
+        let raw=await generate({prompt,systemPrompt,responseLength:700}),items=parseDirectReply(raw,requested||'');
+        if(!items.length){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. Return TEXT: followed by a natural reply.`,systemPrompt:`You are ${c.name}.`,responseLength:350});items=parseDirectReply(raw,requested||'')}
         replies=items.map(x=>({sender:c.name,...x}));
       }
     }else{
@@ -628,13 +683,13 @@ function sendThread(tid,text,mode='text',opts={}){
   },false);
   if(th)generateReply(th,mode);
 }
-function sendMediaMessage(tid,kind,description,caption='',mediaKey=''){
+function sendMediaMessage(tid,kind,description,caption='',mediaKey='',meta=null){
   if(replyBusy||!['photo','video'].includes(kind))return;description=String(description||'').trim();caption=String(caption||'').trim();if(!description)return;
   const owner=persona(),stamp=now().getTime();let th;
   mutate(t=>{
-    th=t.threads[tid];if(!th)return;const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:owner.name,senderId:owner.key,text:caption,type:kind,mediaDescription:description,mediaKey,timeMs:stamp,read:true});
+    th=t.threads[tid];if(!th)return;const mirrorId=`mirror:${id()}`,msg=normalizeMessage({sender:owner.name,senderId:'owner',type:kind,text:caption,mirrorId,mediaDescription:description,mediaKey,mediaWidth:meta?.width||0,mediaHeight:meta?.height||0,timeMs:stamp,read:true});
     th.messages.push(msg);
-    if(th.type==='direct'){const peer=t.contacts[th.contactIds[0]];if(peer)mirrorRichMessageToPhone({phoneOwner:peer.name,phoneOwnerAvatar:peer.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,senderName:owner.name,message:msg,unread:true})}
+    if(th.type==='direct'){const peer=t.contacts[th.contactIds[0]];mirrorRichMessageToPhone({phoneOwner:peer.name,phoneOwnerAvatar:peer.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,senderName:owner.name,message:msg,unread:true})}
   },false);
   if(th)generateReply(th,'text');
 }
@@ -659,14 +714,17 @@ function renderMessages(){
   return`<div class="ghp-app">${header('Messages','','<button data-new-thread><i class="fa-solid fa-pen-to-square"></i></button>')}<main>${ths.length?ths.map(th=>{const last=th.messages.at(-1),u=unread(th);return`<button class="ghp-row" data-thread="${esc(th.id)}">${threadAvatar(th,t)}<span><b>${esc(threadTitle(th,t))}</b><small>${last?`${last.sender===persona().name?'You: ':''}${esc(messagePreview(last))}`:'Start a conversation'}</small></span><em><time>${last?esc(rel(last.timeMs)):''}</time>${u?`<i>${u}</i>`:''}</em></button>`}).join(''):empty('fa-regular fa-comments','No conversations yet','Start a chat with a relevant contact.','<button data-new-thread>New message</button>')}</main></div>`;
 }
 function markRead(tid){mutate(t=>{const th=t.threads[tid];if(th)for(const m of th.messages)if(m.sender!==persona().name)m.read=true;for(const n of t.notifications)if(n.app==='messages'&&n.targetId===tid)n.read=true},false)}
-function renderMediaVisual(m){
+function renderMediaVisual(m,tid='',mine=false){
   const icon=m.type==='video'?'fa-solid fa-video':'fa-regular fa-image',label=m.type==='video'?'Video':'Photo';
+  const ratio=(m.mediaWidth&&m.mediaHeight)?` style="--ghp-media-ar:${m.mediaWidth}/${m.mediaHeight}"`:'';
   const local=m.mediaKey?(m.type==='video'?`<video data-media-key="${esc(m.mediaKey)}" controls playsinline preload="metadata"></video>`:`<img data-media-key="${esc(m.mediaKey)}" alt="${esc(m.mediaDescription||label)}">`):'';
-  return`<div class="ghp-media-visual ${m.mediaKey?'has-key':''}">${local}<div class="ghp-media-placeholder"><i class="${icon}"></i><b>${label}</b><span>${esc(m.mediaDescription||`${label} attachment`)}</span>${m.mediaKey?'<small>Local preview</small>':''}</div></div>${m.text?`<p class="ghp-media-caption">${esc(m.text)}</p>`:''}`;
+  const attachLabel=m.mediaKey?`Replace local ${label.toLowerCase()} preview`:`Attach local ${label.toLowerCase()} preview`;
+  const attach=tid&&m.id?`<button type="button" class="ghp-media-tool" data-link-thread="${esc(tid)}" data-link-media="${esc(m.id)}" data-link-kind="${esc(m.type)}" title="${esc(attachLabel)}"><i class="fa-solid ${m.mediaKey?'fa-pen':'fa-paperclip'}"></i></button>`:'';
+  return`<div class="ghp-media-visual ${m.mediaKey?'has-key':''}"${ratio}>${local}<div class="ghp-media-placeholder"><i class="${icon}"></i><b>${label}</b><span>${esc(m.mediaDescription||`${label} attachment`)}</span>${m.mediaKey?'<small>Local preview</small>':''}</div>${attach}</div>${m.text?`<p class="ghp-media-caption">${esc(m.text)}</p>`:''}`;
 }
 function renderMessageBubble(m,th){
   const mine=m.sender===persona().name,groupName=th.type==='group'&&!mine?`<small class="ghp-msg-sender">${esc(m.sender)}</small>`:'';
-  const body=m.type==='photo'||m.type==='video'?renderMediaVisual(m):`<p>${esc(m.text)}</p>`;
+  const body=m.type==='photo'||m.type==='video'?renderMediaVisual(m,th.id,mine):`<p>${esc(m.text)}</p>`;
   const request=m.requestMedia?`<small class="ghp-msg-request"><i class="${m.requestMedia==='video'?'fa-solid fa-video':'fa-regular fa-image'}"></i> Requested a ${esc(m.requestMedia)}</small>`:'';
   return`<div class="ghp-msg ${mine?'mine':''} ${m.type!=='text'?'has-media':''}">${groupName}${body}${request}<time>${esc(timeText(new Date(m.timeMs)))}</time></div>`;
 }
@@ -793,10 +851,31 @@ function mediaMenuPopup(tid){
   d.querySelectorAll('[data-send-media]').forEach(b=>b.onclick=()=>{const kind=b.dataset.sendMedia;d.close();mediaComposerPopup(tid,kind)});
   d.querySelectorAll('[data-request-media]').forEach(b=>b.onclick=()=>{composeRequest={threadId:tid,kind:b.dataset.requestMedia};d.close();render()});
 }
+async function fileMediaMeta(file,kind=''){
+  if(!file)return null;return await probeMediaDimensions(file,'',kind||((file.type||'').startsWith('video/')?'video':'photo'));
+}
+async function setLocalMessagePreview(tid,mid,file){
+  if(!file)return;
+  const key=await saveMediaBlob(file),meta=await fileMediaMeta(file,(file.type||'').startsWith('video/')?'video':'photo');
+  mutate(t=>{const th=t.threads[tid],m=th?.messages?.find(x=>x.id===mid);if(!m)return;m.mediaKey=key;if(meta?.width&&meta?.height){m.mediaWidth=meta.width;m.mediaHeight=meta.height;}},false);
+  render();
+}
+function clearLocalMessagePreview(tid,mid){
+  mutate(t=>{const th=t.threads[tid],m=th?.messages?.find(x=>x.id===mid);if(!m)return;m.mediaKey='';m.mediaWidth=0;m.mediaHeight=0;},false);
+  render();
+}
+function attachExistingMediaPopup(tid,mid,kind='photo'){
+  const th=timeline().threads[tid],m=th?.messages?.find(x=>x.id===mid);if(!m)return;
+  const label=kind==='video'?'Video':'Photo',accept=kind==='video'?'video/*':'image/*';
+  const d=popup(`<form method="dialog" class="ghp-media-form"><header><b>${m.mediaKey?'Replace':'Attach'} local ${label} preview</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><p class="ghp-popup-copy">Pick a local ${label.toLowerCase()} from your phone to replace this bubble visually. The AI still only understands the written description already in the chat.</p><label class="ghp-file-label"><span><b>Choose ${label}</b><small>This only changes how this message looks on this device.</small></span><input class="media-file" type="file" accept="${accept}"></label><div class="ghp-inline-actions"><button type="button" class="primary" data-confirm-link>${m.mediaKey?'Replace':'Attach'} ${label}</button>${m.mediaKey?`<button type="button" data-clear-link>Remove local preview</button>`:''}</div></form>`);
+  d.querySelector('[data-confirm-link]').onclick=async()=>{const file=d.querySelector('.media-file').files?.[0];if(!file){globalThis.toastr?.warning?.(`Choose a ${label.toLowerCase()} first.`);return}const btn=d.querySelector('[data-confirm-link]');btn.disabled=true;btn.textContent='Saving…';await setLocalMessagePreview(tid,mid,file);d.close();};
+  d.querySelector('[data-clear-link]')?.addEventListener('click',()=>{clearLocalMessagePreview(tid,mid);d.close();});
+}
+
 function mediaComposerPopup(tid,kind){
   const accept=kind==='video'?'video/*':'image/*',label=kind==='video'?'Video':'Photo';
-  const d=popup(`<form method="dialog" class="ghp-media-form"><header><b>Send ${label}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label><span><b>What does it show?</b><small>This description is what the AI can understand.</small></span><textarea class="media-description" placeholder="${kind==='video'?'A short video of me walking along the beach…':'A selfie of myself lying in bed…'}"></textarea></label><label><span><b>Caption / message</b><small>Optional text sent with it.</small></span><textarea class="media-caption" placeholder="Optional message…"></textarea></label><label class="ghp-file-label"><span><b>Local ${label.toLowerCase()} preview</b><small>Optional. The AI does not receive the uploaded file — only your description above.</small></span><input class="media-file" type="file" accept="${accept}"></label><button type="button" class="primary" data-confirm-media>Send ${label}</button></form>`);
-  d.querySelector('[data-confirm-media]').onclick=async()=>{const description=d.querySelector('.media-description').value.trim(),caption=d.querySelector('.media-caption').value.trim(),file=d.querySelector('.media-file').files?.[0];if(!description){globalThis.toastr?.warning?.('Describe what the media shows first.');return}const btn=d.querySelector('[data-confirm-media]');btn.disabled=true;btn.textContent='Sending…';let mediaKey='';if(file)mediaKey=await saveMediaBlob(file);sendMediaMessage(tid,kind,description,caption,mediaKey);d.close();render()};
+  const d=popup(`<form method="dialog" class="ghp-media-form"><header><b>Send ${label}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label><span><b>What does it show?</b><small>This description is what the AI can understand.</small></span><textarea class="media-description" placeholder="${kind==='video'?'A short video of me walking along the beach…':'A selfie of myself lying in bed…'}"></textarea></label><label><span><b>Caption / message</b><small>Optional text sent with it.</small></span><textarea class="media-caption" placeholder="Optional message…"></textarea></label><label class="ghp-file-label"><span><b>Optional local ${label.toLowerCase()}</b><small>Only changes what you see in the bubble; the AI still uses the written description above.</small></span><input class="media-file" type="file" accept="${accept}"></label><button type="button" class="primary" data-confirm-media>Send ${label}</button></form>`);
+  d.querySelector('[data-confirm-media]').onclick=async()=>{const description=d.querySelector('.media-description').value.trim(),caption=d.querySelector('.media-caption').value.trim(),file=d.querySelector('.media-file').files?.[0];if(!description){globalThis.toastr?.warning?.('Describe what the media shows first.');return}const btn=d.querySelector('[data-confirm-media]');btn.disabled=true;btn.textContent='Sending…';let mediaKey='',meta=null;if(file){mediaKey=await saveMediaBlob(file);meta=await fileMediaMeta(file,kind)}sendMediaMessage(tid,kind,description,caption,mediaKey,meta);d.close();render()};
 }
 function postPopup(){
   const d=popup(`<form method="dialog"><header><b>New Social Post</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label>What does the photo show?<textarea class="visual"></textarea></label><label>Caption<textarea class="caption"></textarea></label><button type="button" class="primary" data-post>Post</button></form>`);
@@ -818,7 +897,7 @@ function click(e){
   if(x.dataset.openApp)return openApp(x.dataset.openApp);if(x.matches('[data-refresh]'))return refreshPhone();if(x.matches('[data-new-thread]'))return newThreadPopup();
   if(x.dataset.thread){threadId=x.dataset.thread;app='thread';return render()}if(x.matches('[data-add-contact]'))return addContactPopup();if(x.matches('[data-discover]')){seedContacts(true);globalThis.toastr?.success?.('Relevant contacts refreshed.');return render()}if(x.matches('[data-removed-contacts]'))return restoreContactsPopup();
   if(x.dataset.contact){contactId=x.dataset.contact;app='contact';return render()}if(x.dataset.messageContact){const th=directThread(x.dataset.messageContact);threadId=th.id;app='thread';return render()}if(x.dataset.removeContact)return removeContact(x.dataset.removeContact);
-  if(x.dataset.threadMenu)return threadMenuPopup(x.dataset.threadMenu);if(x.dataset.mediaMenu)return mediaMenuPopup(x.dataset.mediaMenu);if(x.matches('[data-cancel-media-request]')){composeRequest={threadId:'',kind:''};return render()}
+  if(x.dataset.threadMenu)return threadMenuPopup(x.dataset.threadMenu);if(x.dataset.mediaMenu)return mediaMenuPopup(x.dataset.mediaMenu);if(x.dataset.linkMedia)return attachExistingMediaPopup(x.dataset.linkThread,x.dataset.linkMedia,x.dataset.linkKind||'photo');if(x.matches('[data-cancel-media-request]')){composeRequest={threadId:'',kind:''};return render()}
   if(x.dataset.call)return startCall(x.dataset.call);if(x.matches('[data-end-call]'))return endCall();if(x.dataset.story){threadId=x.dataset.story;app='story';return render()}
   if(x.matches('[data-new-post]'))return postPopup();if(x.matches('[data-new-note]'))return notePopup();if(x.dataset.note)return notePopup(x.dataset.note);if(x.dataset.mail)return openMail(x.dataset.mail);if(x.matches('[data-save-settings]'))return saveSettings();
   if(x.matches('[data-reset-phone]')){if(confirm(`Reset ${persona().name}'s phone timeline in this chat?`)){const r=metadataRoot();r.phones[persona().key]=defaultTimeline(persona().name,persona().avatar);saveMetadataRoot(r);app='';threadId='';contactId='';composeRequest={threadId:'',kind:''};render();globalThis.toastr?.success?.('Phone timeline reset.')}return}

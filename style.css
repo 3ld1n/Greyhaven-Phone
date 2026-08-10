@@ -85,3 +85,49 @@ body.ghp-open{overflow:hidden!important}
   .ghp-thread form{padding-bottom:max(10px,env(safe-area-inset-bottom))!important}
   .ghp-request-banner{margin-bottom:4px}
 }
+
+
+/* ===== Greyhaven Phone v1.1.1 media polish ===== */
+.ghp-media-visual{
+  width:min(290px,100%);
+  min-height:175px;
+  height:auto;
+  aspect-ratio:var(--ghp-media-ar,4/5);
+  max-width:100%;
+}
+.ghp-media-visual.has-local{
+  min-height:0;
+}
+.ghp-media-visual img,
+.ghp-media-visual video{
+  object-fit:contain;
+}
+.ghp-media-tool{
+  position:absolute;
+  right:8px;
+  bottom:8px;
+  z-index:3;
+  width:30px;
+  height:30px;
+  border:0;
+  border-radius:999px;
+  display:grid;
+  place-items:center;
+  background:rgba(5,8,14,.72);
+  color:#fff;
+  box-shadow:0 3px 10px rgba(0,0,0,.25);
+}
+.ghp-media-tool:hover{
+  background:rgba(27,37,58,.88);
+}
+.ghp-popup-copy{
+  margin:0 0 10px;
+  color:var(--ghp-muted);
+  font-size:12px;
+  line-height:1.4;
+}
+.ghp-inline-actions{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}

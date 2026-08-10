@@ -1,8 +1,8 @@
-# Greyhaven Phone v1.1.0
+# Greyhaven Phone v1.1.1
 
 A fictional iPhone-style phone simulator for SillyTavern roleplay.
 
-## v1.1.0
+## v1.1.1
 
 This release keeps the existing app set and focuses on making the working Phone feel more coherent and controllable.
 
@@ -96,3 +96,20 @@ Minimum SillyTavern version: 1.13.3.
 7. Refresh after an active texting conversation and check whether any double text follows the existing topic.
 8. Put the phone owner on a trip while an unrelated contact remains elsewhere/unknown; refresh Social and verify the contact is not automatically teleported.
 9. Open Messages with the iPhone keyboard and verify there is no extension-drawn white gesture bar overlapping the composer.
+
+
+## v1.1.1 additions
+
+### Better media willingness
+- Direct-message media requests are no longer refusal-biased.
+- Close romantic / intimate / mutually teasing relationships are now prompted to comply more often when it fits the mood.
+- The parser can recover media replies when the model writes “Here’s a photo...” or “Here’s a video...” as plain text instead of using the PHOTO/VIDEO protocol.
+
+### Correct aspect ratios for local files
+- Local uploaded photos/videos now preserve their measured aspect ratio inside the chat bubble instead of being forced into the old generic frame.
+
+### Attach a local preview to received media
+- Any photo/video bubble now has a small paperclip/edit button.
+- Use it to attach or replace a local file from your device for that exact message bubble.
+- This is especially useful when a character “sends” a fictional image/video and you want to visually swap the placeholder for a real file on your phone.
+- The AI still only knows the written media description.
