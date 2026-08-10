@@ -218,3 +218,12 @@ Greyhaven Phone does not require a Greyhaven Life update for v1.0.
 The current Greyhaven Life public API already exposes each tracked person's schedule exceptions. Calendar therefore shows the exact exception end date/time when available.
 
 A future Greyhaven Life polish release can separately make the main roleplay prompt state the exact exception end more explicitly.
+
+## v1.0.1 hotfix
+
+Fixes three first-release issues found during real iPhone testing:
+
+- **Persona avatar:** Phone now resolves the active SillyTavern persona through `power_user.personas` and `getThumbnailUrl('persona', ...)` instead of reading an arbitrary avatar from the DOM.
+- **AI replies/calls:** Direct messages and calls now use plain raw text generation instead of Structured Outputs, so models/providers without JSON-schema support no longer show a typing indicator and then return nothing.
+- **Phone Refresh:** Refresh uses ordinary JSON-in-text generation rather than Structured Outputs. Normal mode aims for at least one event; Busy aims for several. If the model still returns no usable events (or the generation fails), a safe ambient fallback can add harmless fictional Social/Snap/message activity so the phone is not permanently empty.
+- **Stale widget:** Very large old chats no longer display giant counters like `550 RP messages`; the widget uses a compact "Lots of new RP context" label.

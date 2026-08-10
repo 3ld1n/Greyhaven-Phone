@@ -1,6 +1,6 @@
 
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '1.0.0';
+const GHP_VERSION = '1.0.1';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -61,13 +61,41 @@ function timeText(d=now()){return new Intl.DateTimeFormat(undefined,{hour:'2-dig
 function dateText(d=now(),short=false){return new Intl.DateTimeFormat(undefined,short?{weekday:'short',month:'short',day:'numeric'}:{weekday:'long',month:'long',day:'numeric'}).format(d)}
 function rel(ms){const m=Math.max(0,Math.round((now().getTime()-Number(ms||0))/60000));if(m<1)return'now';if(m<60)return`${m}m`;const h=Math.round(m/60);return h<24?`${h}h`:`${Math.round(h/24)}d`}
 
+function personaAvatarId(){
+  const c=ctx(),name=norm(c?.name1||'User'),p=c?.powerUserSettings||{},personas=p.personas||{},descs=p.persona_descriptions||p.personaDescriptions||{};
+  const matches=Object.entries(personas).filter(([,personaName])=>norm(personaName).toLowerCase()===name.toLowerCase());
+  if(!matches.length)return'';
+
+  // If two personas have the same display name, prefer the one whose active description matches.
+  const activeDescription=String(p.persona_description||'').trim();
+  if(activeDescription){
+    const exact=matches.find(([avatarId])=>{
+      const value=descs?.[avatarId];
+      const description=typeof value==='string'?value:String(value?.description||value?.prompt||value?.text||'');
+      return description.trim()===activeDescription;
+    });
+    if(exact)return exact[0];
+  }
+
+  // A recent user message may carry the exact persona thumbnail.
+  const chat=Array.isArray(c?.chat)?c.chat:[];
+  for(let i=chat.length-1;i>=0;i--){
+    const message=chat[i];
+    if(!message?.is_user||norm(message?.name).toLowerCase()!==name.toLowerCase())continue;
+    const force=decodeURIComponent(String(message?.force_avatar||''));
+    const found=matches.find(([avatarId])=>force.includes(avatarId));
+    if(found)return found[0];
+  }
+
+  return matches[0][0];
+}
 function personaAvatar(){
-  for(const s of ['#send_form .avatar img','#user_avatar_block .avatar img','#user_avatar_block img','.persona_avatar img']){
-    const v=document.querySelector(s)?.getAttribute('src'); if(v)return v;
-  } return '';
+  const c=ctx(),avatarId=personaAvatarId();
+  if(!avatarId)return'';
+  try{return c?.getThumbnailUrl?.('persona',avatarId)||`User Avatars/${avatarId}`}catch{return`User Avatars/${avatarId}`}
 }
 function personaDescription(){
-  const c=ctx(), name=norm(c?.name1||'User'), p=c?.powerUserSettings||{}, desc=p.persona_descriptions||p.personaDescriptions||{}, personas=p.personas||{}, active=p.user_avatar||p.userAvatar||'';
+  const c=ctx(), name=norm(c?.name1||'User'), p=c?.powerUserSettings||{}, desc=p.persona_descriptions||p.personaDescriptions||{}, personas=p.personas||{}, active=personaAvatarId();
   const candidates=[];
   if(active){candidates.push(desc[active],desc[String(active).split('/').pop()])}
   for(const [k,v] of Object.entries(personas||{})) if(norm(v).toLowerCase()===name.toLowerCase()) candidates.push(desc[k]);
@@ -80,8 +108,8 @@ function personaDescription(){
   return '';
 }
 function persona(){
-  const c=ctx(), name=norm(c?.name1||'User'), avatar=personaAvatar(), a=avatar?avatar.split('/').pop()?.split('?')[0]:'';
-  return {name,avatar,description:personaDescription(),key:`persona:${slug(name)}${a?`:${slug(a)}`:''}`}
+  const c=ctx(),name=norm(c?.name1||'User'),avatarId=personaAvatarId(),avatar=personaAvatar();
+  return {name,avatarId,avatar,description:personaDescription(),key:`persona:${slug(name)}${avatarId?`:${slug(avatarId)}`:''}`}
 }
 
 function settingsRoot(){
@@ -219,40 +247,139 @@ function recentPhone(){
   for(const x of t.posts.slice(-6))a.push({ms:x.timeMs,text:`Post ${x.author}: ${x.caption}`});for(const x of t.stories.slice(-6))a.push({ms:x.timeMs,text:`Story ${x.author}: ${x.caption}`});for(const x of t.calls.slice(-6))a.push({ms:x.timeMs,text:`Call ${x.contactName}: ${x.status}`});
   return a.sort((a,b)=>a.ms-b.ms).slice(-24).map(x=>x.text);
 }
-function parseJSON(raw){if(raw&&typeof raw==='object')return raw;let s=String(raw||'').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');const a=s.indexOf('{'),b=s.lastIndexOf('}');if(a>=0&&b>a)s=s.slice(a,b+1);return JSON.parse(s.replace(/,\s*([}\]])/g,'$1'))}
-async function generate({prompt,systemPrompt,responseLength=1200,jsonSchema=null}){const c=ctx();if(typeof c?.generateRaw!=='function')throw new Error('SillyTavern generateRaw is unavailable.');return c.generateRaw({prompt,systemPrompt,responseLength,trimNames:false,jsonSchema})}
+function parseJSON(raw){
+  if(raw&&typeof raw==='object')return raw;
+  let s=String(raw||'').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+  const a=s.indexOf('{'),b=s.lastIndexOf('}');
+  if(a>=0&&b>a)s=s.slice(a,b+1);
+  return JSON.parse(s.replace(/,\s*([}\]])/g,'$1'));
+}
+function emptyRefreshResult(){return{summary:'',messages:[],calls:[],posts:[],stories:[],notifications:[],mail:[]}}
+function normalizeRefreshResult(raw){
+  let value=raw;
+  if(typeof raw==='string'){
+    try{value=parseJSON(raw)}catch{value=null}
+  }
+  const out=emptyRefreshResult();
+  if(!value||typeof value!=='object')return out;
+  out.summary=String(value.summary||'');
+  for(const key of ['messages','calls','posts','stories','notifications','mail'])out[key]=Array.isArray(value[key])?value[key]:[];
+  return out;
+}
+function refreshEventCount(r){return['messages','calls','posts','stories','notifications','mail'].reduce((sum,key)=>sum+(Array.isArray(r?.[key])?r[key].length:0),0)}
+async function generate({prompt,systemPrompt,responseLength=1200}){
+  const c=ctx();
+  if(typeof c?.generateRaw!=='function')throw new Error('SillyTavern generateRaw is unavailable.');
+  return c.generateRaw({prompt,systemPrompt,responseLength,trimNames:false});
+}
+function ensureAmbientRefreshActivity(result,contacts,p){
+  const out=normalizeRefreshResult(result),target=p.activityLevel==='busy'?Math.min(p.maxNewEvents,Math.max(3,Math.ceil(p.maxNewEvents*.6))):p.activityLevel==='normal'?Math.min(1,p.maxNewEvents):0;
+  let count=refreshEventCount(out);
+  if(count>=target||!contacts.length)return out;
 
-function refreshSchema(){return{type:'object',additionalProperties:false,properties:{
-  summary:{type:'string'},
-  messages:{type:'array',items:{type:'object',additionalProperties:false,properties:{threadId:{type:'string'},sender:{type:'string'},text:{type:'string'}},required:['sender','text']}},
-  calls:{type:'array',items:{type:'object',additionalProperties:false,properties:{contact:{type:'string'},status:{type:'string',enum:['missed','incoming']}},required:['contact','status']}},
-  posts:{type:'array',items:{type:'object',additionalProperties:false,properties:{author:{type:'string'},visual:{type:'string'},caption:{type:'string'},likes:{type:'integer'},comments:{type:'integer'}},required:['author','visual','caption']}},
-  stories:{type:'array',items:{type:'object',additionalProperties:false,properties:{author:{type:'string'},visual:{type:'string'},caption:{type:'string'}},required:['author','visual','caption']}},
-  notifications:{type:'array',items:{type:'object',additionalProperties:false,properties:{app:{type:'string',enum:['social','snap']},from:{type:'string'},text:{type:'string'}},required:['app','from','text']}},
-  mail:{type:'array',items:{type:'object',additionalProperties:false,properties:{from:{type:'string'},subject:{type:'string'},body:{type:'string'}},required:['from','subject','body']}}
-},required:['summary','messages','calls','posts','stories','notifications','mail']}}
+  const installed=p.apps||{};
+  const shuffled=[...contacts].sort(()=>Math.random()-.5);
+  let cursor=0;
+  const socialTexts=['liked your story','reacted to your story','shared a new post','posted something new'];
+  const snapTexts=['sent you a Snap','added to their Story','shared a new Snap'];
+  const messageTexts=['Hey, what are you up to?','What are you doing?','Heyy 👀','You around?'];
+
+  while(count<target&&cursor<Math.max(target*3,contacts.length*2)){
+    const c=shuffled[cursor%shuffled.length];cursor++;
+    if(installed.snap&&Math.random()<.45){
+      out.notifications.push({app:'snap',from:c.name,text:snapTexts[Math.floor(Math.random()*snapTexts.length)]});count++;continue;
+    }
+    if(installed.social&&Math.random()<.7){
+      out.notifications.push({app:'social',from:c.name,text:socialTexts[Math.floor(Math.random()*socialTexts.length)]});count++;continue;
+    }
+    if(installed.messages){
+      out.messages.push({threadId:'',sender:c.name,text:messageTexts[Math.floor(Math.random()*messageTexts.length)]});count++;continue;
+    }
+    break;
+  }
+  if(!out.summary&&count)out.summary='Ambient phone activity';
+  return out;
+}
 
 async function refreshPhone(){
   if(refreshBusy)return;if(!hasChat()){globalThis.toastr?.warning?.('Open a chat first.');return}
   refreshBusy=true;islandText='Refreshing phone…';islandIcon='fa-solid fa-satellite-dish';render();
   try{
-    seedContacts(true);const t=timeline(),p=profile(),owner=persona(),w=world(),contacts=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c&&!c.blocked).map(c=>({id:c.id,name:c.name,nickname:c.nickname||'',favorite:c.favorite}));if(!contacts.length){globalThis.toastr?.warning?.('No relevant contacts yet.');return}
+    seedContacts(true);
+    const t=timeline(),p=profile(),owner=persona(),w=world();
+    const contacts=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c&&!c.blocked).map(c=>({id:c.id,name:c.name,nickname:c.nickname||'',favorite:c.favorite}));
+    if(!contacts.length){globalThis.toastr?.warning?.('No relevant contacts yet.');return}
     const threads=t.threadOrder.map(k=>t.threads[k]).filter(Boolean).map(th=>({id:th.id,title:threadTitle(th,t),type:th.type,members:th.contactIds.map(cid=>t.contacts[cid]?.name).filter(Boolean)}));
-    const systemPrompt=`You are a hidden fictional phone-event simulator for realistic roleplay. Return JSON only matching the schema.
-Phone owner: ${owner.name}. Use Greyhaven Life as authoritative world/time context when available.
-Use ONLY allowed contacts for person-generated phone activity. Do not repeat existing events. Returning zero events is valid and often realistic.
-Do not reveal information a sender could not reasonably know. Keep messages character-specific, natural and concise.
-Social posts/stories should be varied, plausible and grounded in the current life situation. Never modify Greyhaven Life.`;
-    const prompt=`ROLEPLAY TIME:\n${w.time}\n\nPHONE OWNER:\n${owner.name}\n\nACTIVITY LEVEL:\n${p.activityLevel}\n\nMAX TOTAL NEW EVENTS:\n${p.maxNewEvents}
-\n\nINSTALLED APPS:\n${JSON.stringify(p.apps)}\n\nALLOWED CONTACTS:\n${JSON.stringify(contacts)}\n\nEXISTING THREADS:\n${JSON.stringify(threads)}
-\n\nGREYHAVEN LIFE:\n${JSON.stringify({scene:w.scene,people:w.people,snapshot:w.snapshot,snapshotStatus:w.status})}
-\n\nRECENT MAIN RP:\n${recentChat()||'(none)'}\n\nRECENT PHONE HISTORY TO AVOID REPEATING:\n${JSON.stringify(recentPhone())}
-\n\nDecide whether anything plausibly happened since the last refresh. Produce no more than ${p.maxNewEvents} total new items across all arrays.
-For Messages use an existing threadId when appropriate, otherwise blank threadId and a valid sender name. Mail may use a plausible organization only if Mail is installed and context supports it.`;
-    const result=parseJSON(await generate({prompt,systemPrompt,responseLength:p.responseTokens,jsonSchema:refreshSchema()}));
-    applyRefresh(result);globalThis.toastr?.success?.('Phone refreshed.');
-  }catch(e){console.error(`[${GHP_MODULE}] refresh`,e);globalThis.toastr?.error?.(`Phone refresh failed: ${e?.message||e}`)}
-  finally{refreshBusy=false;islandText='';islandIcon='';render()}
+    const minEvents=p.activityLevel==='busy'?Math.min(p.maxNewEvents,Math.max(3,Math.ceil(p.maxNewEvents*.6))):p.activityLevel==='normal'?Math.min(1,p.maxNewEvents):0;
+
+    const systemPrompt=`You simulate background activity on a fictional iPhone inside an ongoing roleplay.
+Return ONLY one valid JSON object. No markdown and no commentary.
+Use Greyhaven Life as authoritative current time/world state when available.
+Use ONLY the allowed contacts for messages, calls, Social, Stories and Snap activity.
+Do not repeat existing phone history.
+Do not invent major plot developments, emergencies, betrayals, travel or secrets just to make the phone busy.
+Ambient harmless activity is allowed even when recent RP gives little context: casual messages, reactions, Stories, social posts, Snap notifications, missed calls.
+Messages must sound like the named sender instead of a generic assistant.
+NORMAL activity should normally create at least ${minEvents} new event.
+BUSY activity must create at least ${minEvents} new events unless no compatible apps are installed.
+QUIET may return zero events.
+Maximum total events: ${p.maxNewEvents}.
+The required JSON shape is:
+{"summary":"short note","messages":[{"threadId":"","sender":"Name","text":"message"}],"calls":[{"contact":"Name","status":"missed"}],"posts":[{"author":"Name","visual":"what the fictional photo shows","caption":"caption","likes":12,"comments":2}],"stories":[{"author":"Name","visual":"what the fictional story shows","caption":"caption"}],"notifications":[{"app":"social","from":"Name","text":"liked your story"}],"mail":[]}
+Use empty arrays for categories with no activity.`;
+
+    const prompt=`ROLEPLAY TIME:
+${w.time}
+
+PHONE OWNER:
+${owner.name}
+
+ACTIVITY LEVEL:
+${p.activityLevel}
+
+MINIMUM DESIRED EVENTS:
+${minEvents}
+
+MAXIMUM TOTAL EVENTS:
+${p.maxNewEvents}
+
+INSTALLED APPS:
+${JSON.stringify(p.apps)}
+
+ALLOWED CONTACTS:
+${JSON.stringify(contacts)}
+
+EXISTING THREADS:
+${JSON.stringify(threads)}
+
+GREYHAVEN LIFE:
+${JSON.stringify({scene:w.scene,people:w.people,snapshot:w.snapshot,snapshotStatus:w.status})}
+
+RECENT MAIN RP:
+${recentChat()||'(none)'}
+
+RECENT PHONE HISTORY TO AVOID REPEATING:
+${JSON.stringify(recentPhone())}
+
+Generate plausible NEW phone activity now. Even when the current RP does not mention the phone, normal everyday digital activity can happen in the background.`;
+
+    const raw=await generate({prompt,systemPrompt,responseLength:p.responseTokens});
+    const parsed=normalizeRefreshResult(raw);
+    const result=ensureAmbientRefreshActivity(parsed,contacts,p);
+    const before=refreshEventCount(parsed),after=refreshEventCount(result);
+    applyRefresh(result);
+    globalThis.toastr?.success?.(after?`Phone refreshed · ${after} new event${after===1?'':'s'}`:'Phone refreshed · nothing new this time');
+    if(!before&&after)console.info(`[${GHP_MODULE}] Model returned no usable refresh events; ambient fallback supplied ${after}. Raw output:`,raw);
+  }catch(e){
+    console.error(`[${GHP_MODULE}] refresh`,e);
+    // If generation itself fails, still create safe ambient activity for Normal/Busy so the phone isn't dead.
+    try{
+      const p=profile(),t=timeline(),contacts=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c&&!c.blocked).map(c=>({id:c.id,name:c.name,nickname:c.nickname||'',favorite:c.favorite}));
+      const fallback=ensureAmbientRefreshActivity(emptyRefreshResult(),contacts,p);
+      if(refreshEventCount(fallback)){applyRefresh(fallback);globalThis.toastr?.warning?.('AI refresh failed, so Phone added safe ambient activity instead.');}
+      else globalThis.toastr?.error?.(`Phone refresh failed: ${e?.message||e}`);
+    }catch{globalThis.toastr?.error?.(`Phone refresh failed: ${e?.message||e}`)}
+  }finally{refreshBusy=false;islandText='';islandIcon='';render()}
 }
 function applyRefresh(r){
   const t=timeline(),installed=profile().apps,allowed=new Map(Object.values(t.contacts).map(c=>[c.name.toLowerCase(),c])),keys=new Set(t.refresh.eventKeys||[]),stamp=now().getTime(),max=profile().maxNewEvents;let count=0;
@@ -267,16 +394,106 @@ function applyRefresh(r){
 }
 
 function cardData(c){let ch=Number.isInteger(c.characterId)?ctx()?.characters?.[c.characterId]:null;if(!ch)ch=findCharacter(c.name)?.character;const o={};if(ch)for(const k of ['name','description','personality','scenario','mes_example']){const v=ch[k]??ch.data?.[k];if(typeof v==='string'&&v.trim())o[k]=v.slice(0,7000)}if(!o.description&&c?.personaDescription)o.description=String(c.personaDescription).slice(0,9000);return o}
+function cleanPlainReply(raw){
+  let text=String(raw||'').trim().replace(/^```(?:text|txt)?\s*/i,'').replace(/\s*```$/,'').trim();
+  if(!text||text==='{}'||text==='[]')return'';
+  text=text.replace(/^["“](.*)["”]$/s,'$1').trim();
+  return text;
+}
+function parseGroupReply(raw,contacts){
+  const allowed=new Map(contacts.map(c=>[c.name.toLowerCase(),c])),out=[];
+  for(const line of cleanPlainReply(raw).split(/\n+/)){
+    const match=line.trim().match(/^([^:]{1,80}):\s*(.+)$/s);
+    if(!match)continue;
+    const c=allowed.get(norm(match[1]).toLowerCase()),text=String(match[2]||'').trim();
+    if(c&&text)out.push({sender:c.name,text});
+  }
+  return out.slice(0,4);
+}
 async function generateReply(th,mode='text'){
-  const t=timeline(),owner=persona(),contacts=th.contactIds.map(k=>t.contacts[k]).filter(Boolean);if(!contacts.length)return;replyBusy=true;islandText=mode==='call'?'On call…':'Typing…';islandIcon=mode==='call'?'fa-solid fa-phone':'fa-solid fa-ellipsis';render();
+  const t=timeline(),owner=persona(),contacts=th.contactIds.map(k=>t.contacts[k]).filter(Boolean);
+  if(!contacts.length)return;
+  replyBusy=true;islandText=mode==='call'?'On call…':'Typing…';islandIcon=mode==='call'?'fa-solid fa-phone':'fa-solid fa-ellipsis';render();
   try{
-    const w=world(),systemPrompt=`Simulate a private ${mode==='call'?'phone call':'text conversation'} in a fictional roleplay. Respond only as the listed contact(s), never as ${owner.name}. Preserve character personality and the relationship to ${owner.name}. Use Greyhaven Life as authoritative current world/time when available, but do not recite it mechanically. Do not reveal off-screen facts the speaker could not know. ${mode==='call'?'Use natural spoken replies.':'Use realistic concise texting.'} Return JSON only.`;
-    const activeCall=mode==='call'&&callId?t.calls.find(x=>x.id===callId):null;
+    const w=world(),activeCall=mode==='call'&&callId?t.calls.find(x=>x.id===callId):null;
     const conversation=mode==='call'?(activeCall?.transcript||[]):th.messages;
-    const prompt=`PHONE OWNER:\n${owner.name}\n\nPERSONA RELATIONSHIPS:\n${owner.description.slice(0,10000)||'(not found)'}\n\nCONTACTS:\n${JSON.stringify(contacts.map(c=>({name:c.name,character:cardData(c),life:w.people.find(p=>p.name.toLowerCase()===c.name.toLowerCase())||null})))}\n\nGREYHAVEN LIFE:\n${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}\n\nRECENT MAIN RP:\n${recentChat()}\n\n${mode==='call'?'CALL TRANSCRIPT':'THREAD'}:\n${JSON.stringify(conversation.slice(-24).map(m=>({sender:m.sender,text:m.text})))}\n\nGenerate the next plausible ${mode==='call'?'spoken response(s)':'reply/replies'}. Sender must be one of: ${contacts.map(c=>c.name).join(', ')}.`;
-    const schema={type:'object',additionalProperties:false,properties:{messages:{type:'array',minItems:1,maxItems:th.type==='group'?4:2,items:{type:'object',additionalProperties:false,properties:{sender:{type:'string'},text:{type:'string'}},required:['sender','text']}}},required:['messages']};
-    const r=parseJSON(await generate({prompt,systemPrompt,responseLength:900,jsonSchema:schema})),allowed=new Map(contacts.map(c=>[c.name.toLowerCase(),c])),stamp=now().getTime();
-    mutate(cur=>{const target=cur.threads[th.id];if(!target)return;for(const x of r.messages||[]){const c=allowed.get(norm(x.sender).toLowerCase()),text=String(x.text||'').trim();if(!c||!text)continue;if(mode==='call'&&callId){const call=cur.calls.find(v=>v.id===callId);if(call)call.transcript.push({sender:c.name,text,timeMs:stamp})}else{const mirrorId=`mirror:${id()}`;target.messages.push({id:id(),mirrorId,sender:c.name,senderId:c.id,text,timeMs:stamp,read:true,type:'text'});if(target.type==='direct')mirrorMessageToPhone({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,senderName:c.name,text,timeMs:stamp,unread:false,mirrorId})}}},false);
+    let replies=[];
+
+    if(th.type==='direct'){
+      const c=contacts[0];
+      const systemPrompt=`You are ${c.name}, having a private ${mode==='call'?'phone call':'text-message conversation'} with ${owner.name} inside an ongoing fictional roleplay.
+Reply ONLY with what ${c.name} actually ${mode==='call'?'says aloud':'sends as the message'}.
+Do not output JSON, a speaker label, quotation marks, analysis, or stage directions outside the message.
+Preserve ${c.name}'s established personality and relationship with ${owner.name}.
+Use Greyhaven Life as authoritative current world/time context when available.
+Do not claim knowledge ${c.name} could not reasonably have.
+${mode==='call'?'Use natural spoken dialogue.':'Text naturally and concisely; slang/emojis are fine when they fit the character.'}`;
+
+      const prompt=`PHONE OWNER:
+${owner.name}
+
+OWNER / RELATIONSHIP CONTEXT:
+${owner.description.slice(0,10000)||'(not found)'}
+
+CONTACT:
+${JSON.stringify({name:c.name,character:cardData(c),life:w.people.find(p=>p.name.toLowerCase()===c.name.toLowerCase())||null})}
+
+GREYHAVEN LIFE:
+${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
+
+RECENT MAIN RP:
+${recentChat()}
+
+${mode==='call'?'CALL TRANSCRIPT':'TEXT THREAD'}:
+${JSON.stringify(conversation.slice(-24).map(m=>({sender:m.sender,text:m.text})))}
+
+Give ${c.name}'s next ${mode==='call'?'spoken reply':'text reply'} now.`;
+
+      let raw=await generate({prompt,systemPrompt,responseLength:500});
+      let text=cleanPlainReply(raw);
+      if(!text){
+        // Very small second attempt only if the model returned an empty/structured placeholder.
+        raw=await generate({
+          prompt:`Reply as ${c.name} to ${owner.name}'s latest ${mode==='call'?'phone-call line':'text message'}. Return only ${c.name}'s reply text.\n\nRecent conversation:\n${conversation.slice(-10).map(m=>`${m.sender}: ${m.text}`).join('\n')}`,
+          systemPrompt:`You are ${c.name}. Return one natural reply only. No JSON.`,
+          responseLength:300
+        });
+        text=cleanPlainReply(raw);
+      }
+      if(text)replies=[{sender:c.name,text}];
+    }else{
+      const systemPrompt=`Simulate the next messages in this fictional group text thread.
+Return 1-4 lines only. Every line MUST use exactly: Sender Name: message
+Only these senders may respond: ${contacts.map(c=>c.name).join(', ')}
+No JSON, no markdown, no narration.`;
+      const prompt=`PHONE OWNER: ${owner.name}
+CONTACT DATA: ${JSON.stringify(contacts.map(c=>({name:c.name,character:cardData(c),life:w.people.find(p=>p.name.toLowerCase()===c.name.toLowerCase())||null})))}
+GREYHAVEN LIFE: ${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
+THREAD:
+${conversation.slice(-24).map(m=>`${m.sender}: ${m.text}`).join('\n')}
+
+Continue naturally.`;
+      const raw=await generate({prompt,systemPrompt,responseLength:700});
+      replies=parseGroupReply(raw,contacts);
+    }
+
+    if(!replies.length)throw new Error('The model returned no usable phone reply.');
+
+    const allowed=new Map(contacts.map(c=>[c.name.toLowerCase(),c])),stamp=now().getTime();
+    mutate(cur=>{
+      const target=cur.threads[th.id];if(!target)return;
+      for(const x of replies){
+        const c=allowed.get(norm(x.sender).toLowerCase()),text=String(x.text||'').trim();
+        if(!c||!text)continue;
+        if(mode==='call'&&callId){
+          const call=cur.calls.find(v=>v.id===callId);if(call)call.transcript.push({sender:c.name,text,timeMs:stamp});
+        }else{
+          const mirrorId=`mirror:${id()}`;
+          target.messages.push({id:id(),mirrorId,sender:c.name,senderId:c.id,text,timeMs:stamp,read:true,type:'text'});
+          if(target.type==='direct')mirrorMessageToPhone({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,senderName:c.name,text,timeMs:stamp,unread:false,mirrorId});
+        }
+      }
+    },false);
   }catch(e){console.error(`[${GHP_MODULE}] reply`,e);globalThis.toastr?.error?.(`Phone reply failed: ${e?.message||e}`)}
   finally{replyBusy=false;islandText='';islandIcon='';render()}
 }
@@ -293,7 +510,7 @@ function notifCards(){const t=timeline(),p=profile(),n=t.notifications.filter(x=
 function renderLock(){return`<div class="ghp-screen ghp-lock" style="${wallpaper()}">${statusBar()}<main><i class="fa-solid fa-lock"></i><h1>${esc(timeText())}</h1><h2>${esc(dateText())}</h2><section>${notifCards()}</section></main><button class="ghp-unlock" data-unlock>Tap to unlock <i class="fa-solid fa-chevron-up"></i></button></div>`}
 function renderHome(){
   const p=profile(),installed=Object.entries(p.apps).filter(([k,v])=>v&&k!=='settings').map(([k])=>k),dock=['phone','messages','social','snap'].filter(k=>p.apps[k]).slice(0,4),grid=installed.filter(k=>!dock.includes(k)),s=stale(),own=persona();
-  return`<div class="ghp-screen ghp-home" style="${wallpaper()}">${statusBar()}<div class="ghp-widgets"><div><b>${esc(timeText())}</b><span>${esc(dateText(now(),true))}</span></div><button data-refresh class="${s.stale?'stale':''}"><i class="fa-solid fa-arrows-rotate"></i><span>${refreshBusy?'Refreshing…':s.stale?(s.newMessages?`${s.newMessages} RP messages`:'Phone needs refresh'):'Phone up to date'}</span></button></div><div class="ghp-grid">${grid.map(k=>icon(k)).join('')}${icon('settings')}</div><div class="ghp-owner">${avatarHtml({name:own.name,avatar:own.avatar},'small')}<span>${esc(own.name)}'s ${esc(p.deviceName)}</span></div><div class="ghp-dock">${dock.map(k=>icon(k,true)).join('')}</div><div class="ghp-indicator"></div></div>`
+  return`<div class="ghp-screen ghp-home" style="${wallpaper()}">${statusBar()}<div class="ghp-widgets"><div><b>${esc(timeText())}</b><span>${esc(dateText(now(),true))}</span></div><button data-refresh class="${s.stale?'stale':''}"><i class="fa-solid fa-arrows-rotate"></i><span>${refreshBusy?'Refreshing…':s.stale?(s.newMessages>99?'Lots of new RP context':s.newMessages?`${s.newMessages} new RP messages`:'Phone needs refresh'):'Phone up to date'}</span></button></div><div class="ghp-grid">${grid.map(k=>icon(k)).join('')}${icon('settings')}</div><div class="ghp-owner">${avatarHtml({name:own.name,avatar:own.avatar},'small')}<span>${esc(own.name)}'s ${esc(p.deviceName)}</span></div><div class="ghp-dock">${dock.map(k=>icon(k,true)).join('')}</div><div class="ghp-indicator"></div></div>`
 }
 function header(title,sub='',right=''){return`<header class="ghp-app-header"><button data-home><i class="fa-solid fa-chevron-left"></i></button><div><b>${esc(title)}</b>${sub?`<small>${esc(sub)}</small>`:''}</div><span>${right}</span></header>`}
 function empty(iconClass,title,text,action=''){return`<div class="ghp-empty"><i class="${iconClass}"></i><b>${esc(title)}</b><span>${esc(text)}</span>${action}</div>`}
