@@ -1,142 +1,76 @@
-# Greyhaven Phone v1.0.0
+# Greyhaven Phone v1.1.0
 
 A fictional iPhone-style phone simulator for SillyTavern roleplay.
 
-## Architecture
+## v1.1.0
 
-- **Phone history is isolated per SillyTavern chat.**
-- **Each persona has a separate phone inside that chat.**
-- Wallpaper/apps/settings are global per persona.
-- Messages, calls, posts, stories, notes, mail and notifications remain timeline-specific.
-
-Switching from Eldin to Aurora therefore opens Aurora's phone, while another SillyTavern chat gives both of them separate alternate phone histories.
-
-## Greyhaven Life integration
-
-When `window.GreyhavenLife` is available, Greyhaven Phone reuses:
-
-- authoritative RP time
-- scene
-- Present / Off-screen
-- structured place + city/area
-- status and availability
-- shared World Snapshot and freshness state
-- current and upcoming schedules
-- schedule exceptions and their end times
-
-Phone never calls the Greyhaven Life analyzer automatically.
-
-The optional AI Phone Refresh uses the existing Life snapshot/live state plus recent RP context in **one** batch request.
-
-## Apps
-
-### Messages
-- Direct texting
-- Group chats
-- Unread badges
-- Persistent threads
-- AI replies as the selected character(s)
-- Uses character card, persona relationship text, Greyhaven Life and recent main RP
-
-### Phone
-- Recents
-- Incoming/missed calls from Refresh
-- Outgoing calls
-- Lightweight text-based live call mode
+This release keeps the existing app set and focuses on making the working Phone feel more coherent and controllable.
 
 ### Contacts
-Contacts are discovered from:
-1. character names explicitly present in the active persona description/relationship section
-2. Greyhaven Life tracked people
-3. current chat/group participants
-4. manually selected SillyTavern characters
+- Remove a contact from the current phone timeline.
+- Removed contacts are suppressed from automatic relationship/Life/chat discovery.
+- Removed contacts therefore cannot be selected for automatic Phone Refresh activity.
+- A Removed Contacts screen lets you restore them later.
+- Manually adding a removed character restores them.
 
-Per-contact options:
-- nickname
-- favorite
-- mute
-- block
-- precise / approximate / disabled location sharing
+### Conversations
+- Delete an entire conversation from the current phone.
+- Deleted thread content is no longer supplied to Greyhaven Phone generation on that phone.
+- Existing cross-persona mirroring remains intact for new direct messages/calls.
 
-### Social
-Instagram-style fictional feed:
-- AI-generated post text
-- fictional photo descriptions (no actual image generation)
-- captions
-- likes/comments
-- Stories
+### Photo and video messages
+Messages now support fictional photo/video attachments.
 
-Content persists instead of changing every refresh.
+The sender always provides a text description of what the media contains. That description is what the AI understands.
 
-### Snap Map
-Text-first Snap Map powered primarily by Greyhaven Life.
+Optional local files can be selected from the device. Local image/video blobs are stored in IndexedDB and replace the descriptive placeholder visually, while the AI still receives only the written description.
 
-### Calendar
-Reads the active persona's Greyhaven Life current/upcoming schedules and exceptions, including exact exception end times when available.
+Media metadata mirrors across persona phones in the same RP timeline.
 
-### Photos
-Collects fictional visual entries from posts and Stories.
+### Request Photo / Request Video
+The Messages `+` menu can arm the next text as a photo or video request.
 
-### Notes
-Local notes for the active persona in this timeline. AI does not invent secret notes automatically.
+A request is not forced compliance. The contacted character may:
+- send the requested media,
+- send media plus text,
+- reply with text only,
+- tease,
+- refuse.
 
-### Mail
-Disabled by default. Refresh may create relevant fictional mail only when enabled and context supports it.
+Characters may also spontaneously send fictional photo/video messages when it makes sense.
 
-### Settings
-- wallpaper presets
-- optional custom wallpaper URL
-- Lock Screen
-- notification previews
-- installed apps
-- manual/stale-on-open AI refresh
-- stale threshold
-- max events per refresh
-- quiet/normal/busy background activity
-- reset current phone timeline
+### Better Phone Refresh continuity
+AI Phone Refresh receives a bounded tail of each existing thread, including its last activity time.
 
-## UI
+Recent new messages should therefore continue a topic or feel like believable double texts instead of abruptly starting unrelated conversations.
 
-Modern iPhone-inspired UI:
-- Dynamic Island
-- Lock Screen
-- fictional Greyhaven Life clock
-- notification cards
-- app grid
-- translucent dock
-- app badges
-- edge-to-edge layout on iPhone
-- framed device presentation on desktop
+### Stricter location evidence
+A phone owner's location is never treated as evidence that unrelated contacts are in the same place.
 
-No Apple image assets are bundled.
+Location-specific posts/messages require evidence belonging to that contact, such as:
+- their Greyhaven Life state,
+- scenario/recent RP mentioning them,
+- their own world-state location evidence.
 
-## AI Refresh
+Without evidence, ambient content should stay geographically neutral.
 
-Manual by default.
+### iPhone Home Indicator
+The extension's fake white gesture bar is shown on Lock Screen/Home Screen only. It is no longer drawn inside apps, where it could overlap Messages or other controls.
 
-One request can generate zero or more new:
-- messages
-- calls
-- Social posts
-- Stories
-- social/Snap notifications
-- Mail
+## Architecture
 
-The model sees:
-- allowed relevant contacts only
-- Greyhaven Life World Snapshot + live world state
-- recent main RP
-- existing thread list
-- compact recent phone history
+- Phone history is isolated per SillyTavern chat.
+- Each persona has a separate phone inside that chat.
+- Direct messages/calls can be mirrored between persona-owned phones inside the same timeline.
+- Wallpaper/apps/settings are global per persona.
+- Greyhaven Phone reuses Greyhaven Life clock/world/schedule state when available.
+- Phone Refresh remains a single optional AI pass.
 
-It is instructed not to repeat events, and the extension also keeps a rolling duplicate-key cache.
+## Existing apps
 
-Reading apps or old phone content costs no tokens.
+Messages, Phone, Contacts, Social, Snap Map, Calendar, Photos, Notes, Mail, Settings.
 
-AI is used only for:
-- Phone Refresh
-- direct fictional text replies
-- fictional call replies
+No new apps were added in v1.1.0.
 
 ## Installation
 
@@ -151,79 +85,14 @@ README.md
 
 Minimum SillyTavern version: 1.13.3.
 
-## Suggested first test
+## Suggested v1.1 test
 
-1. Keep Greyhaven Life enabled.
-2. Open an RP chat with a useful Life state/World Snapshot.
-3. Open Extensions -> Greyhaven Phone.
-4. Unlock the phone.
-5. Open Contacts -> Discover relevant contacts.
-6. Open Snap Map and verify Life locations.
-7. Open Calendar and verify schedules / exceptions.
-8. Open Messages, create a direct chat with Aurora, and send a short message.
-9. Return Home and press Phone Refresh.
-10. Check Messages, Social and Phone for plausible new activity.
-11. Switch SillyTavern persona to Aurora and reopen Phone. Aurora should have a separate phone timeline.
-
-## Public API
-
-```js
-GreyhavenPhone.open()
-GreyhavenPhone.close()
-GreyhavenPhone.refresh()
-GreyhavenPhone.getProfile()
-GreyhavenPhone.getTimeline()
-GreyhavenPhone.getContacts()
-GreyhavenPhone.getActivePersona()
-GreyhavenPhone.seedContacts()
-```
-
-## Cross-persona continuity
-
-Greyhaven Phone keeps separate devices for each persona, but direct phone events remain coherent inside the same SillyTavern timeline.
-
-Example:
-
-1. Eldin opens his phone and texts Aurora.
-2. Aurora replies.
-3. Later you switch SillyTavern persona to Aurora.
-4. Aurora's phone contains the same direct conversation from her side, including unread incoming messages where appropriate.
-
-Direct call records are mirrored as well.
-
-When Phone Refresh generates a Social post or Story authored by a character, that authored content is also stored on that character's latent phone so it can appear as their own content if you later switch to that persona.
-
-A latent phone is created only when necessary. When that character is later selected as an actual SillyTavern persona, the latent phone is reused instead of starting a second blank device.
-
-## Main-roleplay continuity
-
-Phone conversations are not an isolated toy.
-
-Greyhaven Phone injects a small, relevant continuity summary immediately before normal SillyTavern generation.
-
-It includes only recent phone conversations/calls relevant to:
-- the current character/group members
-- contacts explicitly mentioned in the newest user message
-
-This means a promise made by text can remain relevant when the characters meet physically later.
-
-Private phone events are marked as knowledge for their participants only; they are not treated as universal knowledge.
-
-This continuity injection does **not** make another AI request. It reuses the already stored phone state.
-
-## Exception end dates
-
-Greyhaven Phone does not require a Greyhaven Life update for v1.0.
-
-The current Greyhaven Life public API already exposes each tracked person's schedule exceptions. Calendar therefore shows the exact exception end date/time when available.
-
-A future Greyhaven Life polish release can separately make the main roleplay prompt state the exact exception end more explicitly.
-
-## v1.0.1 hotfix
-
-Fixes three first-release issues found during real iPhone testing:
-
-- **Persona avatar:** Phone now resolves the active SillyTavern persona through `power_user.personas` and `getThumbnailUrl('persona', ...)` instead of reading an arbitrary avatar from the DOM.
-- **AI replies/calls:** Direct messages and calls now use plain raw text generation instead of Structured Outputs, so models/providers without JSON-schema support no longer show a typing indicator and then return nothing.
-- **Phone Refresh:** Refresh uses ordinary JSON-in-text generation rather than Structured Outputs. Normal mode aims for at least one event; Busy aims for several. If the model still returns no usable events (or the generation fails), a safe ambient fallback can add harmless fictional Social/Snap/message activity so the phone is not permanently empty.
-- **Stale widget:** Very large old chats no longer display giant counters like `550 RP messages`; the widget uses a compact "Lots of new RP context" label.
+1. Remove a relationship contact and run Discover + Phone Refresh. They should stay removed.
+2. Restore the contact from Removed Contacts.
+3. Delete a direct conversation and reopen that contact; it should start empty.
+4. Send a fictional photo with description only.
+5. Send another photo with a local image selected and confirm the image appears in the UI.
+6. Request a photo, then write the actual request. Verify the character can comply or refuse naturally.
+7. Refresh after an active texting conversation and check whether any double text follows the existing topic.
+8. Put the phone owner on a trip while an unrelated contact remains elsewhere/unknown; refresh Social and verify the contact is not automatically teleported.
+9. Open Messages with the iPhone keyboard and verify there is no extension-drawn white gesture bar overlapping the composer.
