@@ -160,3 +160,9 @@ body.ghp-open{overflow:hidden!important}
 .ghp-message-edit textarea{
   min-height:110px;
 }
+
+/* v1.2.1 — delivery/boundary states */
+.ghp-not-delivered{display:flex;align-items:center;justify-content:flex-end;gap:5px;margin:4px 7px 0;color:#ff6961;font-size:.72rem;font-weight:600}
+.ghp-remote-blocked{display:flex;align-items:center;gap:12px;width:min(92%,520px);margin:10px auto 18px;padding:12px 14px;border:1px solid rgba(255,105,97,.22);border-radius:16px;background:rgba(255,105,97,.08);text-align:left}
+.ghp-remote-blocked>i{color:#ff7b73;font-size:1.05rem}.ghp-remote-blocked span{display:flex;flex-direction:column;gap:2px}.ghp-remote-blocked small{color:var(--ghp-muted,#92949b)}
+.ghp-thread-tools button:disabled,.ghp-contact-actions button:disabled{opacity:.35}

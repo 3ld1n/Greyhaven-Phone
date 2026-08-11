@@ -1,160 +1,95 @@
-# Greyhaven Phone v1.2.0
+# Greyhaven Phone v1.2.1
 
-A fictional iPhone-style phone simulator for SillyTavern roleplay.
+Focused behavior hotfix for Greyhaven Phone v1.2.x.
 
-## v1.2.0 — Behavior, identity, messaging controls and RP continuity
+## What changed
 
-This release keeps the existing app set. It focuses on making conversations feel character-specific and making phone events participate in the main roleplay chronologically.
+### 1. Media promises now have to become real media
+Characters can still refuse a photo/video request when it makes sense.
 
-### Character identity lock
-Phone generation now separates the two sides of a conversation explicitly:
+But when a character has already agreed, offered, promised, taken, or claimed to send a requested photo/video, Greyhaven Phone now treats that as a pending media commitment.
 
-- the active phone owner/persona,
-- the contact who is replying.
+If the user prompts them again:
+- the character can genuinely change their mind and say so,
+- or they should follow through with an actual `PHOTO:` / `VIDEO:` attachment,
+- they should not endlessly repeat "okay I'll send it" without ever attaching anything.
 
-A contact is told never to adopt the phone owner's identity, name, history, relationships or possessions. If a generated direct-message reply still appears to swap identities, Greyhaven Phone automatically retries once with a corrective identity prompt.
+An extra repair pass is used only when the model produces an ambiguous "I sent it / I'll send it" style response without the required media payload.
 
-### Character-specific texting voice
-Direct messages and Phone Refresh now ask the model to preserve the actual character's texting voice instead of defaulting to polished assistant-style prose.
+### 2. Same-line media protocol parsing
+Replies like:
 
-The prompt can use:
-- character card description/personality/example messages,
-- recent messages written by that same contact,
-- the current relationship and conversation mood.
+`TEXT: okay fine 😏 PHOTO: a selfie in a yellow dress`
 
-Lowercase, abbreviations, slang, profanity, emojis, double-texting and short messages are allowed when they fit the character. Mature/formal characters can still naturally text more formally.
+are now parsed correctly even when the model puts both protocol items on one line.
 
-### Photo/video refusal bug fix
-Explicit `TEXT:`, `PHOTO:` and `VIDEO:` protocol replies are now authoritative.
+### 3. No more fake photo cards made from promises/refusals
+A line such as:
 
-A refusal such as `TEXT: I'm not comfortable sending that` cannot also become a fake Photo card simply because the user's request mentioned a photo.
+`omg okay fine, I'll send u a pic`
 
-Plain-text media inference is kept only for genuinely positive send cues such as a character clearly saying they are sending/showing a photo or video.
+remains a text message unless the model actually supplies a photo description.
 
-### Balanced media willingness
-Media requests are neither forced compliance nor forced refusal.
+Refusals remain text-only.
 
-The prompt considers relationship, trust, consent, current mood, teasing level and recent conversation. Close romantic/intimate or mutually flirty dynamics may comply more naturally when it fits, while low-trust or mismatched requests can still be refused.
+Plain-text fallback media detection now requires wording that clearly indicates an attachment was delivered now, such as "here's..." or "just sent...".
 
-### Long-press message controls
-Long-press a message bubble to open message actions.
+### 4. Stronger social boundaries
+Characters no longer have to keep a friendly conversation going forever.
 
-For messages sent by the currently active persona:
-- Edit
-- Unsend for everyone
-- Delete from this phone
+The model can now react in-character to disrespect, harassment, creepy behavior, hostility, or repeatedly ignored boundaries.
 
-For messages sent by another character:
-- Delete from this phone
+Depending on the actual character and relationship, they may:
+- become angry,
+- swear,
+- mock or insult back,
+- become cold,
+- give a warning,
+- leave the owner on read,
+- eventually block the owner.
 
-To edit/unsend the other character's message, switch to that character's persona first.
+Normal flirting, consensual teasing, disagreement, or one awkward message should not automatically trigger blocking.
 
-Edits and unsends use the shared mirrored-message ID so the change is synchronized across the corresponding persona phone copies.
+### 5. Leave-on-read state
+The model can return `ACTION: IGNORE`.
 
-### Better Messages navigation
-The back arrow now behaves like an app navigation stack:
+When that happens:
+- no reply bubble is added,
+- no typing indicator is shown,
+- the character remains in an "ignoring" state,
+- a later message can still cause them to keep ignoring, block, or re-engage if the situation changes.
 
-- Conversation -> Messages list
-- Messages list -> Home
+### 6. Character-initiated blocking
+The model can return `ACTION: BLOCK`.
 
-The same pattern is used for other nested screens such as Contacts and Social instead of immediately throwing the user back to the Home Screen.
+When that happens:
+- the contact becomes unavailable on the sender's phone,
+- new messages are not delivered,
+- calls do not connect,
+- the blocking character's own mirrored phone records that they blocked the sender,
+- switching to the blocking character's persona and manually unblocking the sender will synchronize the relationship back.
 
-### Phone <-> main roleplay continuity
-Greyhaven Phone now keeps a small structured continuity ledger for important phone events.
+A final warning text can still be delivered immediately before the block if the model chooses.
 
-The main SillyTavern generation prompt can receive:
+### 7. Failed delivery UI
+Messages sent after a character has blocked the current persona show a small `Not Delivered` state.
 
-#### Fresh phone events
-Phone events that happened after the latest rendered main-RP character output.
+### 8. Phone ↔ RP chronology retained
+The v1.2.0 continuity system is unchanged:
+- newer phone state can advance the main RP,
+- newer main-RP state overrides older phone state,
+- unresolved plans can remain relevant,
+- stale transient states do not drag characters backward in time.
 
-Example:
-1. Main RP last shows Aurora in bed.
-2. On the phone, Aurora tells Jack she is getting into the bath and later says she is bathing.
-3. The next main-RP generation receives that newer phone state and should treat Aurora as already being in the bath rather than replaying the older bed state.
+## No new apps
+v1.2.1 does not add any new phone apps. It only improves the existing messaging behavior.
 
-#### Older plans / commitments
-Concrete unresolved-looking plans can remain useful after the immediate phone state becomes historical.
+## Recommended tests
 
-Examples:
-- "pick me up at 8"
-- dinner plans
-- "I'll call after work"
-- an agreed meeting place
-
-#### Older phone history
-Older phone facts can remain historical context but are explicitly not treated as the character's current physical state.
-
-### Chronology guard
-Newer main roleplay always wins over older phone state.
-
-So if:
-1. Aurora says on the phone that she is in the bath,
-2. a later main-RP message has her leave the bathroom and go to bed,
-
-then the old bath message is historical. Future generations must not pull her back into the bathtub simply because it is still the latest message inside that phone thread.
-
-The continuity system uses both RP timestamps and an RP-render checkpoint so stale transient states such as bathing, driving, sleeping or being at work do not remain permanently current.
-
-Private phone information is also marked as participant-only context rather than knowledge every character automatically shares.
-
-### Shared continuity API
-Greyhaven Phone exposes structured continuity for Greyhaven Life or future extensions without requiring another AI analysis pass:
-
-- `GreyhavenPhone.getContinuitySnapshot()`
-- `GreyhavenPhone.getPromptSummary()`
-
-This lets future world-state features reuse the same phone continuity instead of spending tokens to analyze it again.
-
-## v1.1.x features retained
-
-- Remove and restore contacts
-- Delete whole conversations
-- Photo/video send and request flows
-- Local photo/video previews stored in IndexedDB
-- Correct local media aspect ratios
-- Attach/replace a local preview on fictional received media
-- Cross-persona direct-message/call mirroring
-- Thread-aware Phone Refresh
-- Strict per-contact location evidence / anti-teleport rules
-- Fake iPhone Home Indicator only on Lock/Home screens
-- Greyhaven Life clock/world/schedule integration when available
-
-## Existing apps
-
-Messages, Phone, Contacts, Social, Snap Map, Calendar, Photos, Notes, Mail, Settings.
-
-No new apps are introduced in v1.2.0.
-
-## Architecture
-
-- Phone history is isolated per SillyTavern chat.
-- Each persona has a separate phone inside that chat.
-- Direct messages/calls can mirror between persona-owned phones in the same timeline.
-- Wallpaper/apps/settings are global per persona.
-- Phone Refresh remains a bounded optional AI pass.
-- Important phone continuity is stored structurally rather than requiring a second analysis call.
-
-## Installation
-
-Repository root:
-
-```text
-manifest.json
-index.js
-style.css
-README.md
-```
-
-Minimum SillyTavern version: 1.13.3.
-
-## Suggested v1.2.0 tests
-
-1. Ask a low-trust contact for a photo and verify a refusal stays text-only.
-2. Text Bianca/another character from Jack and verify the contact never starts claiming they are Jack.
-3. Compare Chloe/Aurora/Jack texting styles and verify they do not all sound like the same formal assistant.
-4. Long-press your own message, edit it, then switch persona and confirm the mirrored phone copy changed too.
-5. Long-press your own message and test `Unsend for everyone`.
-6. Open a conversation, press Back and confirm it returns to the Messages list; press Back again to return Home.
-7. Main RP: leave Aurora in bed. Phone: have her explicitly move to the bath. Return to RP and verify the next generation knows the newer phone state.
-8. Then move Aurora from the bath to bed in main RP. Generate again and confirm the older phone bath state does not override the newer RP.
-9. Make a concrete phone plan such as meeting someone at 20:00. Generate later RP and verify the unresolved plan can still be remembered.
+1. Ask a character for a photo. Let them agree, then prompt them again. They should either actually attach it or clearly change their mind instead of stalling indefinitely.
+2. Test a refusal. It should stay text-only.
+3. Test a model response that contains `TEXT:` and `PHOTO:` on the same line.
+4. Be rude to a low-trust contact. They should be allowed to react sharply rather than politely continuing forever.
+5. Keep crossing a clearly stated boundary. The character should be able to leave you on read.
+6. Continue pushing aggressively after that. Depending on the character, they may block you.
+7. Switch to the blocking character's persona and manually unblock the other person; the mirrored phone state should synchronize.
