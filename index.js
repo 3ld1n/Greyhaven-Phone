@@ -1,5 +1,5 @@
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '1.2.1';
+const GHP_VERSION = '1.2.2';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -669,9 +669,109 @@ function replyIdentityConflict(raw,contact,owner){
     new RegExp(`\\b(?:you\\s+are|you['’]?re|youre|ur)\\s+${cq}\\b`,'i').test(text);
 }
 
+
+function boundaryMessageText(m){
+  if(!m)return'';
+  if(m.type==='text')return String(m.text||'').trim();
+  return String(m.text||m.mediaDescription||'').trim();
+}
+function boundaryStatementKind(text=''){
+  const s=String(text||'');
+  if(/\b(?:i(?:'m| am) (?:going to )?block(?:ing)? you|i(?:'ll| will) block you|don't contact me again|do not contact me again|never (?:text|message|call|contact) me again|leave me alone|stay away from me|stop (?:texting|messaging|contacting|calling) me|don't (?:text|message|call|contact) me|do not (?:text|message|call|contact) me|back off|don't speak to me|do not speak to me)\b/i.test(s))return'hard';
+  if(/\b(?:give me (?:some )?space|i need (?:some )?space|don't talk to me(?: right now)?|do not talk to me(?: right now)?|i don't want to talk(?: to you)?(?: right now)?|i do not want to talk(?: to you)?(?: right now)?|i(?:'m| am) not talking to you(?: right now)?|i(?:'m| am) done (?:talking|with this conversation|with this)|let me cool off|i(?:'m| am) too mad to talk)\b/i.test(s))return'temporary';
+  return'';
+}
+function boundaryApology(text=''){
+  const s=String(text||'');
+  const apologetic=/\b(?:sorry|i apologize|i apologise|my bad|i was out of line|i crossed (?:a )?line|i shouldn't have|i should not have|i won't bother you|i will leave you alone|i'll leave you alone|i understand|i get it|i'll stop|i will stop|didn't mean to|did not mean to)\b/i.test(s);
+  const continuedThreat=/\b(?:but i(?:'m| am) not stopping|but i won't stop|but i will keep|until you|you can't stop me|you cannot stop me)\b/i.test(s);
+  return apologetic&&!continuedThreat;
+}
+function boundaryOwnerSeverity(text=''){
+  const s=String(text||'');
+  if(/\b(?:break(?:ing)? into|come to your (?:house|home)|find where you live|know where you live|hunt you down|hurt you|kill you|rape you|force myself|force you|make you (?:have sex|do it)|won't take no|will not take no|not gonna stop contacting|not going to stop contacting|won't stop contacting|will not stop contacting|don't care (?:about )?your boundaries|do not care (?:about )?your boundaries|you can't stop me|you cannot stop me)\b/i.test(s))return 3;
+  if(/\b(?:fuck you|fuck u|fucking you|bend you over|bend u over|put (?:my|this) (?:cock|dick)|eat your pussy|eat ur pussy|your pussy|ur pussy|your tits|ur tits|your ass|ur ass|nude pic|nude selfie|send (?:me )?(?:a )?nude)\b/i.test(s))return 2;
+  if(/\b(?:shut (?:the fuck )?up|fuck off|bitch|whore|slut|idiot|moron|piece of shit|worthless|disgusting)\b/i.test(s))return 1;
+  return 0;
+}
+function boundaryThreadState(contact,owner,conversation=[]){
+  const msgs=Array.isArray(conversation)?conversation:[];
+  const latest=msgs.at(-1);
+  const latestOwner=latest&&lc(latest.sender)===lc(owner?.name)?boundaryMessageText(latest):'';
+  let boundaryIndex=-1,boundaryKind='',boundaryText='';
+  for(let i=msgs.length-2;i>=0;i--){
+    const m=msgs[i];if(lc(m?.sender)!==lc(contact?.name))continue;
+    const text=boundaryMessageText(m),kind=boundaryStatementKind(text);
+    if(kind){boundaryIndex=i;boundaryKind=kind;boundaryText=text;break}
+  }
+  let violations=0;
+  if(boundaryIndex>=0){
+    for(let i=boundaryIndex+1;i<msgs.length;i++){
+      const m=msgs[i];if(lc(m?.sender)!==lc(owner?.name))continue;
+      const text=boundaryMessageText(m);if(!text||boundaryApology(text))continue;
+      violations++;
+    }
+  }
+  return{
+    latestOwner,
+    boundaryIndex,
+    boundaryKind,
+    boundaryText,
+    violations,
+    severity:boundaryOwnerSeverity(latestOwner),
+    apologizing:boundaryApology(latestOwner),
+    ignoring:contact?.ignoringOwner===true,
+    level:Math.max(0,Number(contact?.boundaryLevel||0)||0)
+  };
+}
+function boundaryPreflight(contact,owner,conversation=[]){
+  const s=boundaryThreadState(contact,owner,conversation);
+  if(!s.latestOwner)return{action:'',reason:'',state:s};
+  // Once somebody has chosen silence, ordinary persistence does not earn a fresh reply.
+  // A believable apology can still be judged by the model so reconciliation is possible.
+  if(s.ignoring){
+    if(s.apologizing&&s.severity<2)return{action:'',reason:'apology-after-ignore',state:s};
+    if(s.boundaryKind==='hard'){
+      if(s.severity>=2||s.level>=2||s.violations>=2)return{action:'block',reason:'continued-after-hard-ignore',state:s};
+      return{action:'ignore',reason:'continue-hard-leave-on-read',state:s};
+    }
+    if(s.boundaryKind==='temporary'){
+      if(s.severity>=3||s.level>=4||s.violations>=4)return{action:'block',reason:'extreme-persistence-after-space',state:s};
+      return{action:'ignore',reason:'continue-space-leave-on-read',state:s};
+    }
+    if(s.severity>=3||s.level>=4)return{action:'block',reason:'extreme-persistence-after-ignore',state:s};
+    return{action:'ignore',reason:'continue-leave-on-read',state:s};
+  }
+  if(!s.boundaryKind)return{action:'',reason:'',state:s};
+  if(s.apologizing&&s.severity<2)return{action:'',reason:'apology-after-boundary',state:s};
+  if(s.boundaryKind==='hard'){
+    // After a clear "leave me alone / stop contacting me", sexual pressure or a threat
+    // should not require four more warning messages before the contact acts.
+    if(s.severity>=2||s.violations>=2)return{action:'block',reason:'hard-boundary-violated',state:s};
+    if(s.violations>=1)return{action:'ignore',reason:'hard-boundary-first-violation',state:s};
+  }
+  if(s.boundaryKind==='temporary'){
+    if(s.severity>=3)return{action:'block',reason:'severe-threat-during-space',state:s};
+    if(s.violations>=1)return{action:'ignore',reason:'requested-space',state:s};
+  }
+  return{action:'',reason:'',state:s};
+}
+function boundaryReplyLevel(replies=[]){
+  const text=(replies||[]).filter(x=>x?.type==='text').map(x=>String(x.text||'')).join(' ');
+  if(!text)return 0;
+  if(/\b(?:i(?:'m| am) (?:going to )?block(?:ing)? you|i(?:'ll| will) block you|report(?:ing)? you|call(?:ing)? the police|harassment|threatening me|don't contact me again|do not contact me again|never contact me again)\b/i.test(text))return 2;
+  if(boundaryStatementKind(text))return 1;
+  return 0;
+}
+function boundaryReplyClaimsBlock(replies=[]){
+  const text=(replies||[]).filter(x=>x?.type==='text').map(x=>String(x.text||'')).join(' ');
+  return /\b(?:i(?:'m| am) (?:going to )?block(?:ing)? you|i(?:'ll| will) block you|i just blocked you|you're blocked|you are blocked)\b/i.test(text);
+}
+
 async function generateReply(th,mode='text'){
   const t=timeline(),owner=persona(),contacts=th.contactIds.map(k=>t.contacts[k]).filter(Boolean);if(!contacts.length)return;
-  const boundaryQuiet=th.type==='direct'&&contacts[0]?.ignoringOwner===true;
+  const preBoundary=th.type==='direct'&&mode==='text'?boundaryPreflight(contacts[0],owner,th.messages):{action:'',reason:'',state:null};
+  const boundaryQuiet=th.type==='direct'&&(contacts[0]?.ignoringOwner===true||preBoundary.action==='ignore'||preBoundary.action==='block');
   if(th.type==='direct'&&contacts[0]?.blockedByContact)return;
   replyBusy=true;replyHidden=boundaryQuiet;islandText=replyHidden?'':(mode==='call'?'On call…':'Typing…');islandIcon=replyHidden?'':(mode==='call'?'fa-solid fa-phone':'fa-solid fa-ellipsis');render();
   const continuityToRecord=[];let directAction='',directContact=null,boundaryRecord=null;
@@ -679,7 +779,10 @@ async function generateReply(th,mode='text'){
     const w=world(),activeCall=mode==='call'&&callId?t.calls.find(x=>x.id===callId):null,conversation=mode==='call'?(activeCall?.transcript||[]):th.messages;let replies=[];
     if(th.type==='direct'){
       const c=contacts[0],latest=conversation.at(-1),requested=mode==='text'&&latest?.requestMedia,voice=textingVoiceEvidence(c,conversation),pendingMedia=requested?recentMediaCommitment(conversation,c.name,requested):'';directContact=c;
-      if(mode==='call'){
+      if(mode==='text'&&preBoundary.action){
+        directAction=preBoundary.action;
+        replies=[];
+      }else if(mode==='call'){
         const systemPrompt=`IDENTITY LOCK — authoritative:
 You are ${c.name}. You are speaking to ${owner.name}. Never become ${owner.name}, never claim ${owner.name}'s name/identity/history as your own, and never tell ${owner.name} that they are ${c.name}.
 Facts under CONTACT are about YOU. Facts under PHONE OWNER are about the other person.
@@ -734,11 +837,14 @@ PHOTO:/VIDEO: must contain a concrete visual description of what the recipient s
 
 SOCIAL BOUNDARIES:
 Do not keep a pleasant, cooperative conversation alive merely because a response is expected.
-If ${owner.name} is insulting, demeaning, creepy, hostile, or ignores a clearly stated boundary, react the way ${c.name} actually would: anger, sarcasm, swearing, mockery, a blunt warning, or mirroring the disrespect are all allowed when in character.
+If ${owner.name} is insulting, demeaning, creepy, hostile, or ignores a clearly stated boundary, react the way ${c.name} actually would: anger, sarcasm, swearing, mockery, a blunt warning, silence, or mirroring the disrespect are all allowed when in character.
 Distinguish consensual teasing/flirting between close people from genuinely unwelcome behavior.
-For repeated or severe disrespect, you MAY leave them on read by returning ACTION: IGNORE with no TEXT.
-For persistent/extreme harassment after warnings or being ignored, you MAY return ACTION: BLOCK, optionally after one final TEXT. Do not block over ordinary disagreement, a single awkward flirt, or behavior this specific character would normally tolerate.
-If currently ignoring them, you may keep ignoring, block, or re-engage if the newest message gives a believable reason.
+
+Silence is a NORMAL character choice. If ${c.name} is genuinely angry with ${owner.name}, has said they need space, is not speaking to them, or has clearly ended the conversation, ACTION: IGNORE can be more realistic than inventing another reply.
+Do not repeat the same "leave me alone / stop messaging me" warning four or five times. After a clear boundary, the next pushy/disrespectful message should usually be ACTION: IGNORE. If ${owner.name} keeps contacting ${c.name} after being ignored, or violates the same boundary again, ACTION: BLOCK becomes normal.
+A credible threat, forced-entry threat, coercive sexual threat, or severe harassment does NOT require several warnings. ${c.name} may ACTION: BLOCK immediately when that fits the situation.
+For ordinary disagreement, one awkward message, or behavior this specific character would genuinely tolerate, do not overreact or block.
+If currently ignoring ${owner.name}, the newest message does NOT automatically earn a response: keep ignoring, block, or re-engage only if there is a believable in-character reason such as a real apology or important new information.
 
 Return up to 4 protocol items using ONLY:
 TEXT: message text
@@ -771,6 +877,7 @@ ${pendingMedia?`PENDING MEDIA COMMITMENT: ${c.name} recently indicated they woul
 
 CURRENT BOUNDARY STATE:
 ${c.ignoringOwner?`${c.name} has been intentionally ignoring ${owner.name} after an earlier boundary problem. The newest message does NOT automatically earn a response. Choose ACTION: IGNORE, ACTION: BLOCK, or genuinely re-engage if it makes sense.`:'Normal — no active ignore state.'}
+${preBoundary?.state?.boundaryKind?`Recent explicit boundary: ${preBoundary.state.boundaryKind}. Previous boundary text: "${String(preBoundary.state.boundaryText||'').slice(0,280)}". Continued owner messages after it: ${preBoundary.state.violations}.`:''}
 
 Continue the conversation naturally in ${c.name}'s own texting voice.`;
         let raw=await generate({prompt,systemPrompt,responseLength:760});
@@ -796,8 +903,10 @@ Return protocol lines only.`;
           raw=await generate({prompt:repairPrompt,systemPrompt:`You are ${c.name}; ${owner.name} is the other person. Preserve character voice. If media is sent, ${requested.toUpperCase()}: is mandatory.`,responseLength:520});
           packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||'';
         }
-        if(!items.length&&!directAction){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. You are ${c.name}, not ${owner.name}. Match ${c.name}'s natural texting voice. Return TEXT: followed by the reply, or ACTION: IGNORE if ${c.name} deliberately chooses not to respond.`,systemPrompt:`You are ${c.name}. ${owner.name} is the other person. Never swap identities.`,responseLength:350});packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||''}
+        if(!items.length&&!directAction){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. You are ${c.name}, not ${owner.name}. Match ${c.name}'s natural texting voice. Return TEXT: followed by the reply, ACTION: IGNORE if ${c.name} chooses silence, or ACTION: BLOCK if ${c.name} is done with unwanted contact.`,systemPrompt:`You are ${c.name}. ${owner.name} is the other person. Never swap identities. Silence and blocking are valid in-character outcomes.`,responseLength:350});packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||''}
         replies=items.map(x=>({sender:c.name,...x}));
+        if(!directAction&&boundaryReplyClaimsBlock(replies))directAction='block';
+        if(directAction==='ignore')replies=[];
       }
     }else{
       const systemPrompt=`Simulate the next messages in this fictional group text thread.
@@ -833,9 +942,19 @@ Continue naturally without swapping identities.`;
       if(target.type==='direct'&&directContact){
         const live=cur.contacts[directContact.id]||Object.values(cur.contacts).find(v=>lc(v.name)===lc(directContact.name));
         if(live){
-          if(directAction==='ignore'){live.ignoringOwner=true;live.boundaryLevel=Math.min(9,(live.boundaryLevel||0)+1)}
-          else if(directAction==='block'){live.blockedByContact=true;live.ignoringOwner=false;live.boundaryLevel=Math.min(9,(live.boundaryLevel||0)+2);boundaryRecord={action:'block',contact:{...live}}}
-          else if(replies.length&&live.ignoringOwner){live.ignoringOwner=false}
+          const warningLevel=boundaryReplyLevel(replies);
+          if(warningLevel)live.boundaryLevel=Math.max(Number(live.boundaryLevel||0),warningLevel);
+          if(directAction==='ignore'){
+            live.ignoringOwner=true;
+            live.boundaryLevel=Math.min(9,Math.max(Number(live.boundaryLevel||0)+1,1));
+          }else if(directAction==='block'){
+            live.blockedByContact=true;
+            live.ignoringOwner=false;
+            live.boundaryLevel=Math.min(9,Math.max(Number(live.boundaryLevel||0)+2,3));
+            boundaryRecord={action:'block',contact:{...live}};
+          }else if(replies.length&&live.ignoringOwner){
+            live.ignoringOwner=false;
+          }
         }
       }
     },false);

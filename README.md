@@ -1,95 +1,94 @@
-# Greyhaven Phone v1.2.1
+# Greyhaven Phone v1.2.2
 
-Focused behavior hotfix for Greyhaven Phone v1.2.x.
+Focused social-boundary hotfix for Greyhaven Phone.
 
-## What changed
+## Main changes
 
-### 1. Media promises now have to become real media
-Characters can still refuse a photo/video request when it makes sense.
+### Leave on read is now much easier to trigger
+Silence is now treated as a normal social response, not a rare edge case.
 
-But when a character has already agreed, offered, promised, taken, or claimed to send a requested photo/video, Greyhaven Phone now treats that as a pending media commitment.
+A character can leave the phone owner on read when:
+- they are genuinely angry,
+- they explicitly say they need space,
+- they say they do not want to talk,
+- they say they are done with the conversation,
+- they have already told the owner to leave them alone,
+- the owner keeps pushing after a clear boundary.
 
-If the user prompts them again:
-- the character can genuinely change their mind and say so,
-- or they should follow through with an actual `PHOTO:` / `VIDEO:` attachment,
-- they should not endlessly repeat "okay I'll send it" without ever attaching anything.
+When Greyhaven Phone chooses a deterministic leave-on-read state:
+- there is no reply bubble,
+- there is no typing indicator,
+- the contact remains in an ignoring state,
+- later messages may continue to be ignored.
 
-An extra repair pass is used only when the model produces an ambiguous "I sent it / I'll send it" style response without the required media payload.
+A real apology can still reopen the conversation naturally.
 
-### 2. Same-line media protocol parsing
-Replies like:
+### Blocking escalates sooner after a clear boundary
+The extension no longer waits for four or five nearly identical warning messages.
 
-`TEXT: okay fine 😏 PHOTO: a selfie in a yellow dress`
+Examples:
+- Contact says "leave me alone" -> ordinary continued pushing is likely to be left on read.
+- Contact says "leave me alone" -> owner immediately sends explicit sexual pressure or severe harassment -> the contact can block immediately.
+- Contact leaves the owner on read after a hard boundary -> continued persistence can quickly become a block.
+- A credible threat, forced-entry threat, coercive threat, or severe harassment can justify blocking without several warnings.
 
-are now parsed correctly even when the model puts both protocol items on one line.
+Temporary anger is treated differently:
+- "I need space / I don't want to talk right now" normally causes silence first,
+- it does not immediately become a block just because one or two ordinary follow-up messages arrive,
+- extreme persistence or a serious threat can still escalate.
 
-### 3. No more fake photo cards made from promises/refusals
-A line such as:
-
-`omg okay fine, I'll send u a pic`
-
-remains a text message unless the model actually supplies a photo description.
-
-Refusals remain text-only.
-
-Plain-text fallback media detection now requires wording that clearly indicates an attachment was delivered now, such as "here's..." or "just sent...".
-
-### 4. Stronger social boundaries
-Characters no longer have to keep a friendly conversation going forever.
-
-The model can now react in-character to disrespect, harassment, creepy behavior, hostility, or repeatedly ignored boundaries.
-
-Depending on the actual character and relationship, they may:
-- become angry,
+### Model + deterministic boundary logic
+The model still decides personality-specific reactions and can:
 - swear,
-- mock or insult back,
-- become cold,
-- give a warning,
-- leave the owner on read,
-- eventually block the owner.
+- mock,
+- get angry,
+- give one warning,
+- leave on read,
+- block.
 
-Normal flirting, consensual teasing, disagreement, or one awkward message should not automatically trigger blocking.
+But after a character has already expressed a very clear boundary, Greyhaven Phone now has a lightweight local boundary layer too. This prevents the model from endlessly generating another warning instead of actually going silent or blocking.
 
-### 5. Leave-on-read state
-The model can return `ACTION: IGNORE`.
+This local layer does not require an extra AI call.
 
-When that happens:
-- no reply bubble is added,
-- no typing indicator is shown,
-- the character remains in an "ignoring" state,
-- a later message can still cause them to keep ignoring, block, or re-engage if the situation changes.
+### Final-warning block detection
+If the character says something like:
+- "I'm blocking you"
+- "I'm going to block you"
+- "you're blocked"
 
-### 6. Character-initiated blocking
-The model can return `ACTION: BLOCK`.
+Greyhaven Phone also recognizes that as a real block even if the model forgot the `ACTION: BLOCK` protocol line.
 
-When that happens:
-- the contact becomes unavailable on the sender's phone,
-- new messages are not delivered,
-- calls do not connect,
-- the blocking character's own mirrored phone records that they blocked the sender,
-- switching to the blocking character's persona and manually unblocking the sender will synchronize the relationship back.
+### Existing v1.2.1 media fixes are retained
+Photo/video requests still keep the improved behavior:
+- actual promises must become real media or a clear change of mind,
+- refusals stay text-only,
+- same-line `TEXT:` + `PHOTO:` / `VIDEO:` parsing works,
+- fake media cards are not created from ordinary promise text.
 
-A final warning text can still be delivered immediately before the block if the model chooses.
+### Phone <-> roleplay continuity is unchanged
+The chronology and world-continuity behavior from v1.2.0 remains intact.
 
-### 7. Failed delivery UI
-Messages sent after a character has blocked the current persona show a small `Not Delivered` state.
+## Suggested tests
 
-### 8. Phone ↔ RP chronology retained
-The v1.2.0 continuity system is unchanged:
-- newer phone state can advance the main RP,
-- newer main-RP state overrides older phone state,
-- unresolved plans can remain relevant,
-- stale transient states do not drag characters backward in time.
+You no longer need extreme test messages just to see whether the feature works.
 
-## No new apps
-v1.2.1 does not add any new phone apps. It only improves the existing messaging behavior.
+### Leave on read
+1. Have a character say: "I'm mad at you. I don't want to talk right now."
+2. Send: "Come on, answer me."
+3. They should now be able to leave you on read with no typing bubble.
 
-## Recommended tests
+### Hard boundary
+1. Have a low-trust contact say: "Leave me alone. Don't message me again."
+2. Send one ordinary pushy follow-up.
+3. They should normally leave it on read.
+4. Continue again and the contact can escalate to blocking.
 
-1. Ask a character for a photo. Let them agree, then prompt them again. They should either actually attach it or clearly change their mind instead of stalling indefinitely.
-2. Test a refusal. It should stay text-only.
-3. Test a model response that contains `TEXT:` and `PHOTO:` on the same line.
-4. Be rude to a low-trust contact. They should be allowed to react sharply rather than politely continuing forever.
-5. Keep crossing a clearly stated boundary. The character should be able to leave you on read.
-6. Continue pushing aggressively after that. Depending on the character, they may block you.
-7. Switch to the blocking character's persona and manually unblock the other person; the mirrored phone state should synchronize.
+### Faster severe block
+1. Have the contact clearly say to stop / leave them alone.
+2. Send a clearly severe or sexually aggressive follow-up.
+3. The contact can block immediately rather than repeating several warnings.
+
+### Reconciliation
+1. Get left on read.
+2. Send a believable apology.
+3. The extension should allow the model to decide whether the character keeps ignoring you or re-engages.
