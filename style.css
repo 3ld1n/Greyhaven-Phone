@@ -131,3 +131,32 @@ body.ghp-open{overflow:hidden!important}
   flex-direction:column;
   gap:8px;
 }
+
+
+/* ===== Greyhaven Phone v1.2.0 message controls + continuity polish ===== */
+.ghp-msg[data-message-id]{
+  -webkit-touch-callout:none;
+  user-select:none;
+  -webkit-user-select:none;
+  touch-action:pan-y;
+}
+.ghp-msg time{
+  display:flex;
+  align-items:center;
+  gap:4px;
+}
+.ghp-edited{
+  opacity:.9;
+}
+.ghp-message-actions .ghp-action-sender{
+  display:block;
+  padding:0 2px 9px;
+  color:var(--ghp-muted);
+  font-size:11px;
+}
+.ghp-popup-action.subtle{
+  opacity:.94;
+}
+.ghp-message-edit textarea{
+  min-height:110px;
+}

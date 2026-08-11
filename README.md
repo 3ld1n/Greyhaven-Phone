@@ -1,76 +1,138 @@
-# Greyhaven Phone v1.1.1
+# Greyhaven Phone v1.2.0
 
 A fictional iPhone-style phone simulator for SillyTavern roleplay.
 
-## v1.1.1
+## v1.2.0 — Behavior, identity, messaging controls and RP continuity
 
-This release keeps the existing app set and focuses on making the working Phone feel more coherent and controllable.
+This release keeps the existing app set. It focuses on making conversations feel character-specific and making phone events participate in the main roleplay chronologically.
 
-### Contacts
-- Remove a contact from the current phone timeline.
-- Removed contacts are suppressed from automatic relationship/Life/chat discovery.
-- Removed contacts therefore cannot be selected for automatic Phone Refresh activity.
-- A Removed Contacts screen lets you restore them later.
-- Manually adding a removed character restores them.
+### Character identity lock
+Phone generation now separates the two sides of a conversation explicitly:
 
-### Conversations
-- Delete an entire conversation from the current phone.
-- Deleted thread content is no longer supplied to Greyhaven Phone generation on that phone.
-- Existing cross-persona mirroring remains intact for new direct messages/calls.
+- the active phone owner/persona,
+- the contact who is replying.
 
-### Photo and video messages
-Messages now support fictional photo/video attachments.
+A contact is told never to adopt the phone owner's identity, name, history, relationships or possessions. If a generated direct-message reply still appears to swap identities, Greyhaven Phone automatically retries once with a corrective identity prompt.
 
-The sender always provides a text description of what the media contains. That description is what the AI understands.
+### Character-specific texting voice
+Direct messages and Phone Refresh now ask the model to preserve the actual character's texting voice instead of defaulting to polished assistant-style prose.
 
-Optional local files can be selected from the device. Local image/video blobs are stored in IndexedDB and replace the descriptive placeholder visually, while the AI still receives only the written description.
+The prompt can use:
+- character card description/personality/example messages,
+- recent messages written by that same contact,
+- the current relationship and conversation mood.
 
-Media metadata mirrors across persona phones in the same RP timeline.
+Lowercase, abbreviations, slang, profanity, emojis, double-texting and short messages are allowed when they fit the character. Mature/formal characters can still naturally text more formally.
 
-### Request Photo / Request Video
-The Messages `+` menu can arm the next text as a photo or video request.
+### Photo/video refusal bug fix
+Explicit `TEXT:`, `PHOTO:` and `VIDEO:` protocol replies are now authoritative.
 
-A request is not forced compliance. The contacted character may:
-- send the requested media,
-- send media plus text,
-- reply with text only,
-- tease,
-- refuse.
+A refusal such as `TEXT: I'm not comfortable sending that` cannot also become a fake Photo card simply because the user's request mentioned a photo.
 
-Characters may also spontaneously send fictional photo/video messages when it makes sense.
+Plain-text media inference is kept only for genuinely positive send cues such as a character clearly saying they are sending/showing a photo or video.
 
-### Better Phone Refresh continuity
-AI Phone Refresh receives a bounded tail of each existing thread, including its last activity time.
+### Balanced media willingness
+Media requests are neither forced compliance nor forced refusal.
 
-Recent new messages should therefore continue a topic or feel like believable double texts instead of abruptly starting unrelated conversations.
+The prompt considers relationship, trust, consent, current mood, teasing level and recent conversation. Close romantic/intimate or mutually flirty dynamics may comply more naturally when it fits, while low-trust or mismatched requests can still be refused.
 
-### Stricter location evidence
-A phone owner's location is never treated as evidence that unrelated contacts are in the same place.
+### Long-press message controls
+Long-press a message bubble to open message actions.
 
-Location-specific posts/messages require evidence belonging to that contact, such as:
-- their Greyhaven Life state,
-- scenario/recent RP mentioning them,
-- their own world-state location evidence.
+For messages sent by the currently active persona:
+- Edit
+- Unsend for everyone
+- Delete from this phone
 
-Without evidence, ambient content should stay geographically neutral.
+For messages sent by another character:
+- Delete from this phone
 
-### iPhone Home Indicator
-The extension's fake white gesture bar is shown on Lock Screen/Home Screen only. It is no longer drawn inside apps, where it could overlap Messages or other controls.
+To edit/unsend the other character's message, switch to that character's persona first.
 
-## Architecture
+Edits and unsends use the shared mirrored-message ID so the change is synchronized across the corresponding persona phone copies.
 
-- Phone history is isolated per SillyTavern chat.
-- Each persona has a separate phone inside that chat.
-- Direct messages/calls can be mirrored between persona-owned phones inside the same timeline.
-- Wallpaper/apps/settings are global per persona.
-- Greyhaven Phone reuses Greyhaven Life clock/world/schedule state when available.
-- Phone Refresh remains a single optional AI pass.
+### Better Messages navigation
+The back arrow now behaves like an app navigation stack:
+
+- Conversation -> Messages list
+- Messages list -> Home
+
+The same pattern is used for other nested screens such as Contacts and Social instead of immediately throwing the user back to the Home Screen.
+
+### Phone <-> main roleplay continuity
+Greyhaven Phone now keeps a small structured continuity ledger for important phone events.
+
+The main SillyTavern generation prompt can receive:
+
+#### Fresh phone events
+Phone events that happened after the latest rendered main-RP character output.
+
+Example:
+1. Main RP last shows Aurora in bed.
+2. On the phone, Aurora tells Jack she is getting into the bath and later says she is bathing.
+3. The next main-RP generation receives that newer phone state and should treat Aurora as already being in the bath rather than replaying the older bed state.
+
+#### Older plans / commitments
+Concrete unresolved-looking plans can remain useful after the immediate phone state becomes historical.
+
+Examples:
+- "pick me up at 8"
+- dinner plans
+- "I'll call after work"
+- an agreed meeting place
+
+#### Older phone history
+Older phone facts can remain historical context but are explicitly not treated as the character's current physical state.
+
+### Chronology guard
+Newer main roleplay always wins over older phone state.
+
+So if:
+1. Aurora says on the phone that she is in the bath,
+2. a later main-RP message has her leave the bathroom and go to bed,
+
+then the old bath message is historical. Future generations must not pull her back into the bathtub simply because it is still the latest message inside that phone thread.
+
+The continuity system uses both RP timestamps and an RP-render checkpoint so stale transient states such as bathing, driving, sleeping or being at work do not remain permanently current.
+
+Private phone information is also marked as participant-only context rather than knowledge every character automatically shares.
+
+### Shared continuity API
+Greyhaven Phone exposes structured continuity for Greyhaven Life or future extensions without requiring another AI analysis pass:
+
+- `GreyhavenPhone.getContinuitySnapshot()`
+- `GreyhavenPhone.getPromptSummary()`
+
+This lets future world-state features reuse the same phone continuity instead of spending tokens to analyze it again.
+
+## v1.1.x features retained
+
+- Remove and restore contacts
+- Delete whole conversations
+- Photo/video send and request flows
+- Local photo/video previews stored in IndexedDB
+- Correct local media aspect ratios
+- Attach/replace a local preview on fictional received media
+- Cross-persona direct-message/call mirroring
+- Thread-aware Phone Refresh
+- Strict per-contact location evidence / anti-teleport rules
+- Fake iPhone Home Indicator only on Lock/Home screens
+- Greyhaven Life clock/world/schedule integration when available
 
 ## Existing apps
 
 Messages, Phone, Contacts, Social, Snap Map, Calendar, Photos, Notes, Mail, Settings.
 
-No new apps were added in v1.1.0.
+No new apps are introduced in v1.2.0.
+
+## Architecture
+
+- Phone history is isolated per SillyTavern chat.
+- Each persona has a separate phone inside that chat.
+- Direct messages/calls can mirror between persona-owned phones in the same timeline.
+- Wallpaper/apps/settings are global per persona.
+- Phone Refresh remains a bounded optional AI pass.
+- Important phone continuity is stored structurally rather than requiring a second analysis call.
 
 ## Installation
 
@@ -85,31 +147,14 @@ README.md
 
 Minimum SillyTavern version: 1.13.3.
 
-## Suggested v1.1 test
+## Suggested v1.2.0 tests
 
-1. Remove a relationship contact and run Discover + Phone Refresh. They should stay removed.
-2. Restore the contact from Removed Contacts.
-3. Delete a direct conversation and reopen that contact; it should start empty.
-4. Send a fictional photo with description only.
-5. Send another photo with a local image selected and confirm the image appears in the UI.
-6. Request a photo, then write the actual request. Verify the character can comply or refuse naturally.
-7. Refresh after an active texting conversation and check whether any double text follows the existing topic.
-8. Put the phone owner on a trip while an unrelated contact remains elsewhere/unknown; refresh Social and verify the contact is not automatically teleported.
-9. Open Messages with the iPhone keyboard and verify there is no extension-drawn white gesture bar overlapping the composer.
-
-
-## v1.1.1 additions
-
-### Better media willingness
-- Direct-message media requests are no longer refusal-biased.
-- Close romantic / intimate / mutually teasing relationships are now prompted to comply more often when it fits the mood.
-- The parser can recover media replies when the model writes “Here’s a photo...” or “Here’s a video...” as plain text instead of using the PHOTO/VIDEO protocol.
-
-### Correct aspect ratios for local files
-- Local uploaded photos/videos now preserve their measured aspect ratio inside the chat bubble instead of being forced into the old generic frame.
-
-### Attach a local preview to received media
-- Any photo/video bubble now has a small paperclip/edit button.
-- Use it to attach or replace a local file from your device for that exact message bubble.
-- This is especially useful when a character “sends” a fictional image/video and you want to visually swap the placeholder for a real file on your phone.
-- The AI still only knows the written media description.
+1. Ask a low-trust contact for a photo and verify a refusal stays text-only.
+2. Text Bianca/another character from Jack and verify the contact never starts claiming they are Jack.
+3. Compare Chloe/Aurora/Jack texting styles and verify they do not all sound like the same formal assistant.
+4. Long-press your own message, edit it, then switch persona and confirm the mirrored phone copy changed too.
+5. Long-press your own message and test `Unsend for everyone`.
+6. Open a conversation, press Back and confirm it returns to the Messages list; press Back again to return Home.
+7. Main RP: leave Aurora in bed. Phone: have her explicitly move to the bath. Return to RP and verify the next generation knows the newer phone state.
+8. Then move Aurora from the bath to bed in main RP. Generate again and confirm the older phone bath state does not override the newer RP.
+9. Make a concrete phone plan such as meeting someone at 20:00. Generate later RP and verify the unresolved plan can still be remembered.

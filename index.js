@@ -1,5 +1,5 @@
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '1.1.1';
+const GHP_VERSION = '1.2.0';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -49,6 +49,7 @@ let initialized=false, bound=false, menuObserver=null, lifeUnsub=null, clockTime
 let currentChat='', unlocked=false, app='', threadId='', contactId='', callId='';
 let refreshBusy=false, replyBusy=false, islandText='', islandIcon='';
 let composeRequest={threadId:'',kind:''};
+let longPressTimer=null,longPressTarget=null,longPressPoint=null;
 let mediaDbPromise=null;
 const mediaObjectUrls=new Map();
 const mediaDimensionCache=new Map();
@@ -146,7 +147,7 @@ function saveProfile(patch){
 
 function normalizeMessage(m={}){
   m.id||=id();m.sender=norm(m.sender||'Unknown');m.senderId||='';
-  m.text=String(m.text||'');m.timeMs=Number(m.timeMs||Date.now());m.read=m.read!==false;
+  m.text=String(m.text||'');m.timeMs=Number(m.timeMs||Date.now());m.realMs=Math.max(0,Number(m.realMs||0)||0);m.read=m.read!==false;
   m.type=['text','photo','video'].includes(m.type)?m.type:'text';
   m.mediaDescription=String(m.mediaDescription||m.description||'');
   m.mediaKey=String(m.mediaKey||'');
@@ -154,6 +155,7 @@ function normalizeMessage(m={}){
   m.mediaHeight=Math.max(0,Number(m.mediaHeight||0)||0);
   m.requestMedia=['photo','video'].includes(m.requestMedia)?m.requestMedia:'';
   m.mirrorId=String(m.mirrorId||'');
+  m.editedAt=Math.max(0,Number(m.editedAt||0)||0);
   return m;
 }
 function defaultTimeline(ownerName='',ownerAvatar=''){return{version:2,ownerName:norm(ownerName),ownerAvatar:ownerAvatar||'',createdAt:Date.now(),updatedAt:Date.now(),contacts:{},contactOrder:[],suppressedContacts:[],threads:{},threadOrder:[],calls:[],posts:[],stories:[],notifications:[],photos:[],notes:[],mail:[],refresh:{lastAt:null,chatLength:0,eventKeys:[],summary:''}}}
@@ -171,11 +173,68 @@ function normalizeTimeline(t){
   t.refresh=t.refresh&&typeof t.refresh==='object'?t.refresh:{};t.refresh.chatLength=Math.max(0,Number(t.refresh.chatLength||0));t.refresh.eventKeys=Array.isArray(t.refresh.eventKeys)?t.refresh.eventKeys.slice(-80):[];t.refresh.summary||='';
   return t;
 }
+function normalizeContinuity(c={}){
+  c=c&&typeof c==='object'?c:{};
+  c.version=Math.max(1,Number(c.version||1));c.seq=Math.max(0,Number(c.seq||0));
+  c.events=Array.isArray(c.events)?c.events.filter(Boolean).slice(-180):[];
+  c.events=c.events.map(e=>({id:e.id||id(),seq:Math.max(0,Number(e.seq||0)),kind:['message','call','media','social'].includes(e.kind)?e.kind:'message',participants:[...new Set((Array.isArray(e.participants)?e.participants:[]).map(norm).filter(Boolean))],sender:norm(e.sender||''),summary:String(e.summary||''),threadTitle:String(e.threadTitle||''),mirrorId:String(e.mirrorId||''),roleplayMs:Math.max(0,Number(e.roleplayMs||0)),realMs:Math.max(0,Number(e.realMs||0)),persistent:e.persistent===true,transient:e.transient===true}));
+  c.seq=Math.max(c.seq,...c.events.map(e=>e.seq||0),0);
+  c.rpCheckpoint=c.rpCheckpoint&&typeof c.rpCheckpoint==='object'?c.rpCheckpoint:{};
+  c.rpCheckpoint={seq:Math.max(0,Number(c.rpCheckpoint.seq||0)),roleplayMs:Math.max(0,Number(c.rpCheckpoint.roleplayMs||0)),realMs:Math.max(0,Number(c.rpCheckpoint.realMs||0)),chatLength:Math.max(0,Number(c.rpCheckpoint.chatLength||0))};
+  return c;
+}
 function metadataRoot(){
   const c=ctx();if(!c?.chatMetadata||!hasChat())return null;let r=c.chatMetadata[GHP_META_KEY];
-  if(!r||typeof r!=='object'){r={version:2,phones:{}};c.chatMetadata[GHP_META_KEY]=r}
-  r.version=Math.max(2,Number(r.version||1));if(!r.phones||typeof r.phones!=='object')r.phones={};return r
+  if(!r||typeof r!=='object'){r={version:3,phones:{},continuity:normalizeContinuity()};c.chatMetadata[GHP_META_KEY]=r}
+  r.version=Math.max(3,Number(r.version||1));if(!r.phones||typeof r.phones!=='object')r.phones={};r.continuity=normalizeContinuity(r.continuity);return r
 }
+
+function continuityRoot(){const r=metadataRoot();return r?{root:r,state:r.continuity}:null}
+function looksLikePlan(text=''){
+  const s=String(text||'');
+  return /\b(?:tonight|tomorrow|later today|this evening|this morning|next (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)|after work|before work|when (?:i|you|we) (?:finish|get off|leave)|pick (?:me|you) up|meet (?:me|you|at|up)|see you|come over|come by|call (?:me|you)|text (?:me|you)|i(?:'ll| will) (?:come|meet|call|text|pick|see)|we(?:'ll| will) (?:meet|go|see)|let'?s (?:meet|go|hang|grab)|plan(?:ning)? to|reservation|appointment|date at|at \d{1,2}(?::\d{2})?\s*(?:am|pm)?\b)/i.test(s);
+}
+function looksTransient(text=''){
+  const s=String(text||'');
+  return /\b(?:i(?:'m| am) (?:in|at|on|driving|walking|working|bathing|showering|sleeping|lying|sitting|getting|heading)|currently|right now|just got (?:in|to|home|back)|getting (?:in|into|out|ready)|in the (?:bath|bathtub|shower|car|bed)|at (?:home|work|the hospital|the gym|the beach)|on my way)\b/i.test(s);
+}
+function continuityParticipants(th,t,ownerName=''){
+  const names=[ownerName,...(th?.contactIds||[]).map(k=>t?.contacts?.[k]?.name)].map(norm).filter(Boolean);return[...new Set(names)];
+}
+function recordContinuityEvent(data={}){
+  const box=continuityRoot();if(!box)return null;const {root,state}=box,mirrorId=String(data.mirrorId||'');
+  if(mirrorId&&state.events.some(e=>e.mirrorId===mirrorId))return state.events.find(e=>e.mirrorId===mirrorId)||null;
+  const summary=String(data.summary||'').trim();if(!summary)return null;
+  const event={id:id(),seq:++state.seq,kind:['message','call','media','social'].includes(data.kind)?data.kind:'message',participants:[...new Set((data.participants||[]).map(norm).filter(Boolean))],sender:norm(data.sender||''),summary,threadTitle:String(data.threadTitle||''),mirrorId,roleplayMs:Math.max(0,Number(data.roleplayMs||now().getTime())),realMs:Date.now(),persistent:data.persistent===true||looksLikePlan(summary),transient:data.transient===true||looksTransient(summary)};
+  state.events.push(event);state.events=state.events.slice(-180);root.continuity=state;saveMetadataRoot(root);updatePrompt();try{window.dispatchEvent(new CustomEvent('greyhaven-phone-continuity',{detail:clone(event)}))}catch{}return event;
+}
+function recordMessageContinuity(th,t,msg,ownerName=''){
+  if(!th||!msg)return null;return recordContinuityEvent({kind:msg.type==='text'?'message':'media',participants:continuityParticipants(th,t,ownerName),sender:msg.sender,summary:messageContext(msg),threadTitle:threadTitle(th,t),mirrorId:msg.mirrorId,roleplayMs:msg.timeMs});
+}
+function updateContinuityMirror(mirrorId,msg){
+  if(!mirrorId||!msg)return;const box=continuityRoot();if(!box)return;let changed=false;
+  for(const e of box.state.events)if(e.mirrorId===mirrorId){e.summary=messageContext(msg);e.sender=msg.sender;e.roleplayMs=msg.timeMs;e.persistent=looksLikePlan(e.summary);e.transient=looksTransient(e.summary);changed=true}
+  if(changed){box.root.continuity=box.state;saveMetadataRoot(box.root);updatePrompt()}
+}
+function removeContinuityMirror(mirrorId){
+  if(!mirrorId)return;const box=continuityRoot();if(!box)return;const before=box.state.events.length;box.state.events=box.state.events.filter(e=>e.mirrorId!==mirrorId);if(box.state.events.length!==before){box.root.continuity=box.state;saveMetadataRoot(box.root);updatePrompt()}
+}
+function markRoleplayCheckpoint(){
+  const box=continuityRoot();if(!box)return;const c=ctx(),state=box.state;
+  state.rpCheckpoint={seq:state.seq,roleplayMs:now().getTime(),realMs:Date.now(),chatLength:Array.isArray(c?.chat)?c.chat.length:0};box.root.continuity=state;saveMetadataRoot(box.root);updatePrompt();
+}
+function continuityTime(ms){if(!ms)return'unknown RP time';try{return new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(ms))}catch{return new Date(ms).toISOString()}}
+function continuitySnapshot(){
+  const box=continuityRoot();if(!box)return{fresh:[],plans:[],history:[],checkpoint:{},nowMs:now().getTime()};const state=box.state,cp=state.rpCheckpoint||{},nowMs=now().getTime(),relevant=relevantPhoneNames(true),matches=e=>!relevant.size||e.participants.some(n=>relevant.has(lc(n)));
+  const all=state.events.filter(matches),fresh=[],history=[];
+  for(const e of all){
+    const afterCheckpoint=e.seq>Number(cp.seq||0),backdated=cp.roleplayMs&&e.roleplayMs&&e.roleplayMs<cp.roleplayMs-5*60000,age=e.roleplayMs?nowMs-e.roleplayMs:0,staleTransient=e.transient&&age>120*60000;
+    if(afterCheckpoint&&!backdated&&!staleTransient)fresh.push(e);else history.push(e);
+  }
+  const plans=all.filter(e=>e.persistent&&(!e.roleplayMs||nowMs-e.roleplayMs<8*86400000)).slice(-12);
+  return{fresh:fresh.slice(-18),plans,history:history.slice(-10),checkpoint:clone(cp),nowMs};
+}
+
 function saveMetadataRoot(r){const c=ctx();if(!c||!r)return;c.chatMetadata[GHP_META_KEY]=r;c.updateChatMetadata?.({[GHP_META_KEY]:r});c.saveMetadataDebounced?.()}
 function timeline(create=true){
   const r=metadataRoot();if(!r)return create?defaultTimeline(persona().name,persona().avatar):null;
@@ -414,6 +473,8 @@ async function refreshPhone(){
 Return ONLY one valid JSON object. No markdown and no commentary.
 Use Greyhaven Life as authoritative current time/world state when available.
 Use ONLY ALLOWED CONTACTS.
+IDENTITY LOCK: every generated sender is that named contact, never the PHONE OWNER and never another contact. Do not swap names, biographies, relationships, homes, jobs or possessions between people.
+Every message should sound like that contact's own private texting voice, using their character/personality and existing thread tail. Avoid generic formal customer-service/therapy language. Slang, lowercase, abbreviations, emojis, teasing, profanity, short double-texts and expressive punctuation are allowed when they fit that specific person; do not force the same style on everyone.
 Never teleport contacts to the phone owner's location. The owner's current scene/location is NOT evidence that another contact is there.
 A contact may mention/post a specific location only when that contact's own LOCATION EVIDENCE or RECENT MENTIONS clearly supports it. When there is no evidence, keep their post/message location-neutral.
 Existing message threads matter. If a contact has a recent active conversation, new messages should usually continue it naturally, behave like a double-text, or follow the same topic. Do not abruptly reset to a generic unrelated invitation. If enough RP time has passed, a new topic is fine.
@@ -471,19 +532,19 @@ Generate plausible NEW activity now. Respect each person's own location evidence
 }
 
 function appendIncomingMessage(t,th,c,{text='',mediaType='',mediaDescription=''},stamp,unreadFlag=true){
-  const items=[];
+  const items=[],created=[];
   if(String(text||'').trim())items.push({type:'text',text:String(text).trim()});
   if(['photo','video'].includes(mediaType)&&String(mediaDescription||'').trim())items.push({type:mediaType,text:'',mediaDescription:String(mediaDescription).trim()});
-  if(!items.length)return 0;
+  if(!items.length)return created;
   for(const item of items){
-    const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:c.name,senderId:c.id,text:item.text,type:item.type,mediaDescription:item.mediaDescription||'',timeMs:stamp,read:!unreadFlag});
-    th.messages.push(msg);
+    const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:c.name,senderId:c.id,text:item.text,type:item.type,mediaDescription:item.mediaDescription||'',timeMs:stamp,realMs:Date.now(),read:!unreadFlag});
+    th.messages.push(msg);created.push(msg);
     mirrorRichMessageToPhone({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:persona().name,peerAvatar:persona().avatar,peerDescription:persona().description,senderName:c.name,message:msg,unread:false});
   }
-  return items.length;
+  return created;
 }
 function applyRefresh(r){
-  const t=timeline(),installed=profile().apps,allowed=new Map(Object.values(t.contacts).map(c=>[lc(c.name),c])),keys=new Set(t.refresh.eventKeys||[]),stamp=now().getTime(),max=profile().maxNewEvents;let count=0;
+  const t=timeline(),installed=profile().apps,allowed=new Map(Object.values(t.contacts).map(c=>[lc(c.name),c])),keys=new Set(t.refresh.eventKeys||[]),stamp=now().getTime(),max=profile().maxNewEvents,continuityEntries=[];let count=0;
   const addKey=k=>{keys.add(k);t.refresh.eventKeys=[...keys].slice(-80)};
   if(installed.messages)for(const x of Array.isArray(r?.messages)?r.messages:[]){
     if(count>=max)break;const c=allowed.get(lc(x.sender)),text=String(x.text||'').trim(),mediaType=['photo','video'].includes(x.mediaType)?x.mediaType:'',mediaDescription=String(x.mediaDescription||'').trim();
@@ -491,7 +552,7 @@ function applyRefresh(r){
     let th=x.threadId&&t.threads[x.threadId]?t.threads[x.threadId]:Object.values(t.threads).find(v=>v.type==='direct'&&v.contactIds[0]===c.id);
     if(!th){th={id:`thread:${id()}`,type:'direct',title:c.nickname||c.name,contactIds:[c.id],createdAt:stamp,messages:[]};t.threads[th.id]=th;t.threadOrder.unshift(th.id)}
     if(th.type==='group'&&!th.contactIds.includes(c.id))continue;
-    appendIncomingMessage(t,th,c,{text,mediaType,mediaDescription},stamp,true);
+    const created=appendIncomingMessage(t,th,c,{text,mediaType,mediaDescription},stamp,true);for(const msg of created)continuityEntries.push({th,msg,ownerName:persona().name});
     if(!c.muted)t.notifications.unshift({id:id(),app:'messages',title:c.nickname||c.name,text:text||(mediaType==='video'?'Video':'Photo'),timeMs:stamp,read:false,targetId:th.id});
     addKey(key);count++;
   }
@@ -521,22 +582,22 @@ function applyRefresh(r){
     const key=`e:${from}:${sub}`.toLowerCase();if(keys.has(key))continue;t.mail.unshift({id:id(),from,subject:sub,body,timeMs:stamp,read:false});t.notifications.unshift({id:id(),app:'mail',title:from,text:sub,timeMs:stamp,read:false});addKey(key);count++;
   }
   t.refresh.lastAt=Date.now();t.refresh.chatLength=Array.isArray(ctx()?.chat)?ctx().chat.length:0;t.refresh.summary=String(r?.summary||'').trim();persist(t,false);
+  for(const e of continuityEntries)recordMessageContinuity(e.th,t,e.msg,e.ownerName);
 }
-
 function cleanPlainReply(raw){
   let text=String(raw||'').trim().replace(/^```(?:text|txt)?\s*/i,'').replace(/\s*```$/,'').trim();
   if(!text||text==='{}'||text==='[]')return'';text=text.replace(/^["“](.*)["”]$/s,'$1').trim();return text;
 }
 function inferMediaFromText(text,requested=''){
   const raw=String(text||'').trim();if(!raw)return null;
-  if(/\b(?:not sending|won't send|would rather not|don't feel comfortable|not comfortable|not ready|maybe later|wait until you|get home to see|not gonna send|i'm not sending)\b/i.test(raw))return null;
+  if(/\b(?:not sending|won't send|would rather not|don't feel comfortable|not comfortable|not sure (?:i'm|i am) comfortable|not sure if (?:i'm|i am) comfortable|don't think (?:i'm|i am) comfortable|not ready|maybe later|wait until you|get home to see|not gonna send|i'm not sending|i am not sending|rather wait|rather not)\b/i.test(raw))return null;
   const kind=requested==='video'||(/\b(?:video|clip)\b/i.test(raw)&&!/\b(?:photo|picture|pic|selfie)\b/i.test(raw))?'video':'photo';
   const cue=kind==='video'?/\b(?:video|clip)\b/i:/\b(?:photo|picture|pic|selfie)\b/i;
-  const invite=/(?:here(?:'s| is)|sending|i(?:'| a)?m sending|i can take a break to send|another one|take a break to send|selfie|clip)/i;
-  if(!(requested||cue.test(raw))||!invite.test(raw))return null;
+  const positive=/(?:here(?:'s| is)|just sent|sending you|i(?:'m| am) sending|i(?:'ll| will) send|let me send|take this|another one|this one|selfie|clip)/i;
+  if(!cue.test(raw)||!positive.test(raw))return null;
   let desc=raw
     .replace(/^(?:sure|okay|ok|fine|alright|haha|hehe|lol|lmao|well|mm+|mhm|yep|yeah|of course|definitely|i can|i could|i'll be happy to)\b[^.!?]*[.!?]?\s*/i,'')
-    .replace(/^(?:here(?:'s| is)|sending|i(?:'| a)?m sending|i can take a break to send|take a break to send|let me send you)\s+(?:another\s+)?(?:a\s+)?(?:photo|picture|pic|selfie|video|clip)\s*(?:of)?\s*/i,'')
+    .replace(/^(?:here(?:'s| is)|sending you|i(?:'m| am) sending|i(?:'ll| will) send|let me send you)\s+(?:another\s+)?(?:a\s+)?(?:photo|picture|pic|selfie|video|clip)\s*(?:of)?\s*/i,'')
     .replace(/^(?:me|myself)\s+/i,'')
     .trim();
   desc=desc.replace(/^[:\-–]+\s*/,'').trim();
@@ -551,14 +612,9 @@ function parseDirectReply(raw,requested=''){
     const kind=m[1].toLowerCase(),value=String(m[2]||'').trim();if(!value)continue;
     if(kind==='text')out.push({type:'text',text:value});else out.push({type:kind,mediaDescription:value,text:''});
   }
-  if(!out.length){
-    const inferred=inferMediaFromText(text,requested);
-    if(inferred)out.push(inferred);else out.push({type:'text',text});
-  }else if(requested&&!out.some(x=>x.type===requested)){
-    const inferred=inferMediaFromText(text,requested);
-    if(inferred)out.push(inferred);
-  }
-  return out.slice(0,4);
+  if(out.length)return out.slice(0,4);
+  const inferred=inferMediaFromText(text,requested);
+  return inferred?[inferred]:[{type:'text',text}];
 }
 function parseGroupReply(raw,contacts){
   const allowed=new Map(contacts.map(c=>[lc(c.name),c])),out=[];
@@ -566,26 +622,44 @@ function parseGroupReply(raw,contacts){
   return out.slice(0,4);
 }
 function conversationTail(conversation,n=24){return conversation.slice(-n).map(messageContext)}
+function textingVoiceEvidence(contact,conversation=[]){
+  const own=(conversation||[]).filter(m=>lc(m?.sender)===lc(contact?.name)).slice(-8).map(m=>m?.type==='text'?String(m.text||'').trim():String(m.text||m.mediaDescription||'').trim()).filter(Boolean);
+  const d=cardData(contact||{});return{recentMessages:own,personality:String(d.personality||'').slice(0,1800),examples:String(d.mes_example||'').slice(0,2200),description:String(d.description||'').slice(0,2600)};
+}
+function replyIdentityConflict(raw,contact,owner){
+  const text=cleanPlainReply(raw),cn=norm(contact?.name),on=norm(owner?.name);if(!text||!cn||!on||lc(cn)===lc(on))return false;
+  const q=v=>v.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),cq=q(cn),oq=q(on);
+  return new RegExp(`\\b(?:i\\s*am|i['’]?m|im|my\\s+name\\s+is)\\s+${oq}\\b`,'i').test(text)||
+    new RegExp(`\\b(?:you\\s+are|you['’]?re|youre|ur)\\s+${cq}\\b`,'i').test(text);
+}
 
 async function generateReply(th,mode='text'){
   const t=timeline(),owner=persona(),contacts=th.contactIds.map(k=>t.contacts[k]).filter(Boolean);if(!contacts.length)return;
   replyBusy=true;islandText=mode==='call'?'On call…':'Typing…';islandIcon=mode==='call'?'fa-solid fa-phone':'fa-solid fa-ellipsis';render();
+  const continuityToRecord=[];
   try{
     const w=world(),activeCall=mode==='call'&&callId?t.calls.find(x=>x.id===callId):null,conversation=mode==='call'?(activeCall?.transcript||[]):th.messages;let replies=[];
     if(th.type==='direct'){
-      const c=contacts[0],latest=conversation.at(-1),requested=mode==='text'&&latest?.requestMedia;
+      const c=contacts[0],latest=conversation.at(-1),requested=mode==='text'&&latest?.requestMedia,voice=textingVoiceEvidence(c,conversation);
       if(mode==='call'){
-        const systemPrompt=`You are ${c.name}, having a private phone call with ${owner.name} inside an ongoing fictional roleplay.
+        const systemPrompt=`IDENTITY LOCK — authoritative:
+You are ${c.name}. You are speaking to ${owner.name}. Never become ${owner.name}, never claim ${owner.name}'s name/identity/history as your own, and never tell ${owner.name} that they are ${c.name}.
+Facts under CONTACT are about YOU. Facts under PHONE OWNER are about the other person.
+
+You are ${c.name} on a private phone call inside an ongoing fictional roleplay.
 Reply ONLY with what ${c.name} says aloud. No JSON, speaker label, narration or stage directions.
-Preserve the established personality/relationship. Use Greyhaven Life as authoritative world/time context when available.`;
-        const prompt=`PHONE OWNER:
-${owner.name}
-
-OWNER / RELATIONSHIP CONTEXT:
-${owner.description.slice(0,10000)||'(not found)'}
-
-CONTACT:
+Preserve ${c.name}'s actual personality and relationship. Speak like a real person, not a formal assistant or therapist.
+Use slang, teasing, profanity, warmth, hesitation, laughter, emojis-as-words only if they genuinely fit ${c.name}; do not force any one style.
+Match established conversational rhythm and emotion.
+Use Greyhaven Life as authoritative current world/time context when available.`;
+        const prompt=`CONTACT — AUTHORITATIVE IDENTITY:
 ${JSON.stringify({name:c.name,character:cardData(c),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})}
+
+CONTACT VOICE EVIDENCE:
+${JSON.stringify(voice)}
+
+PHONE OWNER — THE OTHER PERSON:
+${JSON.stringify({name:owner.name,relationshipContext:owner.description.slice(0,9000)||'(not found)'})}
 
 GREYHAVEN LIFE:
 ${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
@@ -597,33 +671,39 @@ CALL TRANSCRIPT:
 ${JSON.stringify((activeCall?.transcript||[]).slice(-24).map(x=>`${x.sender}: ${x.text}`))}
 
 Give ${c.name}'s next spoken reply now.`;
-        let raw=await generate({prompt,systemPrompt,responseLength:500}),text=cleanPlainReply(raw);
-        if(!text)raw=await generate({prompt:`Reply naturally as ${c.name} in this phone call. Return only one spoken reply.`,systemPrompt:`You are ${c.name}. No JSON.`,responseLength:300}),text=cleanPlainReply(raw);
+        let raw=await generate({prompt,systemPrompt,responseLength:500});
+        if(replyIdentityConflict(raw,c,owner))raw=await generate({prompt:`${prompt}\n\nIDENTITY CORRECTION: Your previous attempt confused identities. You are ${c.name}. ${owner.name} is the other person. Reply again only as ${c.name}.`,systemPrompt,responseLength:500});
+        let text=cleanPlainReply(raw);
+        if(!text)raw=await generate({prompt:`Reply naturally as ${c.name} in this phone call. Return only one spoken reply.`,systemPrompt:`You are ${c.name}; ${owner.name} is the other person. Never swap identities.`,responseLength:300}),text=cleanPlainReply(raw);
         if(text)replies=[{sender:c.name,type:'text',text}];
       }else{
-        const systemPrompt=`You are ${c.name}, texting privately with ${owner.name} inside an ongoing fictional roleplay.
-Preserve ${c.name}'s established personality, relationship and knowledge.
+        const systemPrompt=`IDENTITY LOCK — authoritative:
+You are CONTACT ${c.name}. The phone owner is ${owner.name}. Never become ${owner.name}; never say your name is ${owner.name}; never assign ${owner.name}'s identity, possessions or relationship facts to yourself. Never tell ${owner.name} that they are ${c.name}.
+CONTACT CARD facts are about YOU. PHONE OWNER context is only background about the person you are texting.
+
+You are ${c.name}, texting privately with ${owner.name} inside an ongoing fictional roleplay.
+Write like ${c.name} actually texts — emotionally alive, personal and character-specific. Do NOT default to polished formal prose, customer-service language, therapy-speak, or repetitive "I'm not sure / can we talk about it" phrasing unless that genuinely matches ${c.name}.
+Use the CONTACT VOICE EVIDENCE and existing thread as the strongest style reference. Short messages, multiple texts, lowercase, abbreviations, slang, emojis, teasing, dry humor, profanity, typos or expressive punctuation are all allowed when they fit this character. More mature/formal characters may naturally text differently.
+Preserve established personality, relationship, knowledge and current mood.
 Use Greyhaven Life as authoritative current world/time context when available.
 You may reply with text, a fictional photo, a fictional video, or text plus one media item.
-If ${owner.name} explicitly requested a photo/video, decide based on relationship, trust, consent, current mood, teasing level, and the recent conversation. Do NOT refuse by default.
-For close romantic partners, established hookups, or clearly mutual flirty/intimate dynamics, and especially when the scene already feels consensual, aroused, playful, or teasing, default toward actually sending something rather than refusing. The media can be modest, playful, suggestive, or explicit depending on what fits ${c.name} and the current mood.
-For close friends with strong teasing chemistry, it is also normal to sometimes comply after some back-and-forth.
-Reserve refusal mainly for low-trust contacts, strangers, mismatched mood, clear boundaries, or when the request would feel out of character.
-If you choose to send media, actually use a PHOTO: or VIDEO: line instead of only describing it in TEXT.
-If you send media, describe only what the recipient would actually see. Do not claim the AI viewed a real uploaded file.
+A media request is NOT automatic compliance and NOT automatic refusal. Decide from relationship, trust, mood, established boundaries and the conversation.
+For close romantic/intimate partners or strongly mutual teasing dynamics, complying is normal when it fits. For strangers/low-trust contacts or mismatched mood, refusal can be completely natural.
+If refusing, return TEXT only. Never fabricate a PHOTO/VIDEO card that contains refusal text.
+If sending media, actually use PHOTO: or VIDEO: and describe only what the recipient would see.
 Return 1-3 lines using ONLY these formats:
 TEXT: message text
 PHOTO: concise visual description of the photo
 VIDEO: concise visual description of the video
 No JSON, speaker labels, markdown or narration.`;
-        const prompt=`PHONE OWNER:
-${owner.name}
-
-OWNER / RELATIONSHIP CONTEXT:
-${owner.description.slice(0,10000)||'(not found)'}
-
-CONTACT:
+        const prompt=`CONTACT — AUTHORITATIVE IDENTITY:
 ${JSON.stringify({name:c.name,character:cardData(c),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})}
+
+CONTACT VOICE EVIDENCE:
+${JSON.stringify(voice)}
+
+PHONE OWNER — THE OTHER PERSON:
+${JSON.stringify({name:owner.name,relationshipContext:owner.description.slice(0,9000)||'(not found)'})}
 
 GREYHAVEN LIFE:
 ${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
@@ -632,28 +712,32 @@ RECENT MAIN RP:
 ${recentChat()}
 
 TEXT THREAD:
-${JSON.stringify(conversationTail(conversation,26))}
+${JSON.stringify(conversationTail(conversation,28))}
 
 LATEST REQUEST MODE:
-${requested?`The latest owner message explicitly requested a ${requested}. If the relationship/mood makes that request plausible, prefer complying with an actual ${requested.toUpperCase()}: reply instead of refusing by default. Refusal is still allowed when it genuinely fits ${c.name}.`:'No explicit media request.'}
+${requested?`The latest owner message explicitly requested a ${requested}. Judge it naturally from this exact relationship and mood. If ${c.name} chooses to comply, return an actual ${requested.toUpperCase()}: line. If ${c.name} refuses, return TEXT only.`:'No explicit media request.'}
 
-Continue the conversation naturally.`;
-        let raw=await generate({prompt,systemPrompt,responseLength:700}),items=parseDirectReply(raw,requested||'');
-        if(!items.length){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. Return TEXT: followed by a natural reply.`,systemPrompt:`You are ${c.name}.`,responseLength:350});items=parseDirectReply(raw,requested||'')}
+Continue the conversation naturally in ${c.name}'s own texting voice.`;
+        let raw=await generate({prompt,systemPrompt,responseLength:760});
+        if(replyIdentityConflict(raw,c,owner))raw=await generate({prompt:`${prompt}\n\nIDENTITY CORRECTION: The last draft swapped identities. You are ${c.name}; ${owner.name} is the phone owner. Keep ${c.name}'s own personality and texting style and answer again.`,systemPrompt,responseLength:760});
+        let items=parseDirectReply(raw,requested||'');
+        if(!items.length){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. You are ${c.name}, not ${owner.name}. Match ${c.name}'s natural texting voice. Return TEXT: followed by the reply.`,systemPrompt:`You are ${c.name}. ${owner.name} is the other person. Never swap identities.`,responseLength:350});items=parseDirectReply(raw,requested||'')}
         replies=items.map(x=>({sender:c.name,...x}));
       }
     }else{
       const systemPrompt=`Simulate the next messages in this fictional group text thread.
+Only these contacts may speak: ${contacts.map(c=>c.name).join(', ')}.
+Each sender MUST remain themselves. Never make a sender adopt the phone owner's identity or another member's name/history.
+Match each person's established personality and their existing texting style. Do not flatten everyone into formal, polite prose. Emojis, slang, abbreviations, teasing and different punctuation are welcome when character-appropriate.
 Return 1-4 lines only. Every line MUST use exactly: Sender Name: message
-Only these senders may respond: ${contacts.map(c=>c.name).join(', ')}
 No JSON, markdown or narration.`;
-      const prompt=`PHONE OWNER: ${owner.name}
-CONTACT DATA: ${JSON.stringify(contacts.map(c=>({name:c.name,character:compactCard(c),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})))}
+      const prompt=`PHONE OWNER (not an allowed generated speaker unless listed above): ${owner.name}
+CONTACT DATA: ${JSON.stringify(contacts.map(c=>({name:c.name,character:compactCard(c),voice:textingVoiceEvidence(c,conversation),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})))}
 GREYHAVEN LIFE: ${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
 THREAD:
-${conversation.slice(-24).map(messageContext).join('\n')}
-Continue naturally.`;
-      replies=parseGroupReply(await generate({prompt,systemPrompt,responseLength:700}),contacts);
+${conversation.slice(-28).map(messageContext).join('\n')}
+Continue naturally without swapping identities.`;
+      replies=parseGroupReply(await generate({prompt,systemPrompt,responseLength:760}),contacts);
     }
     if(!replies.length)throw new Error('The model returned no usable phone reply.');
     const allowed=new Map(contacts.map(c=>[lc(c.name),c])),stamp=now().getTime();
@@ -661,36 +745,42 @@ Continue naturally.`;
       const target=cur.threads[th.id];if(!target)return;
       for(const x of replies){
         const c=allowed.get(lc(x.sender));if(!c)continue;
-        if(mode==='call'&&callId){const call=cur.calls.find(v=>v.id===callId);if(call)call.transcript.push({sender:c.name,text:String(x.text||'').trim(),timeMs:stamp});continue}
+        if(mode==='call'&&callId){
+          const call=cur.calls.find(v=>v.id===callId);if(call){const entry={sender:c.name,text:String(x.text||'').trim(),timeMs:stamp,realMs:Date.now()};call.transcript.push(entry);continuityToRecord.push({kind:'call',participants:[owner.name,c.name],sender:c.name,summary:`${c.name} said on a phone call: ${entry.text}`,threadTitle:`Call with ${c.name}`,roleplayMs:stamp})}continue;
+        }
         const text=String(x.text||'').trim(),mediaDescription=String(x.mediaDescription||'').trim(),type=['photo','video'].includes(x.type)?x.type:'text';
         if(type==='text'&&!text)continue;if(type!=='text'&&!mediaDescription)continue;
-        const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:c.name,senderId:c.id,text,type,mediaDescription,timeMs:stamp,read:true});
+        const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:c.name,senderId:c.id,text,type,mediaDescription,timeMs:stamp,realMs:Date.now(),read:true});
         target.messages.push(msg);
+        continuityToRecord.push({th:target,t:cur,msg,ownerName:owner.name});
         if(target.type==='direct')mirrorRichMessageToPhone({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,senderName:c.name,message:msg,unread:false});
       }
     },false);
+    for(const e of continuityToRecord){if(e.msg)recordMessageContinuity(e.th,e.t,e.msg,e.ownerName);else recordContinuityEvent(e)}
   }catch(e){console.error(`[${GHP_MODULE}] reply`,e);globalThis.toastr?.error?.(`Phone reply failed: ${e?.message||e}`)}
   finally{replyBusy=false;islandText='';islandIcon='';render()}
 }
 function sendThread(tid,text,mode='text',opts={}){
-  text=String(text||'').trim();if((!text&&mode==='text')||replyBusy)return;const owner=persona(),stamp=now().getTime();let th;
+  text=String(text||'').trim();if((!text&&mode==='text')||replyBusy)return;const owner=persona(),stamp=now().getTime();let th,created=null,callEvent=null;
   mutate(t=>{
     th=t.threads[tid];if(!th)return;
-    if(mode==='call'&&callId){const c=t.calls.find(v=>v.id===callId);if(c&&text)c.transcript.push({sender:owner.name,text,timeMs:stamp});return}
-    const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:owner.name,senderId:owner.key,text,timeMs:stamp,read:true,type:'text',requestMedia:opts.requestMedia||''});
-    th.messages.push(msg);
+    if(mode==='call'&&callId){const c=t.calls.find(v=>v.id===callId);if(c&&text){const entry={sender:owner.name,text,timeMs:stamp,realMs:Date.now()};c.transcript.push(entry);callEvent={kind:'call',participants:[owner.name,c.contactName],sender:owner.name,summary:`${owner.name} said on a phone call: ${text}`,threadTitle:`Call with ${c.contactName}`,roleplayMs:stamp}}return}
+    const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:owner.name,senderId:owner.key,text,timeMs:stamp,realMs:Date.now(),read:true,type:'text',requestMedia:opts.requestMedia||''});
+    th.messages.push(msg);created={th,t,msg,ownerName:owner.name};
     if(th.type==='direct'){const peer=t.contacts[th.contactIds[0]];if(peer)mirrorRichMessageToPhone({phoneOwner:peer.name,phoneOwnerAvatar:peer.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,senderName:owner.name,message:msg,unread:true})}
   },false);
+  if(created)recordMessageContinuity(created.th,created.t,created.msg,created.ownerName);if(callEvent)recordContinuityEvent(callEvent);
   if(th)generateReply(th,mode);
 }
 function sendMediaMessage(tid,kind,description,caption='',mediaKey='',meta=null){
   if(replyBusy||!['photo','video'].includes(kind))return;description=String(description||'').trim();caption=String(caption||'').trim();if(!description)return;
-  const owner=persona(),stamp=now().getTime();let th;
+  const owner=persona(),stamp=now().getTime();let th,created=null;
   mutate(t=>{
-    th=t.threads[tid];if(!th)return;const mirrorId=`mirror:${id()}`,msg=normalizeMessage({sender:owner.name,senderId:'owner',type:kind,text:caption,mirrorId,mediaDescription:description,mediaKey,mediaWidth:meta?.width||0,mediaHeight:meta?.height||0,timeMs:stamp,read:true});
-    th.messages.push(msg);
+    th=t.threads[tid];if(!th)return;const mirrorId=`mirror:${id()}`,msg=normalizeMessage({sender:owner.name,senderId:'owner',type:kind,text:caption,mirrorId,mediaDescription:description,mediaKey,mediaWidth:meta?.width||0,mediaHeight:meta?.height||0,timeMs:stamp,realMs:Date.now(),read:true});
+    th.messages.push(msg);created={th,t,msg,ownerName:owner.name};
     if(th.type==='direct'){const peer=t.contacts[th.contactIds[0]];mirrorRichMessageToPhone({phoneOwner:peer.name,phoneOwnerAvatar:peer.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,senderName:owner.name,message:msg,unread:true})}
   },false);
+  if(created)recordMessageContinuity(created.th,created.t,created.msg,created.ownerName);
   if(th)generateReply(th,'text');
 }
 
@@ -706,7 +796,7 @@ function renderHome(){
   const p=profile(),installed=Object.entries(p.apps).filter(([k,v])=>v&&k!=='settings').map(([k])=>k),dock=['phone','messages','social','snap'].filter(k=>p.apps[k]).slice(0,4),grid=installed.filter(k=>!dock.includes(k)),s=stale(),own=persona();
   return`<div class="ghp-screen ghp-home" style="${wallpaper()}">${statusBar()}<div class="ghp-widgets"><div><b>${esc(timeText())}</b><span>${esc(dateText(now(),true))}</span></div><button data-refresh class="${s.stale?'stale':''}"><i class="fa-solid fa-arrows-rotate"></i><span>${refreshBusy?'Refreshing…':s.stale?(s.newMessages>99?'Lots of new RP context':s.newMessages?`${s.newMessages} new RP messages`:'Phone needs refresh'):'Phone up to date'}</span></button></div><div class="ghp-grid">${grid.map(k=>icon(k)).join('')}${icon('settings')}</div><div class="ghp-owner">${avatarHtml({name:own.name,avatar:own.avatar},'small')}<span>${esc(own.name)}'s ${esc(p.deviceName)}</span></div><div class="ghp-dock">${dock.map(k=>icon(k,true)).join('')}</div><div class="ghp-indicator"></div></div>`;
 }
-function header(title,sub='',right=''){return`<header class="ghp-app-header"><button data-home><i class="fa-solid fa-chevron-left"></i></button><div><b>${esc(title)}</b>${sub?`<small>${esc(sub)}</small>`:''}</div><span>${right}</span></header>`}
+function header(title,sub='',right=''){return`<header class="ghp-app-header"><button data-back><i class="fa-solid fa-chevron-left"></i></button><div><b>${esc(title)}</b>${sub?`<small>${esc(sub)}</small>`:''}</div><span>${right}</span></header>`}
 function empty(iconClass,title,text,action=''){return`<div class="ghp-empty"><i class="${iconClass}"></i><b>${esc(title)}</b><span>${esc(text)}</span>${action}</div>`}
 
 function renderMessages(){
@@ -723,10 +813,11 @@ function renderMediaVisual(m,tid='',mine=false){
   return`<div class="ghp-media-visual ${m.mediaKey?'has-key':''}"${ratio}>${local}<div class="ghp-media-placeholder"><i class="${icon}"></i><b>${label}</b><span>${esc(m.mediaDescription||`${label} attachment`)}</span>${m.mediaKey?'<small>Local preview</small>':''}</div>${attach}</div>${m.text?`<p class="ghp-media-caption">${esc(m.text)}</p>`:''}`;
 }
 function renderMessageBubble(m,th){
-  const mine=m.sender===persona().name,groupName=th.type==='group'&&!mine?`<small class="ghp-msg-sender">${esc(m.sender)}</small>`:'';
+  const mine=lc(m.sender)===lc(persona().name),groupName=th.type==='group'&&!mine?`<small class="ghp-msg-sender">${esc(m.sender)}</small>`:'';
   const body=m.type==='photo'||m.type==='video'?renderMediaVisual(m,th.id,mine):`<p>${esc(m.text)}</p>`;
   const request=m.requestMedia?`<small class="ghp-msg-request"><i class="${m.requestMedia==='video'?'fa-solid fa-video':'fa-regular fa-image'}"></i> Requested a ${esc(m.requestMedia)}</small>`:'';
-  return`<div class="ghp-msg ${mine?'mine':''} ${m.type!=='text'?'has-media':''}">${groupName}${body}${request}<time>${esc(timeText(new Date(m.timeMs)))}</time></div>`;
+  const edited=m.editedAt?'<span class="ghp-edited">Edited</span>':'';
+  return`<div class="ghp-msg ${mine?'mine':''} ${m.type!=='text'?'has-media':''}" data-thread-id="${esc(th.id)}" data-message-id="${esc(m.id)}" data-message-sender="${esc(m.sender)}">${groupName}${body}${request}<time>${edited}${esc(timeText(new Date(m.timeMs)))}</time></div>`;
 }
 function renderThread(){
   const t=timeline(),th=t.threads[threadId];if(!th){app='messages';return renderMessages()}markRead(th.id);
@@ -789,12 +880,22 @@ function renderApp(){
 }
 
 function buildOverlay(){
-  if(document.querySelector('#ghp-overlay'))return;const o=document.createElement('div');o.id='ghp-overlay';o.hidden=true;o.innerHTML=`<div class="ghp-backdrop" data-close></div><section class="ghp-device"><button class="ghp-close" data-close><i class="fa-solid fa-xmark"></i></button><div class="ghp-content"></div></section>`;o.addEventListener('click',click);o.addEventListener('change',change);o.addEventListener('submit',submit);document.body.appendChild(o);
+  if(document.querySelector('#ghp-overlay'))return;const o=document.createElement('div');o.id='ghp-overlay';o.hidden=true;o.innerHTML=`<div class="ghp-backdrop" data-close></div><section class="ghp-device"><button class="ghp-close" data-close><i class="fa-solid fa-xmark"></i></button><div class="ghp-content"></div></section>`;o.addEventListener('click',click);o.addEventListener('change',change);o.addEventListener('submit',submit);o.addEventListener('pointerdown',messagePressStart);o.addEventListener('pointermove',messagePressMove);o.addEventListener('pointerup',messagePressEnd);o.addEventListener('pointercancel',messagePressEnd);o.addEventListener('contextmenu',messageContextMenu);document.body.appendChild(o);
 }
 function render(){
   const o=document.querySelector('#ghp-overlay');if(!o||o.hidden)return;seedContacts(false);o.querySelector('.ghp-content').innerHTML=!unlocked&&profile().lockScreen?renderLock():(app?renderApp():renderHome());
   requestAnimationFrame(()=>{for(const s of o.querySelectorAll('.ghp-thread main,.ghp-call-screen main'))s.scrollTop=s.scrollHeight;hydrateMediaPreviews()});
 }
+function goBack(){
+  composeRequest={threadId:'',kind:''};
+  if(app==='thread'){threadId='';app='messages';return render()}
+  if(app==='contact'){contactId='';app='contacts';return render()}
+  if(app==='story'){threadId='';app='social';return render()}
+  if(app==='call'){callId='';app='phone';return render()}
+  if(app){threadId='';contactId='';callId='';app='';return render()}
+  render();
+}
+
 async function openPhone(){if(!hasChat()){globalThis.toastr?.warning?.('Open a SillyTavern chat first.');return}buildOverlay();seedContacts(true);unlocked=!profile().lockScreen;app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};const o=document.querySelector('#ghp-overlay');o.hidden=false;document.body.classList.add('ghp-open');render();if(profile().refreshMode==='stale-open'&&stale().stale)setTimeout(refreshPhone,250)}
 function closePhone(){const o=document.querySelector('#ghp-overlay');if(o)o.hidden=true;document.body.classList.remove('ghp-open');app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=false}
 function openApp(a){if(a==='settings'||profile().apps[a]){if(['phone','social','snap'].includes(a))mutate(t=>{for(const n of t.notifications)if(n.app===a)n.read=true},false);unlocked=true;app=a;threadId='';contactId='';composeRequest={threadId:'',kind:''};render()}}
@@ -836,6 +937,69 @@ function removeContact(cid){
   },false);
   contactId='';app='contacts';render();globalThis.toastr?.success?.(`${c.name} removed from Contacts.`);
 }
+
+function findThreadMessage(tid,mid,t=timeline(false)){const th=t?.threads?.[tid],m=th?.messages?.find(x=>x.id===mid);return th&&m?{th,m}:null}
+function editMirroredMessage(tid,mid,patch={}){
+  const active=timeline(),hit=findThreadMessage(tid,mid,active);if(!hit)return false;const owner=persona();
+  if(lc(hit.m.sender)!==lc(owner.name)){globalThis.toastr?.warning?.(`Switch to ${hit.m.sender}'s persona to edit this message.`);return false}
+  const mirrorId=hit.m.mirrorId,editedAt=Date.now(),r=metadataRoot();if(!r)return false;let continuityMsg=null,changed=false;
+  for(const phone of Object.values(r.phones||{})){
+    const t=normalizeTimeline(phone);
+    for(const th of Object.values(t.threads||{})){
+      for(const m of th.messages||[]){
+        if((mirrorId&&m.mirrorId===mirrorId)||(!mirrorId&&t===active&&th.id===tid&&m.id===mid)){
+          if(m.type==='text'){if(patch.text!==undefined)m.text=String(patch.text||'').trim()}
+          else{if(patch.mediaDescription!==undefined)m.mediaDescription=String(patch.mediaDescription||'').trim();if(patch.text!==undefined)m.text=String(patch.text||'').trim()}
+          m.editedAt=editedAt;continuityMsg=clone(m);changed=true;
+          for(const n of t.notifications||[])if(n.app==='messages'&&n.targetId===th.id&&Math.abs(Number(n.timeMs||0)-Number(m.timeMs||0))<1500)n.text=notificationTextForMessage(m);
+        }
+      }
+    }
+  }
+  if(!changed)return false;saveMetadataRoot(r);if(mirrorId&&continuityMsg)updateContinuityMirror(mirrorId,continuityMsg);else updatePrompt();render();return true;
+}
+function deleteMessageLocal(tid,mid){
+  let removed=false;mutate(t=>{const th=t.threads[tid];if(!th)return;const before=th.messages.length;th.messages=th.messages.filter(m=>m.id!==mid);removed=th.messages.length!==before},false);
+  if(removed){render();globalThis.toastr?.success?.('Message deleted from this phone.')}return removed;
+}
+function unsendMessageEverywhere(tid,mid){
+  const active=timeline(),hit=findThreadMessage(tid,mid,active);if(!hit)return false;const owner=persona();
+  if(lc(hit.m.sender)!==lc(owner.name)){globalThis.toastr?.warning?.(`Switch to ${hit.m.sender}'s persona to unsend this message.`);return false}
+  const mirrorId=hit.m.mirrorId,r=metadataRoot();if(!r)return false;let removed=false;
+  for(const phone of Object.values(r.phones||{})){
+    const t=normalizeTimeline(phone);
+    for(const th of Object.values(t.threads||{})){
+      const old=[...(th.messages||[])],gone=old.filter(m=>(mirrorId&&m.mirrorId===mirrorId)||(!mirrorId&&t===active&&th.id===tid&&m.id===mid));
+      if(!gone.length)continue;removed=true;const times=new Set(gone.map(m=>Number(m.timeMs||0)));th.messages=old.filter(m=>!gone.includes(m));
+      t.notifications=(t.notifications||[]).filter(n=>!(n.app==='messages'&&n.targetId===th.id&&times.has(Number(n.timeMs||0))));
+    }
+  }
+  if(!removed)return false;saveMetadataRoot(r);if(mirrorId)removeContinuityMirror(mirrorId);else updatePrompt();render();globalThis.toastr?.success?.('Message unsent.');return true;
+}
+function editMessagePopup(tid,mid){
+  const hit=findThreadMessage(tid,mid);if(!hit)return;const {m}=hit,owner=persona();if(lc(m.sender)!==lc(owner.name)){globalThis.toastr?.warning?.(`Switch to ${m.sender}'s persona to edit this message.`);return}
+  const media=m.type!=='text';
+  const fields=media?`<label><span><b>${m.type==='video'?'Video':'Photo'} description</b><small>This remains the AI-visible description.</small></span><textarea class="msg-media-desc">${esc(m.mediaDescription)}</textarea></label><label><span><b>Caption / message</b></span><textarea class="msg-edit-text">${esc(m.text)}</textarea></label>`:`<label><span><b>Message</b></span><textarea class="msg-edit-text">${esc(m.text)}</textarea></label>`;
+  const d=popup(`<form method="dialog" class="ghp-message-edit"><header><b>Edit Message</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header>${fields}<button type="button" class="primary" data-save-message-edit>Save</button></form>`);
+  d.querySelector('[data-save-message-edit]').onclick=()=>{const text=d.querySelector('.msg-edit-text')?.value??'',mediaDescription=d.querySelector('.msg-media-desc')?.value??m.mediaDescription;if((!media&&!String(text).trim())||(media&&!String(mediaDescription).trim())){globalThis.toastr?.warning?.(media?'Media description cannot be empty.':'Message cannot be empty.');return}if(editMirroredMessage(tid,mid,{text,mediaDescription}))d.close()};
+}
+function messageActionPopup(tid,mid){
+  const hit=findThreadMessage(tid,mid);if(!hit)return;const {m}=hit,owner=persona(),mine=lc(m.sender)===lc(owner.name),canUnsend=mine&&!!m.mirrorId;
+  const d=popup(`<div class="ghp-message-actions"><header><b>Message</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><small class="ghp-action-sender">${esc(m.sender)} · ${esc(timeText(new Date(m.timeMs)))}</small>${mine?`<button class="ghp-popup-action" data-edit-message><i class="fa-solid fa-pen"></i><span><b>Edit</b><small>Updates the mirrored message on both phones.</small></span></button>`:''}${canUnsend?`<button class="ghp-popup-action danger" data-unsend-message><i class="fa-solid fa-delete-left"></i><span><b>Unsend for everyone</b><small>Removes this mirrored message from both phones.</small></span></button>`:''}<button class="ghp-popup-action danger subtle" data-delete-local-message><i class="fa-solid fa-trash"></i><span><b>Delete from this phone</b><small>${mine?'Leaves the other phone copy intact.':`To edit or unsend, switch to ${esc(m.sender)}'s persona.`}</small></span></button></div>`);
+  d.querySelector('[data-popup-close]').onclick=()=>d.close();
+  d.querySelector('[data-edit-message]')?.addEventListener('click',()=>{d.close();editMessagePopup(tid,mid)});
+  d.querySelector('[data-unsend-message]')?.addEventListener('click',()=>{if(confirm('Unsend this message for everyone?')){d.close();unsendMessageEverywhere(tid,mid)}});
+  d.querySelector('[data-delete-local-message]').onclick=()=>{d.close();deleteMessageLocal(tid,mid)};
+}
+function cancelMessageLongPress(){if(longPressTimer)clearTimeout(longPressTimer);longPressTimer=null;longPressTarget=null;longPressPoint=null}
+function messagePressStart(e){
+  if(e.button!==undefined&&e.button!==0)return;const bubble=e.target.closest?.('.ghp-msg[data-message-id]');if(!bubble||e.target.closest?.('button,video,a,input,textarea,select'))return;cancelMessageLongPress();
+  longPressTarget=bubble;longPressPoint={x:Number(e.clientX||0),y:Number(e.clientY||0)};longPressTimer=setTimeout(()=>{const b=longPressTarget;cancelMessageLongPress();if(b)messageActionPopup(b.dataset.threadId,b.dataset.messageId)},560);
+}
+function messagePressMove(e){if(!longPressTimer||!longPressPoint)return;const dx=Number(e.clientX||0)-longPressPoint.x,dy=Number(e.clientY||0)-longPressPoint.y;if(Math.hypot(dx,dy)>12)cancelMessageLongPress()}
+function messagePressEnd(){cancelMessageLongPress()}
+function messageContextMenu(e){const bubble=e.target.closest?.('.ghp-msg[data-message-id]');if(!bubble||e.target.closest?.('button,video,a,input,textarea,select'))return;e.preventDefault();cancelMessageLongPress();messageActionPopup(bubble.dataset.threadId,bubble.dataset.messageId)}
+
 function threadMenuPopup(tid){
   const t=timeline(),th=t.threads[tid];if(!th)return;const d=popup(`<div><header><b>${esc(threadTitle(th,t))}</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><button class="ghp-popup-action danger" data-delete-conversation><i class="fa-solid fa-trash"></i><span><b>Delete Conversation</b><small>Delete this chat from this phone and stop using it as Phone AI context.</small></span></button></div>`);
   d.querySelector('[data-popup-close]').onclick=()=>d.close();d.querySelector('[data-delete-conversation]').onclick=()=>{if(!confirm(`Delete the entire conversation with ${threadTitle(th,t)} from this phone?`))return;deleteConversation(tid);d.close()};
@@ -893,7 +1057,7 @@ function saveSettings(){
 }
 function click(e){
   const x=e.target.closest('button,[data-thread],[data-contact],[data-story],[data-note],[data-mail]');if(!x)return;
-  if(x.matches('[data-close]'))return closePhone();if(x.matches('[data-unlock]')){unlocked=true;app='';return render()}if(x.matches('[data-home]')){app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};return render()}
+  if(x.matches('[data-close]'))return closePhone();if(x.matches('[data-unlock]')){unlocked=true;app='';return render()}if(x.matches('[data-back]'))return goBack()
   if(x.dataset.openApp)return openApp(x.dataset.openApp);if(x.matches('[data-refresh]'))return refreshPhone();if(x.matches('[data-new-thread]'))return newThreadPopup();
   if(x.dataset.thread){threadId=x.dataset.thread;app='thread';return render()}if(x.matches('[data-add-contact]'))return addContactPopup();if(x.matches('[data-discover]')){seedContacts(true);globalThis.toastr?.success?.('Relevant contacts refreshed.');return render()}if(x.matches('[data-removed-contacts]'))return restoreContactsPopup();
   if(x.dataset.contact){contactId=x.dataset.contact;app='contact';return render()}if(x.dataset.messageContact){const th=directThread(x.dataset.messageContact);threadId=th.id;app='thread';return render()}if(x.dataset.removeContact)return removeContact(x.dataset.removeContact);
@@ -917,24 +1081,53 @@ function relevantPhoneNames(){
   const text=latestUserText();for(const co of Object.values(t?.contacts||{})){const q=co.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');if(new RegExp(`(^|[^\\p{L}\\p{N}])${q}([^\\p{L}\\p{N}]|$)`,'iu').test(text))add(co.name)}
   return names;
 }
-function phonePromptSummary(){
-  const t=timeline(false);if(!t)return'';const relevant=relevantPhoneNames(),owner=persona(),lines=[];
-  for(const th of t.threadOrder.map(k=>t.threads[k]).filter(Boolean)){const memberNames=th.contactIds.map(k=>t.contacts[k]?.name).filter(Boolean);if(!memberNames.some(n=>relevant.has(lc(n))))continue;const recent=(th.messages||[]).slice(-8);if(!recent.length)continue;lines.push(`Phone conversation "${threadTitle(th,t)}": ${recent.map(messageContext).join(' | ')}`)}
-  for(const c of t.calls.slice(0,5)){if(!relevant.has(lc(c.contactName)))continue;const transcript=(c.transcript||[]).slice(-6);lines.push(`Phone call with ${c.contactName} (${c.status}): ${transcript.length?transcript.map(x=>`${x.sender}: ${x.text}`).join(' | '):'no transcript stored'}`)}
-  if(!lines.length)return'';const body=lines.join('\n').slice(-6500);
-  return`[Greyhaven Phone — factual phone continuity for ${owner.name}.]\n${body}\nContinuity rules: these phone interactions happened in this RP timeline. A sent/received photo or video is known through its stated visual description. Only participants should automatically know private messages/calls/media. Use them when relevant; do not mechanically recap them. Newer explicit roleplay overrides stale phone state.`;
+function continuityLine(e){return`[${continuityTime(e.roleplayMs)}] ${e.threadTitle?`${e.threadTitle} · `:''}${e.participants.length?`participants: ${e.participants.join(', ')} · `:''}${e.summary}`}
+function legacyPhoneHistory(){
+  const t=timeline(false),relevant=relevantPhoneNames(),out=[];if(!t)return out;
+  for(const th of t.threadOrder.map(k=>t.threads[k]).filter(Boolean)){const memberNames=th.contactIds.map(k=>t.contacts[k]?.name).filter(Boolean);if(!memberNames.some(n=>relevant.has(lc(n))))continue;for(const m of(th.messages||[]).slice(-4))out.push(`[${continuityTime(m.timeMs)}] ${threadTitle(th,t)} · ${messageContext(m)}`)}
+  return out.slice(-8);
 }
+function phonePromptSummary(){
+  if(!hasChat())return'';const snap=continuitySnapshot(),legacy=legacyPhoneHistory(),fresh=snap.fresh,planIds=new Set(fresh.filter(e=>e.persistent).map(e=>e.id)),plans=snap.plans.filter(e=>!planIds.has(e.id)),older=snap.history.filter(e=>!e.persistent).slice(-5);
+  if(!fresh.length&&!plans.length&&!older.length&&!legacy.length)return'';
+  const sections=[],cp=snap.checkpoint||{};
+  if(fresh.length)sections.push(`FRESH PHONE EVENTS — occurred after the last rendered main-roleplay output:\n${fresh.map(continuityLine).join('\n')}`);
+  if(plans.length)sections.push(`OLDER PHONE PLANS / COMMITMENTS — historical but may still matter if the roleplay has not resolved or cancelled them:\n${plans.map(continuityLine).join('\n')}`);
+  if(older.length)sections.push(`OLDER PHONE HISTORY — past facts only; do NOT treat transient locations/activities here as current:\n${older.map(continuityLine).join('\n')}`);
+  if(!snap.fresh.length&&!snap.plans.length&&legacy.length)sections.push(`LEGACY PHONE HISTORY FROM BEFORE THE CHRONOLOGY LEDGER — chronology is uncertain, so use only as past conversational facts, not as current location/activity:\n${legacy.join('\n')}`);
+  const body=sections.join('\n\n').slice(-8200);
+  return`[Greyhaven Phone — chronological phone ↔ roleplay continuity.]
+Current fictional time: ${continuityTime(snap.nowMs)}.
+Last rendered main-RP checkpoint: ${cp.roleplayMs?continuityTime(cp.roleplayMs):'not established yet'}.
+
+${body}
+
+STRICT CHRONOLOGY RULES:
+- Fresh phone events really happened after the last rendered main-RP output and may advance a participant's state. Example: if Aurora later texted that she got into the bath, the next RP output should not replay her getting out of bed first.
+- The newest explicit message in the CURRENT SillyTavern roleplay still wins if it contradicts Phone. Do not fight the live scene.
+- Once a newer main-RP character output happens, older transient phone states are history. Never keep someone stuck in an old bathtub, bed, car, workplace, etc. just because it is still the latest message in their phone thread.
+- Use RP timestamps sensibly: a transient activity from hours ago is not automatically still happening.
+- Plans/commitments can survive across later turns when they are still unresolved, but later cancellation, completion, time passage, Greyhaven Life state, or explicit RP overrides them.
+- Private messages/calls/media are knowledge only for their participants unless somebody shares them. They may still affect a participant's actions without making the contents public.
+- Media is known only through its written visual description.
+- Do not mechanically recap phone history; use it only when it naturally affects the scene.`;
+}
+function markRoleplayCheckpointIfAdvanced(){
+  const box=continuityRoot(),c=ctx();if(!box||!Array.isArray(c?.chat)||!c.chat.length)return;const len=c.chat.length,last=c.chat.at(-1),cp=box.state.rpCheckpoint||{};
+  if(last?.is_user||len===Number(cp.chatLength||0))return;markRoleplayCheckpoint();
+}
+
 function updatePrompt(){const c=ctx();if(!c?.setExtensionPrompt)return;const summary=hasChat()?phonePromptSummary():'';try{c.setExtensionPrompt(GHP_PROMPT_KEY,summary,GHP_PROMPT_POSITION_IN_CHAT,1,false,GHP_PROMPT_ROLE_SYSTEM)}catch(e){console.error(`[${GHP_MODULE}] setExtensionPrompt`,e)}}
 function buildMenu(){const m=document.querySelector('#extensionsMenu');if(!m||document.querySelector('#ghp-menu-entry'))return;const d=document.createElement('div');d.id='ghp-menu-entry';d.className='list-group-item flex-container flexGap5 interactable';d.tabIndex=0;d.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i><span>Greyhaven Phone</span>';d.onclick=openPhone;d.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openPhone()}};m.appendChild(d)}
 function observeMenu(){if(menuObserver)return;const m=document.querySelector('#extensionsMenu');if(!m)return;let q=false;menuObserver=new MutationObserver(()=>{if(q)return;q=true;requestAnimationFrame(()=>{q=false;buildMenu()})});menuObserver.observe(m,{childList:true})}
 function onChat(){const k=chatIdentity();if(k===currentChat)return;currentChat=k;app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;if(hasChat()){timeline();seedContacts(true)}if(!document.querySelector('#ghp-overlay')?.hidden)render()}
 function bind(){
   if(bound)return;const c=ctx();if(!c?.eventSource||!c.eventTypes)return;const b=(k,fn)=>{const e=c.eventTypes[k];if(e)c.eventSource.on(e,fn)};
-  b('CHAT_CHANGED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('CHAT_CREATED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('PERSONA_CHANGED',()=>setTimeout(()=>{app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;timeline();seedContacts(true);updatePrompt();render()},50));b('GENERATION_STARTED',()=>updatePrompt());b('GROUP_UPDATED',()=>setTimeout(()=>seedContacts(true),50));b('CHARACTER_EDITED',()=>setTimeout(()=>seedContacts(true),50));b('MESSAGE_SENT',()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()});b('CHARACTER_MESSAGE_RENDERED',()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()});bound=true;
+  b('CHAT_CHANGED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('CHAT_CREATED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('PERSONA_CHANGED',()=>setTimeout(()=>{app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;timeline();seedContacts(true);updatePrompt();render()},50));b('GENERATION_STARTED',()=>updatePrompt());b('GROUP_UPDATED',()=>setTimeout(()=>seedContacts(true),50));b('CHARACTER_EDITED',()=>setTimeout(()=>seedContacts(true),50));b('MESSAGE_SENT',()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()});b('CHARACTER_MESSAGE_RENDERED',()=>setTimeout(()=>{markRoleplayCheckpointIfAdvanced();if(!document.querySelector('#ghp-overlay')?.hidden)render()},20));bound=true;
 }
 function subscribeLife(){try{lifeUnsub?.()}catch{}lifeUnsub=null;if(typeof globalThis.GreyhavenLife?.subscribe==='function')lifeUnsub=globalThis.GreyhavenLife.subscribe(()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()})}
 function startClock(){clearInterval(clockTimer);clockTimer=setInterval(()=>{const o=document.querySelector('#ghp-overlay');if(o?.hidden)return;o.querySelectorAll('.ghp-status>span:first-child').forEach(x=>x.textContent=timeText());o.querySelectorAll('.ghp-lock h1').forEach(x=>x.textContent=timeText())},15000)}
-function expose(){globalThis.GreyhavenPhone={version:GHP_VERSION,open:openPhone,close:closePhone,refresh:refreshPhone,getProfile:()=>clone(profile()),getTimeline:()=>clone(timeline(false)),getContacts:()=>{const t=timeline(false);return clone(t?t.contactOrder.map(k=>t.contacts[k]).filter(Boolean):[])},getActivePersona:()=>clone(persona()),seedContacts:()=>clone(seedContacts(true)),removeContact}}
+function expose(){globalThis.GreyhavenPhone={version:GHP_VERSION,open:openPhone,close:closePhone,refresh:refreshPhone,getProfile:()=>clone(profile()),getTimeline:()=>clone(timeline(false)),getContacts:()=>{const t=timeline(false);return clone(t?t.contactOrder.map(k=>t.contacts[k]).filter(Boolean):[])},getActivePersona:()=>clone(persona()),getContinuitySnapshot:()=>clone(continuitySnapshot()),getPromptSummary:()=>phonePromptSummary(),seedContacts:()=>clone(seedContacts(true)),removeContact}}
 async function waitReady(ms=15000){const s=Date.now();while(Date.now()-s<ms){if(ctx()?.extensionSettings&&document.body)return true;await new Promise(r=>setTimeout(r,120))}return false}
 async function init(){if(initialized)return;if(!await waitReady())return;try{buildOverlay();buildMenu();observeMenu();bind();expose();onChat();updatePrompt();subscribeLife();startClock();initialized=true;console.info(`[${GHP_MODULE}] v${GHP_VERSION} loaded`)}catch(e){console.error(`[${GHP_MODULE}] init`,e)}}
 void init().catch(e=>console.error(`[${GHP_MODULE}] boot`,e));
