@@ -1,4 +1,14 @@
-# Greyhaven Phone v2.1.0
+# Greyhaven Phone v2.1.1
+
+Version 2.1.1 restores safe automatic contact seeding from each active
+identity's explicit `Relationships:` character-card section. It does not expose
+numbers from incidental prose, a shared scene, or the full SillyTavern
+character directory, and manually removed contacts remain removed. The
+Snapchat shutter now has a reliable mobile tap target and always opens a panel.
+Marketplace listing prices are normalized to one fixed whole-euro price, with
+AI-generated price ranges explicitly forbidden.
+
+## Previous v2.1.0 social-world update
 
 Version 2.1 makes social phones feel established without generating thousands
 of named NPC records. Every identity receives a persistent global Instagram,

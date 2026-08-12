@@ -1,7 +1,7 @@
 import './index.js';
 
 /*
- * Greyhaven Phone v2.1.0 bridge layer
+ * Greyhaven Phone v2.1.1 bridge layer
  * Extends the tested Phone core with:
  * - shared Greyhaven World/Event Ledger materialization
  * - RP -> Phone message/media/call/block mirroring
@@ -9,8 +9,8 @@ import './index.js';
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '2.1.0';
-const CORE_VERSION = '2.1.0';
+const BRIDGE_VERSION = '2.1.1';
+const CORE_VERSION = '2.1.1';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
 const DEFAULT_RELAY_TOKENS = 420;
