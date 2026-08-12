@@ -1,4 +1,24 @@
-# Greyhaven Phone v2.0.0
+# Greyhaven Phone v2.1.0
+
+Version 2.1 makes social phones feel established without generating thousands
+of named NPC records. Every identity receives a persistent global Instagram,
+Snapchat, and Facebook audience baseline inferred conservatively from its
+character card; influencer/public accounts receive larger plausible audiences.
+Named social relationships remain chat-scoped and editable. Existing saved
+Contacts are connected once across all three social apps, without later undoing
+a manual unfollow or removal.
+
+Instagram/Facebook post engagement is now synchronized by shared event and
+identity IDs, so likes and comments appear on the author's phone as well as the
+viewer's copy. Unified Phone Refresh handles pending follow/add/friend actions
+more decisively and may create occasional first-name-only Snapchat requests.
+
+Marketplace no longer consumes the unified Phone Refresh prompt. Its dedicated
+append-only refresh creates a useful listing batch while preserving older
+listings, and can generate interested buyers for listings made by the active
+persona. The Snapchat Camera's duplicate Add Friends button was removed.
+
+## Previous v2.0.0 shared phone-world update
 
 Version 2.0 adds the shared Greyhaven Phone World backend: persistent global
 9-digit identities, an idempotent action bus shared with Greyhaven Life,

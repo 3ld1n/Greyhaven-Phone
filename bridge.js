@@ -1,7 +1,7 @@
 import './index.js';
 
 /*
- * Greyhaven Phone v2.0.0 bridge layer
+ * Greyhaven Phone v2.1.0 bridge layer
  * Extends the tested Phone core with:
  * - shared Greyhaven World/Event Ledger materialization
  * - RP -> Phone message/media/call/block mirroring
@@ -9,8 +9,8 @@ import './index.js';
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '2.0.0';
-const CORE_VERSION = '2.0.0';
+const BRIDGE_VERSION = '2.1.0';
+const CORE_VERSION = '2.1.0';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
 const DEFAULT_RELAY_TOKENS = 420;
@@ -567,6 +567,14 @@ async function materializeWorldEvent(event,{allowRelay=true}={}) {
     } else if (type === 'contact.exchange') {
         saveExplicitContact(from,to,'exchange');
         saveExplicitContact(to,from,'exchange');
+    } else if (type === 'instagram.follow' || type === 'instagram.unfollow') {
+        globalThis.GreyhavenPhone?.apps?.followInstagram?.(from,to,type === 'instagram.follow',{notify:true});
+    } else if (type === 'snapchat.add' || type === 'snapchat.accept' || type === 'snapchat.decline') {
+        const action = type === 'snapchat.add' ? 'request' : type === 'snapchat.accept' ? 'accept' : 'decline';
+        globalThis.GreyhavenPhone?.apps?.requestSnapchat?.(from,to,action,{notify:action !== 'decline'});
+    } else if (type === 'facebook.friend.request' || type === 'facebook.friend.accept' || type === 'facebook.friend.decline') {
+        const action = type.endsWith('.request') ? 'request' : type.endsWith('.accept') ? 'accept' : 'decline';
+        globalThis.GreyhavenPhone?.apps?.requestFacebook?.(from,to,action,{notify:action !== 'decline'});
     } else {
         if (eid) markProcessed(eid);
         return;
@@ -873,7 +881,7 @@ function reconcileExistingWorldEvents() {
         events = globalThis.GreyhavenLife?.getWorldEvents?.({limit:80}) || [];
     } catch {}
     for (const e of events) {
-        if (!['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange'].includes(norm(e?.type))) continue;
+        if (!['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange','instagram.follow','instagram.unfollow','snapchat.add','snapchat.accept','snapchat.decline','facebook.friend.request','facebook.friend.accept','facebook.friend.decline'].includes(norm(e?.type))) continue;
         if (e.id && wasProcessed(e.id)) continue;
         // Reconciliation should materialize old RP actions but never spend tokens
         // merely because the extension/page was reloaded.
