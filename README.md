@@ -1,4 +1,17 @@
-# Greyhaven Phone v1.2.2
+# Greyhaven Phone v2.0.0
+
+Version 2.0 adds the shared Greyhaven Phone World backend: persistent global
+9-digit identities, an idempotent action bus shared with Greyhaven Life,
+number-based Contacts, Instagram, Snapchat, Facebook/Marketplace, independent
+per-app relationship and chat state, and one installed-app-aware AI refresh.
+Legacy Social posts/stories migrate into Instagram, while existing iMessage,
+call, media, boundary, mirrored-thread and chronology data remain compatible.
+
+The bridge now materializes normal RP, Guided Generations, and phone-originated
+`GH_ACTION` events through the same path. Cross-character delivery to the
+currently active persona is committed without generating that persona's reply.
+
+## Previous v1.2.2 boundary update
 
 Focused social-boundary hotfix for Greyhaven Phone.
 

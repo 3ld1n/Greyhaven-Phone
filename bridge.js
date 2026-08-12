@@ -1,16 +1,16 @@
 import './index.js';
 
 /*
- * Greyhaven Phone v1.3.1 bridge layer
- * Keeps the tested v1.2.2 Phone core intact and adds:
+ * Greyhaven Phone v2.0.0 bridge layer
+ * Extends the tested Phone core with:
  * - shared Greyhaven World/Event Ledger materialization
  * - RP -> Phone message/media/call/block mirroring
  * - optional one-hop background replies (never recursive)
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '1.3.1';
-const CORE_VERSION = '1.2.2';
+const BRIDGE_VERSION = '2.0.0';
+const CORE_VERSION = '2.0.0';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
 const DEFAULT_RELAY_TOKENS = 420;
@@ -172,10 +172,14 @@ function defaultContinuity() {
 }
 function defaultTimeline(ownerName='',ownerAvatar='') {
     return {
-        version:2, ownerName:norm(ownerName), ownerAvatar:ownerAvatar || '',
+        version:4, ownerName:norm(ownerName), ownerAvatar:ownerAvatar || '', identityId:'',
         createdAt:Date.now(), updatedAt:Date.now(),
         contacts:{}, contactOrder:[], suppressedContacts:[],
+        relationships:{},
         threads:{}, threadOrder:[], calls:[], posts:[], stories:[],
+        instagram:{posts:[],stories:[],notifications:[],threads:{},threadOrder:[]},
+        snapchat:{stories:[],memories:[],eyesOnly:[],notifications:[],threads:{},threadOrder:[]},
+        facebook:{posts:[],notifications:[],friendRequests:[],marketplace:{listings:[]},threads:{},threadOrder:[]},
         notifications:[], photos:[], notes:[], mail:[],
         refresh:{lastAt:null,chatLength:0,eventKeys:[],summary:''},
     };
@@ -185,11 +189,11 @@ function phoneRoot(create=true) {
     if (!c?.chatMetadata || !hasChat()) return null;
     let root = c.chatMetadata[PHONE_META_KEY];
     if ((!root || typeof root !== 'object') && create) {
-        root = {version:3, phones:{}, continuity:defaultContinuity(), worldBridge:{processed:[]}};
+        root = {version:4, phones:{}, continuity:defaultContinuity(), worldBridge:{processed:[]}};
         c.chatMetadata[PHONE_META_KEY] = root;
     }
     if (!root || typeof root !== 'object') return null;
-    root.version = Math.max(3, Number(root.version || 3));
+    root.version = Math.max(4, Number(root.version || 4));
     if (!root.phones || typeof root.phones !== 'object') root.phones = {};
     if (!root.continuity || typeof root.continuity !== 'object') root.continuity = defaultContinuity();
     if (!Array.isArray(root.continuity.events)) root.continuity.events = [];
@@ -219,15 +223,19 @@ function saveRoot(root) {
 }
 function normalizeTimelineLite(t, ownerName='') {
     if (!t || typeof t !== 'object') t = defaultTimeline(ownerName);
-    t.version = Math.max(2, Number(t.version || 2));
+    t.version = Math.max(4, Number(t.version || 4));
     t.ownerName = norm(t.ownerName || ownerName);
     t.ownerAvatar ||= '';
-    for (const k of ['contacts','threads']) if (!t[k] || typeof t[k] !== 'object') t[k] = {};
+    t.identityId ||= globalThis.GreyhavenPhone?.getIdentityByName?.(t.ownerName)?.id || '';
+    for (const k of ['contacts','relationships','threads']) if (!t[k] || typeof t[k] !== 'object') t[k] = {};
     for (const k of ['contactOrder','suppressedContacts','threadOrder','calls','posts','stories','notifications','photos','notes','mail']) {
         if (!Array.isArray(t[k])) t[k] = [];
     }
     t.refresh = t.refresh && typeof t.refresh === 'object'
         ? t.refresh : {lastAt:null,chatLength:0,eventKeys:[],summary:''};
+    t.instagram ||= {posts:t.posts,stories:t.stories,notifications:[],threads:{},threadOrder:[]};
+    t.snapchat ||= {stories:[],memories:[],eyesOnly:[],notifications:[],threads:{},threadOrder:[]};
+    t.facebook ||= {posts:[],notifications:[],friendRequests:[],marketplace:{listings:[]},threads:{},threadOrder:[]};
     return t;
 }
 function phoneForOwner(ownerName, ownerAvatar='', create=true) {
@@ -257,14 +265,19 @@ function ensureContact(t, name) {
     if (contact) {
         contact.name ||= name;
         contact.avatar ||= charAvatar(name);
+        const identity = globalThis.GreyhavenPhone?.getIdentityByName?.(name);
+        contact.identityId ||= identity?.id || '';
+        contact.phoneNumber ||= identity?.phoneNumber || '';
         return contact;
     }
     const found = findCharacter(name);
+    const identity = globalThis.GreyhavenPhone?.getIdentityByName?.(name);
     const cid = `contact:${uid()}`;
     contact = {
         id:cid, name, avatar:charAvatar(name),
         characterId:found?.index ?? null,
         personaDescription:'',
+        identityId:identity?.id || '',phoneNumber:identity?.phoneNumber || '',saved:false,
         source:'world-bridge', favorite:false,
         blocked:false, blockedByContact:false, ignoringOwner:false,
         boundaryLevel:0, muted:false, locationSharing:'precise', nickname:'',
@@ -272,10 +285,13 @@ function ensureContact(t, name) {
     t.contacts[cid] = contact;
     t.contactOrder ||= [];
     t.contactOrder.push(cid);
-    // A completed RP phone action is stronger evidence than an old "remove contact"
-    // preference, so allow the contact to exist again if they really communicate.
-    t.suppressedContacts = (t.suppressedContacts || []).filter(x => x !== lc(name));
     return contact;
+}
+function saveExplicitContact(ownerName,targetName,source='exchange') {
+    const api = globalThis.GreyhavenPhone;
+    if (typeof api?.saveContactForOwner === 'function') return api.saveContactForOwner(ownerName,targetName,{source});
+    const box=phoneForOwner(ownerName,charAvatar(ownerName),true),contact=box?ensureContact(box.timeline,targetName):null;
+    if (!box || !contact) return null;contact.saved=true;contact.source=source;box.timeline.suppressedContacts=(box.timeline.suppressedContacts||[]).filter(x=>x!==lc(targetName));box.root.phones[box.key]=box.timeline;saveRoot(box.root);return contact;
 }
 function ensureThread(t, peerName) {
     const contact = ensureContact(t,peerName);
@@ -513,7 +529,8 @@ async function materializeWorldEvent(event,{allowRelay=true}={}) {
     const type = norm(event.type);
     const from = norm(event.actor || event.from);
     const to = norm(event.target || event.to);
-    if (!from || !to || lc(from) === lc(to)) {
+    const known = name => !!(findCharacter(name) || lc(ctx()?.name1) === lc(name) || globalThis.GreyhavenPhone?.getIdentityByName?.(name));
+    if (!from || !to || lc(from) === lc(to) || !known(from) || !known(to)) {
         if (eid) markProcessed(eid);
         return;
     }
@@ -545,6 +562,11 @@ async function materializeWorldEvent(event,{allowRelay=true}={}) {
         syncBlock(from,to,true);
     } else if (type === 'contact.unblock') {
         syncBlock(from,to,false);
+    } else if (type === 'contact.add') {
+        saveExplicitContact(from,to,'number');
+    } else if (type === 'contact.exchange') {
+        saveExplicitContact(from,to,'exchange');
+        saveExplicitContact(to,from,'exchange');
     } else {
         if (eid) markProcessed(eid);
         return;
@@ -640,6 +662,9 @@ async function maybeGenerateOneHopReply(event) {
     if (!settings.enabled || settings.mode === 'economy') return;
 
     const from = norm(event.actor), to = norm(event.target);
+    // Delivery is still committed above, but the person currently controlled by
+    // the user must answer manually from their own phone/persona.
+    if (to && lc(to) === lc(ctx()?.name1)) return;
     const eventType = norm(event.type);
     const isMedia = eventType === 'media.send';
     const mediaType = isMedia && ['photo','video'].includes(lc(event.data?.mediaType))
@@ -660,6 +685,7 @@ async function maybeGenerateOneHopReply(event) {
     // autonomous responses for a persona-only or unknown person.
     const targetCard = cardData(to);
     if (!targetCard) return;
+    const targetIdentity = globalThis.GreyhavenPhone?.getIdentityByName?.(to) || null;
 
     const targetState = phoneBlockState(to,from);
     if (targetState.blocked) return;
@@ -681,6 +707,8 @@ async function maybeGenerateOneHopReply(event) {
 IDENTITY LOCK:
 - You are ${to}. Never claim to be ${from}, the user's persona, or another character.
 - ${from} is the person who sent the newest message.
+- Preserve names exactly and never invent, expand, or guess a surname.
+- ${to}'s authoritative phone number is ${targetIdentity?.phoneNumber || 'unavailable'}. If asked for their own number, use that exact 9-digit value and never invent another.
 - Preserve ${to}'s own personality, relationship, vocabulary, boundaries, emotions, slang, emoji habits, maturity and texting style from the character data and conversation.
 - Do not become formal/therapeutic/generic unless ${to} truly speaks that way.
 - A close friend/partner may be casual, messy, teasing, affectionate, profane or emoji-heavy when natural. A stranger may be colder.
@@ -698,7 +726,7 @@ BLOCK`;
     const prompt = `FICTIONAL TIME: ${new Date(rpNowMs()).toString()}
 
 ${to} CHARACTER:
-${JSON.stringify(targetCard)}
+${JSON.stringify({...targetCard,phoneNumber:targetIdentity?.phoneNumber || ''})}
 
 ${from} CONTEXT:
 ${JSON.stringify(sender)}
@@ -845,7 +873,7 @@ function reconcileExistingWorldEvents() {
         events = globalThis.GreyhavenLife?.getWorldEvents?.({limit:80}) || [];
     } catch {}
     for (const e of events) {
-        if (!['message.send','media.send','call.place','contact.block','contact.unblock'].includes(norm(e?.type))) continue;
+        if (!['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange'].includes(norm(e?.type))) continue;
         if (e.id && wasProcessed(e.id)) continue;
         // Reconciliation should materialize old RP actions but never spend tokens
         // merely because the extension/page was reloaded.

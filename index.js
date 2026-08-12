@@ -1,19 +1,22 @@
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '1.2.2';
+const GHP_VERSION = '2.0.0';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
+const GHP_IDENTITY_PROMPT_KEY = 'greyhaven_phone_identities';
 const GHP_PROMPT_POSITION_IN_CHAT = 1;
 const GHP_PROMPT_ROLE_SYSTEM = 0;
 const MEDIA_DB_NAME = 'GreyhavenPhoneMedia';
 const MEDIA_STORE = 'media';
+const PHONE_ACTION_RE = /<!--\s*GH_ACTION\s+([\s\S]*?)-->/gi;
 
 const APPS = {
   messages:{label:'Messages',icon:'fa-solid fa-comment',tint:'#4cd964'},
   phone:{label:'Phone',icon:'fa-solid fa-phone',tint:'#48cf62'},
   contacts:{label:'Contacts',icon:'fa-solid fa-address-book',tint:'#aeb3bd'},
-  social:{label:'Social',icon:'fa-solid fa-camera-retro',tint:'#c95a9b'},
-  snap:{label:'Snap',icon:'fa-solid fa-location-dot',tint:'#f0d84e'},
+  instagram:{label:'Instagram',icon:'fa-brands fa-instagram',tint:'#c837ab'},
+  snapchat:{label:'Snapchat',icon:'fa-brands fa-snapchat',tint:'#f6df36'},
+  facebook:{label:'Facebook',icon:'fa-brands fa-facebook-f',tint:'#1877f2'},
   calendar:{label:'Calendar',icon:'fa-regular fa-calendar',tint:'#ef5e5e'},
   photos:{label:'Photos',icon:'fa-regular fa-images',tint:'#72bfff'},
   notes:{label:'Notes',icon:'fa-regular fa-note-sticky',tint:'#ecd257'},
@@ -42,12 +45,13 @@ const DEFAULT_PROFILE = {
   recentMessages:20,
   recentChars:12000,
   responseTokens:1600,
-  apps:{messages:true,phone:true,contacts:true,social:true,snap:true,calendar:true,photos:true,notes:true,mail:false,settings:true}
+  apps:{messages:true,phone:true,contacts:true,instagram:true,snapchat:true,facebook:true,calendar:true,photos:true,notes:true,mail:false,settings:true}
 };
 
 let initialized=false, bound=false, menuObserver=null, lifeUnsub=null, clockTimer=null;
 let currentChat='', unlocked=false, app='', threadId='', contactId='', callId='';
 let refreshBusy=false, replyBusy=false, replyHidden=false, islandText='', islandIcon='';
+let appView='', itemId='', appReplyBusy=false;
 let composeRequest={threadId:'',kind:''};
 let longPressTimer=null,longPressTarget=null,longPressPoint=null;
 let mediaDbPromise=null;
@@ -58,6 +62,7 @@ const mediaMemoryFallback=new Map();
 function ctx(){try{return globalThis.SillyTavern?.getContext?.()||null}catch(e){console.warn(`[${GHP_MODULE}] context`,e);return null}}
 function clone(v){if(v===undefined)return undefined;try{return structuredClone(v)}catch{return JSON.parse(JSON.stringify(v))}}
 function id(){try{return ctx()?.uuidv4?.()||crypto.randomUUID()}catch{return `ghp-${Date.now()}-${Math.random().toString(36).slice(2)}`}}
+function hashString(value=''){let h=2166136261;for(const ch of String(value)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619)}return(h>>>0).toString(36)}
 function esc(v){return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;')}
 function norm(v){return String(v||'').trim().replace(/\s+/g,' ')}
 function slug(v){return norm(v).toLowerCase().replace(/[’']/g,'').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-+|-+$/g,'')||'persona'}
@@ -119,10 +124,88 @@ function persona(){
 function settingsRoot(){
   const c=ctx();if(!c?.extensionSettings)return{profiles:{}};
   if(!c.extensionSettings[GHP_SETTINGS_KEY]||typeof c.extensionSettings[GHP_SETTINGS_KEY]!=='object')c.extensionSettings[GHP_SETTINGS_KEY]={profiles:{}};
-  const r=c.extensionSettings[GHP_SETTINGS_KEY];if(!r.profiles||typeof r.profiles!=='object')r.profiles={};return r;
+  const r=c.extensionSettings[GHP_SETTINGS_KEY];if(!r.profiles||typeof r.profiles!=='object')r.profiles={};
+  if(!r.identities||typeof r.identities!=='object'||Array.isArray(r.identities))r.identities={};
+  if(!r.identityVersion)r.identityVersion=1;
+  return r;
+}
+function phoneDigits(value){return String(value||'').replace(/\D/g,'')}
+function cleanPhoneNumber(value){return phoneDigits(value).slice(0,9)}
+function validPhoneNumber(value){return /^\d{9}$/.test(phoneDigits(value))}
+function characterIdentityId(ch,index=-1){
+  const stable=String(ch?.avatar||ch?.data?.avatar||'').trim();
+  return stable?`character:${encodeURIComponent(stable)}`:`character-name:${encodeURIComponent(norm(ch?.name||`character-${index}`))}`;
+}
+function personaIdentityId(p=persona()){
+  const match=(ctx()?.characters||[]).map((ch,index)=>({ch,index})).filter(x=>lc(x.ch?.name)===lc(p.name));
+  if(match.length===1)return characterIdentityId(match[0].ch,match[0].index);
+  return`persona:${encodeURIComponent(p.avatarId||p.name)}`;
+}
+function nextPhoneNumber(registry){
+  const used=new Set(Object.values(registry||{}).map(x=>cleanPhoneNumber(x?.phoneNumber)).filter(validPhoneNumber));
+  for(let attempt=0;attempt<300;attempt++){
+    let n=0;
+    try{const a=new Uint32Array(1);crypto.getRandomValues(a);n=100000000+(a[0]%900000000)}catch{n=100000000+Math.floor(Math.random()*900000000)}
+    const value=String(n);if(!used.has(value))return value;
+  }
+  for(let n=100000000;n<=999999999;n++)if(!used.has(String(n)))return String(n);
+  throw new Error('No phone numbers are available.');
+}
+function normalizeIdentity(raw={},idValue=''){
+  const x=raw&&typeof raw==='object'?raw:{};x.id=String(x.id||idValue||`provisional:${id()}`);x.kind=['character','persona','provisional'].includes(x.kind)?x.kind:'character';x.name=norm(x.name||'Unknown');x.avatar=String(x.avatar||'');x.characterAvatar=String(x.characterAvatar||'');x.personaAvatarId=String(x.personaAvatarId||'');x.phoneNumber=cleanPhoneNumber(x.phoneNumber);x.createdAt=Math.max(0,Number(x.createdAt||Date.now()));x.updatedAt=Math.max(0,Number(x.updatedAt||Date.now()));x.metadata=x.metadata&&typeof x.metadata==='object'?x.metadata:{};return x;
+}
+function ensureIdentity(descriptor={},create=true){
+  const c=ctx(),root=settingsRoot(),registry=root.identities;
+  const identityId=String(descriptor.id||'');if(!identityId)return null;
+  let x=registry[identityId];if(!x&&!create)return null;
+  if(!x)x={id:identityId,kind:descriptor.kind||'character',name:norm(descriptor.name),createdAt:Date.now(),metadata:{}};
+  x=normalizeIdentity({...x,...descriptor,id:identityId},identityId);
+  if(x.kind!=='provisional'&&!validPhoneNumber(x.phoneNumber))x.phoneNumber=nextPhoneNumber(registry);
+  x.updatedAt=Date.now();registry[identityId]=x;
+  if(c?.extensionSettings){c.extensionSettings[GHP_SETTINGS_KEY]=root;c.saveSettingsDebounced?.()}
+  return x;
+}
+function ensureAllIdentities(){
+  const c=ctx(),root=settingsRoot();
+  for(let index=0;index<(c?.characters||[]).length;index++){
+    const ch=c.characters[index],name=norm(ch?.name);if(!name)continue;
+    ensureIdentity({id:characterIdentityId(ch,index),kind:'character',name,avatar:thumb(ch),characterAvatar:String(ch?.avatar||'')});
+  }
+  const p=persona();ensureIdentity({id:personaIdentityId(p),kind:personaIdentityId(p).startsWith('character:')?'character':'persona',name:p.name,avatar:p.avatar,personaAvatarId:p.avatarId});
+  return root.identities;
+}
+function identityById(identityId,create=false){
+  const root=settingsRoot(),x=root.identities?.[identityId];return x?normalizeIdentity(x,identityId):(create?ensureIdentity({id:identityId,name:'Unknown'}):null);
+}
+function identityForCharacter(ch,index=-1,create=true){
+  if(!ch)return null;return ensureIdentity({id:characterIdentityId(ch,index),kind:'character',name:norm(ch.name),avatar:thumb(ch),characterAvatar:String(ch.avatar||'')},create);
+}
+function identityForName(name,{create=false}={}){
+  name=norm(name);if(!name)return null;const c=ctx(),matches=(c?.characters||[]).map((ch,index)=>({ch,index})).filter(x=>lc(x.ch?.name)===lc(name));
+  if(matches.length===1)return identityForCharacter(matches[0].ch,matches[0].index,create);
+  const existing=Object.values(settingsRoot().identities||{}).map(x=>normalizeIdentity(x,x.id)).filter(x=>lc(x.name)===lc(name));
+  if(existing.length===1)return existing[0];
+  if(lc(persona().name)===lc(name)){const p=persona();return ensureIdentity({id:personaIdentityId(p),kind:personaIdentityId(p).startsWith('character:')?'character':'persona',name:p.name,avatar:p.avatar,personaAvatarId:p.avatarId},create)}
+  return existing[0]||null;
+}
+function currentIdentity(){const p=persona();return ensureIdentity({id:personaIdentityId(p),kind:personaIdentityId(p).startsWith('character:')?'character':'persona',name:p.name,avatar:p.avatar,personaAvatarId:p.avatarId})}
+function identityByNumber(number){if(!validPhoneNumber(number))return null;const value=phoneDigits(number);ensureAllIdentities();return Object.values(settingsRoot().identities||{}).map(x=>normalizeIdentity(x,x.id)).find(x=>x.phoneNumber===value)||null}
+function createProvisionalIdentity(name,metadata={}){
+  // Marketplace-generated people intentionally use one first name only.
+  const first=(norm(name).match(/[\p{L}\p{M}'’-]+/u)||[])[0]||'Seller';
+  return ensureIdentity({id:`provisional:${id()}`,kind:'provisional',name:first,phoneNumber:'',metadata:{...metadata,provisional:true}},true);
+}
+function updateIdentityNumber(identityId,number){
+  if(!validPhoneNumber(number))throw new Error('Phone numbers must contain exactly 9 digits.');const value=phoneDigits(number);
+  const root=settingsRoot(),duplicate=Object.values(root.identities||{}).find(x=>x?.id!==identityId&&cleanPhoneNumber(x?.phoneNumber)===value);if(duplicate)throw new Error('That phone number already belongs to another Greyhaven identity.');
+  const x=identityById(identityId);if(!x)throw new Error('Identity not found.');x.phoneNumber=value;x.updatedAt=Date.now();root.identities[identityId]=x;ctx()?.saveSettingsDebounced?.();updatePrompt();return clone(x);
 }
 function normalizeProfile(raw={}){
-  return{...DEFAULT_PROFILE,...raw,apps:{...DEFAULT_PROFILE.apps,...(raw.apps||{})},
+  const legacyApps=raw.apps||{},migratedApps={...legacyApps};
+  if(!('instagram'in migratedApps)&&'social'in migratedApps)migratedApps.instagram=migratedApps.social;
+  if(!('snapchat'in migratedApps)&&'snap'in migratedApps)migratedApps.snapchat=migratedApps.snap;
+  delete migratedApps.social;delete migratedApps.snap;
+  return{...DEFAULT_PROFILE,...raw,apps:{...DEFAULT_PROFILE.apps,...migratedApps},
     wallpaper:WALLPAPERS[raw.wallpaper]?raw.wallpaper:'aurora',
     staleAfterMessages:Math.max(3,Math.min(100,Number(raw.staleAfterMessages||12))),
     maxNewEvents:Math.max(1,Math.min(8,Number(raw.maxNewEvents||4))),
@@ -144,6 +227,8 @@ function saveProfile(patch){
   r.profiles[p.key]=normalizeProfile({...profile(),...patch,personaName:p.name,personaAvatar:p.avatar});
   c.extensionSettings[GHP_SETTINGS_KEY]=r;c.saveSettingsDebounced?.();render();
 }
+function profileForIdentity(identity){if(identity?.id&&identity.id===currentIdentity()?.id)return profile();const profiles=Object.values(settingsRoot().profiles||{}),match=profiles.find(p=>lc(p?.personaName)===lc(identity?.name)&&(identity?.avatar?!p?.personaAvatar||String(p.personaAvatar)===String(identity.avatar):true))||profiles.find(p=>lc(p?.personaName)===lc(identity?.name));return normalizeProfile(match||{})}
+function identityAppEnabled(identity,appName){return profileForIdentity(identity).apps?.[appName]!==false}
 
 function normalizeMessage(m={}){
   m.id||=id();m.sender=norm(m.sender||'Unknown');m.senderId||='';
@@ -159,18 +244,52 @@ function normalizeMessage(m={}){
   m.deliveryState=['sent','not-delivered'].includes(m.deliveryState)?m.deliveryState:'sent';
   return m;
 }
-function defaultTimeline(ownerName='',ownerAvatar=''){return{version:2,ownerName:norm(ownerName),ownerAvatar:ownerAvatar||'',createdAt:Date.now(),updatedAt:Date.now(),contacts:{},contactOrder:[],suppressedContacts:[],threads:{},threadOrder:[],calls:[],posts:[],stories:[],notifications:[],photos:[],notes:[],mail:[],refresh:{lastAt:null,chatLength:0,eventKeys:[],summary:''}}}
-function normalizeContact(x={}){x.id||=`contact:${id()}`;x.name=norm(x.name||'Unknown');x.avatar||='';x.characterId=Number.isInteger(Number(x.characterId))?Number(x.characterId):null;x.personaDescription=String(x.personaDescription||'');x.source||='manual';x.favorite=x.favorite===true;x.blocked=x.blocked===true;x.blockedByContact=x.blockedByContact===true;x.ignoringOwner=x.ignoringOwner===true;x.boundaryLevel=Math.max(0,Number(x.boundaryLevel||0)||0);x.muted=x.muted===true;x.locationSharing=['precise','approximate','off'].includes(x.locationSharing)?x.locationSharing:'precise';x.nickname||='';return x}
+function defaultAppThread(){return{threads:{},threadOrder:[]}}
+function defaultInstagram(){return{posts:[],stories:[],notifications:[],...defaultAppThread()}}
+function defaultSnapchat(){return{stories:[],memories:[],eyesOnly:[],notifications:[],...defaultAppThread()}}
+function defaultFacebook(){return{posts:[],notifications:[],friendRequests:[],marketplace:{listings:[]},...defaultAppThread()}}
+function defaultTimeline(ownerName='',ownerAvatar=''){return{version:4,ownerName:norm(ownerName),ownerAvatar:ownerAvatar||'',identityId:'',createdAt:Date.now(),updatedAt:Date.now(),contacts:{},contactOrder:[],suppressedContacts:[],relationships:{},threads:{},threadOrder:[],calls:[],posts:[],stories:[],instagram:defaultInstagram(),snapchat:defaultSnapchat(),facebook:defaultFacebook(),notifications:[],photos:[],notes:[],mail:[],refresh:{lastAt:null,chatLength:0,eventKeys:[],summary:''}}}
+function normalizeContact(x={}){
+  x.id||=`contact:${id()}`;x.name=norm(x.name||'Unknown');x.avatar||='';x.characterId=Number.isInteger(Number(x.characterId))?Number(x.characterId):null;x.personaDescription=String(x.personaDescription||'');x.source||='manual';x.identityId=String(x.identityId||'');x.phoneNumber=cleanPhoneNumber(x.phoneNumber);x.saved=x.saved!==false;x.favorite=x.favorite===true;x.blocked=x.blocked===true;x.blockedByContact=x.blockedByContact===true;x.ignoringOwner=x.ignoringOwner===true;x.boundaryLevel=Math.max(0,Number(x.boundaryLevel||0)||0);x.muted=x.muted===true;x.locationSharing=['precise','approximate','off'].includes(x.locationSharing)?x.locationSharing:'precise';x.nickname||='';return x
+}
+function normalizeAppRelationship(raw={},identity=null){
+  const r=raw&&typeof raw==='object'?raw:{};r.identityId=String(r.identityId||identity?.id||'');r.name=norm(r.name||identity?.name||'Unknown');r.avatar=String(r.avatar||identity?.avatar||'');r.familiarity=String(r.familiarity||'');r.relationshipType=String(r.relationshipType||'');r.impression=String(r.impression||'');r.friendliness=String(r.friendliness||'');r.tension=String(r.tension||'');r.interest=String(r.interest||'');r.latestInteraction=r.latestInteraction&&typeof r.latestInteraction==='object'?r.latestInteraction:null;r.knownContactInfo=r.knownContactInfo&&typeof r.knownContactInfo==='object'?r.knownContactInfo:{phoneNumber:false};r.apps=r.apps&&typeof r.apps==='object'?r.apps:{};
+  r.apps.messages={blocked:false,blockedBy:false,...(r.apps.messages||{})};
+  r.apps.instagram={following:false,followedBy:false,blocked:false,blockedBy:false,requestedAt:0,...(r.apps.instagram||{})};
+  r.apps.snapchat={friends:false,outgoingRequest:false,incomingRequest:false,blocked:false,blockedBy:false,mapSharing:'precise',...((r.apps.snapchat)||{})};
+  r.apps.facebook={friends:false,outgoingRequest:false,incomingRequest:false,blocked:false,blockedBy:false,...(r.apps.facebook||{})};
+  return r;
+}
+function normalizeAppMessage(raw={}){
+  const m=normalizeMessage(raw);m.opened=m.opened===true;m.saved=m.saved===true;m.app=String(m.app||'');return m;
+}
+function normalizeAppThreads(store={}){
+  store=store&&typeof store==='object'?store:{};if(!store.threads||typeof store.threads!=='object')store.threads={};if(!Array.isArray(store.threadOrder))store.threadOrder=[];
+  for(const [key,value] of Object.entries(store.threads)){const th=value&&typeof value==='object'?value:{};th.id=key;th.identityId=String(th.identityId||'');th.peerName=norm(th.peerName||'Unknown');th.peerAvatar=String(th.peerAvatar||'');th.messages=Array.isArray(th.messages)?th.messages.map(normalizeAppMessage):[];th.createdAt=Math.max(0,Number(th.createdAt||Date.now()));store.threads[key]=th}
+  store.threadOrder=store.threadOrder.filter(k=>store.threads[k]);for(const key of Object.keys(store.threads))if(!store.threadOrder.includes(key))store.threadOrder.push(key);return store;
+}
 function normalizeTimeline(t){
-  t=t&&typeof t==='object'?t:defaultTimeline();t.version=Math.max(2,Number(t.version||1));t.ownerName=norm(t.ownerName||'');t.ownerAvatar=t.ownerAvatar||'';t.updatedAt||=Date.now();
+  t=t&&typeof t==='object'?t:defaultTimeline();t.version=Math.max(4,Number(t.version||1));t.ownerName=norm(t.ownerName||'');t.ownerAvatar=t.ownerAvatar||'';t.identityId=String(t.identityId||identityForName(t.ownerName,{create:false})?.id||'');t.updatedAt||=Date.now();
   if(!t.contacts||typeof t.contacts!=='object')t.contacts={};if(!Array.isArray(t.contactOrder))t.contactOrder=[];if(!Array.isArray(t.suppressedContacts))t.suppressedContacts=[];
   t.suppressedContacts=[...new Set(t.suppressedContacts.map(lc).filter(Boolean))];
-  for(const [k,v] of Object.entries(t.contacts))t.contacts[k]=normalizeContact({...v,id:k});
+  if(!t.relationships||typeof t.relationships!=='object'||Array.isArray(t.relationships))t.relationships={};
+  for(const [k,v] of Object.entries(t.contacts)){
+    const co=normalizeContact({...v,id:k}),match=co.identityId?identityById(co.identityId):identityForName(co.name,{create:false});
+    if(match){co.identityId=match.id;co.phoneNumber=match.phoneNumber||co.phoneNumber;co.avatar=co.avatar||match.avatar}
+    t.contacts[k]=co;
+  }
   t.contactOrder=t.contactOrder.filter(k=>t.contacts[k]);for(const k of Object.keys(t.contacts))if(!t.contactOrder.includes(k))t.contactOrder.push(k);
+  for(const [key,value] of Object.entries(t.relationships)){const identity=identityById(key)||identityForName(value?.name,{create:false});t.relationships[key]=normalizeAppRelationship(value,identity)}
+  for(const co of Object.values(t.contacts)){if(!co.identityId)continue;const identity=identityById(co.identityId);t.relationships[co.identityId]=normalizeAppRelationship(t.relationships[co.identityId],identity||co);t.relationships[co.identityId].knownContactInfo.phoneNumber=co.saved&&validPhoneNumber(co.phoneNumber);t.relationships[co.identityId].apps.messages.blocked=!!co.blocked;t.relationships[co.identityId].apps.messages.blockedBy=!!co.blockedByContact}
   if(!t.threads||typeof t.threads!=='object')t.threads={};if(!Array.isArray(t.threadOrder))t.threadOrder=[];
   for(const [k,v] of Object.entries(t.threads)){v.id=k;v.type=v.type==='group'?'group':'direct';v.title||='';v.contactIds=Array.isArray(v.contactIds)?v.contactIds.filter(Boolean):[];v.messages=Array.isArray(v.messages)?v.messages.map(normalizeMessage):[];v.createdAt||=Date.now()}
   t.threadOrder=t.threadOrder.filter(k=>t.threads[k]);for(const k of Object.keys(t.threads))if(!t.threadOrder.includes(k))t.threadOrder.push(k);
   for(const k of ['calls','posts','stories','notifications','photos','notes','mail'])if(!Array.isArray(t[k]))t[k]=[];
+  for(const n of t.notifications){if(n?.app==='social')n.app='instagram';if(n?.app==='snap')n.app='snapchat'}
+  t.instagram=normalizeAppThreads(t.instagram||{});if(!Array.isArray(t.instagram.posts))t.instagram.posts=t.posts;if(!Array.isArray(t.instagram.stories))t.instagram.stories=t.stories;if(!Array.isArray(t.instagram.notifications))t.instagram.notifications=[];
+  if(!t.instagram.posts.length&&t.posts.length)t.instagram.posts=t.posts;if(!t.instagram.stories.length&&t.stories.length)t.instagram.stories=t.stories;for(const p of t.instagram.posts){if(!Array.isArray(p.comments)){p.commentCount=Math.max(0,Number(p.commentCount||p.comments||0));p.comments=[]}else p.commentCount=Math.max(Number(p.commentCount||0),p.comments.length);const legacyContact=t.contacts?.[p.contactId],identity=p.identityId?identityById(p.identityId):identityForName(p.author||legacyContact?.name,{create:false});if(identity){p.identityId=identity.id;p.author=identity.name}}for(const s of t.instagram.stories){const legacyContact=t.contacts?.[s.contactId],identity=s.identityId?identityById(s.identityId):identityForName(s.author||legacyContact?.name,{create:false});if(identity){s.identityId=identity.id;s.author=identity.name}}t.posts=t.instagram.posts;t.stories=t.instagram.stories;
+  t.snapchat=normalizeAppThreads(t.snapchat||{});for(const k of ['stories','memories','eyesOnly','notifications'])if(!Array.isArray(t.snapchat[k]))t.snapchat[k]=[];
+  t.facebook=normalizeAppThreads(t.facebook||{});for(const k of ['posts','notifications','friendRequests'])if(!Array.isArray(t.facebook[k]))t.facebook[k]=[];if(!t.facebook.marketplace||typeof t.facebook.marketplace!=='object')t.facebook.marketplace={listings:[]};if(!Array.isArray(t.facebook.marketplace.listings))t.facebook.marketplace.listings=[];
   t.refresh=t.refresh&&typeof t.refresh==='object'?t.refresh:{};t.refresh.chatLength=Math.max(0,Number(t.refresh.chatLength||0));t.refresh.eventKeys=Array.isArray(t.refresh.eventKeys)?t.refresh.eventKeys.slice(-80):[];t.refresh.summary||='';
   return t;
 }
@@ -186,8 +305,8 @@ function normalizeContinuity(c={}){
 }
 function metadataRoot(){
   const c=ctx();if(!c?.chatMetadata||!hasChat())return null;let r=c.chatMetadata[GHP_META_KEY];
-  if(!r||typeof r!=='object'){r={version:3,phones:{},continuity:normalizeContinuity()};c.chatMetadata[GHP_META_KEY]=r}
-  r.version=Math.max(3,Number(r.version||1));if(!r.phones||typeof r.phones!=='object')r.phones={};r.continuity=normalizeContinuity(r.continuity);return r
+  if(!r||typeof r!=='object'){r={version:4,phones:{},continuity:normalizeContinuity()};c.chatMetadata[GHP_META_KEY]=r}
+  r.version=Math.max(4,Number(r.version||1));if(!r.phones||typeof r.phones!=='object')r.phones={};r.continuity=normalizeContinuity(r.continuity);return r
 }
 
 function continuityRoot(){const r=metadataRoot();return r?{root:r,state:r.continuity}:null}
@@ -245,11 +364,11 @@ function timeline(create=true){
     if(hit){oldKey=hit[0];t=hit[1];r.phones[p.key]=t;if(oldKey!==p.key&&oldKey.startsWith('latent:'))delete r.phones[oldKey]}
   }
   if(!t&&create){t=defaultTimeline(p.name,p.avatar);r.phones[p.key]=t;saveMetadataRoot(r)}
-  if(t){t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';r.phones[p.key]=t;if(oldKey)saveMetadataRoot(r)}
+  if(t){t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';t.identityId=currentIdentity()?.id||t.identityId||'';r.phones[p.key]=t;if(oldKey)saveMetadataRoot(r)}
   return t||null;
 }
 function persist(t,doRender=true){
-  const r=metadataRoot();if(!r)return;const p=persona();t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';t.updatedAt=Date.now();r.phones[p.key]=t;saveMetadataRoot(r);updatePrompt();if(doRender)render()
+  const r=metadataRoot();if(!r)return;const p=persona();t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';t.identityId=currentIdentity()?.id||t.identityId||'';t.updatedAt=Date.now();r.phones[p.key]=t;saveMetadataRoot(r);updatePrompt();if(doRender)render()
 }
 function mutate(fn,doRender=true){const t=timeline();fn(t);persist(t,doRender);return t}
 
@@ -257,11 +376,19 @@ function thumb(ch){const c=ctx();try{if(c?.getThumbnailUrl&&ch?.avatar)return c.
 function findCharacter(name){const c=ctx(),l=lc(name);const i=c?.characters?.findIndex(x=>lc(x?.name)===l)??-1;return i>=0?{character:c.characters[i],index:i}:null}
 function unsuppress(t,name){const key=lc(name);t.suppressedContacts=(t.suppressedContacts||[]).filter(x=>x!==key)}
 function isSuppressed(t,name){return(t.suppressedContacts||[]).includes(lc(name))}
+function ensureRelationship(t,identityOrName){
+  let identity=typeof identityOrName==='string'?(identityById(identityOrName)||identityForName(identityOrName,{create:false})):identityOrName;
+  if(!identity?.id)return null;t.relationships||={};t.relationships[identity.id]=normalizeAppRelationship(t.relationships[identity.id],identity);return t.relationships[identity.id];
+}
+function noteRelationshipInteraction(t,identityOrName,appName,summary,timeMs=now().getTime()){
+  const reln=ensureRelationship(t,identityOrName);if(!reln)return;reln.latestInteraction={app:appName,summary:String(summary||'').slice(0,600),timeMs:Number(timeMs||now().getTime())};
+}
 function upsertContact(t,d){
-  const name=norm(d?.name);if(!name||isSuppressed(t,name)&&d?.source!=='manual')return null;
-  let x=Object.values(t.contacts).find(c=>d.characterId!==null&&d.characterId!==undefined&&c.characterId!==null&&Number(c.characterId)===Number(d.characterId))||Object.values(t.contacts).find(c=>lc(c.name)===lc(name));
-  if(x){x.avatar=d.avatar||x.avatar;if(d.characterId!==undefined&&d.characterId!==null)x.characterId=Number(d.characterId);if(d.personaDescription)x.personaDescription=String(d.personaDescription);return x}
-  const cid=d.id||`contact:${id()}`;x=normalizeContact({...d,id:cid,name});t.contacts[cid]=x;t.contactOrder.push(cid);return x;
+  const name=norm(d?.name),explicit=['manual','number','exchange'].includes(d?.source);if(!name||isSuppressed(t,name)&&!explicit)return null;
+  const identity=d.identityId?identityById(d.identityId):identityForName(name,{create:true});
+  let x=Object.values(t.contacts).find(c=>identity?.id&&c.identityId===identity.id)||Object.values(t.contacts).find(c=>d.characterId!==null&&d.characterId!==undefined&&c.characterId!==null&&Number(c.characterId)===Number(d.characterId))||Object.values(t.contacts).find(c=>lc(c.name)===lc(name));
+  if(x){x.avatar=d.avatar||identity?.avatar||x.avatar;if(d.characterId!==undefined&&d.characterId!==null)x.characterId=Number(d.characterId);if(d.personaDescription)x.personaDescription=String(d.personaDescription);if(identity){x.identityId=identity.id;x.phoneNumber=identity.phoneNumber||x.phoneNumber}if(d.saved===true)x.saved=true;if(d.source==='manual'||d.source==='number'||d.source==='exchange')x.source=d.source;const reln=ensureRelationship(t,identity);if(reln&&x.saved)reln.knownContactInfo.phoneNumber=validPhoneNumber(x.phoneNumber);return x}
+  const cid=d.id||`contact:${id()}`;x=normalizeContact({...d,id:cid,name,identityId:identity?.id||'',phoneNumber:identity?.phoneNumber||d.phoneNumber||'',avatar:d.avatar||identity?.avatar||'',saved:d.saved===true});t.contacts[cid]=x;t.contactOrder.push(cid);const reln=ensureRelationship(t,identity);if(reln&&x.saved)reln.knownContactInfo.phoneNumber=validPhoneNumber(x.phoneNumber);return x;
 }
 function relationshipDescriptors(){
   const c=ctx(),text=personaDescription(),out=[];if(!c?.characters?.length||!text)return out;
@@ -274,12 +401,18 @@ function chatDescriptors(){
   if(c.groupId){const g=c.groups?.find(x=>String(x?.id)===String(c.groupId)),disabled=new Set(Array.isArray(g?.disabled_members)?g.disabled_members:[]);for(const m of g?.members||[]){const a=typeof m==='string'?m:m?.avatar;if(a&&!disabled.has(a))add(c.characters?.findIndex(ch=>ch?.avatar===a))}}else add(c.characterId);return out;
 }
 function seedContacts(save=true){
-  const t=timeline(),p=persona(),seen=new Set();
-  for(const d of [...relationshipDescriptors(),...lifeDescriptors(),...chatDescriptors()]){
-    if(!d.name||lc(d.name)===lc(p.name)||seen.has(lc(d.name))||isSuppressed(t,d.name))continue;
-    seen.add(lc(d.name));upsertContact(t,d);
+  // v2 contact policy: create global identities/numbers, but never turn chat,
+  // Life tracking, or a name mention into ownership of somebody's phone number.
+  // Legacy contacts already saved in this timeline are preserved and enriched.
+  ensureAllIdentities();const t=timeline();
+  for(const co of Object.values(t.contacts||{})){
+    const identity=co.identityId?identityById(co.identityId):identityForName(co.name,{create:false});
+    if(!identity)continue;co.identityId=identity.id;co.phoneNumber=identity.phoneNumber||co.phoneNumber;co.avatar=co.avatar||identity.avatar;co.saved=co.saved!==false;const reln=ensureRelationship(t,identity);if(reln&&co.saved)reln.knownContactInfo.phoneNumber=validPhoneNumber(co.phoneNumber);
   }
   if(save)persist(t,false);return t.contactOrder.map(k=>t.contacts[k]).filter(Boolean);
+}
+function saveContactForOwner(ownerRef,targetRef,{source='exchange'}={}){
+  const owner=resolveIdentityRef(ownerRef,true),target=resolveIdentityRef(targetRef,true);if(!owner||!target||owner.id===target.id)return null;const box=phoneForIdentity(owner,true);if(!box)return null;unsuppress(box.timeline,target.name);const found=findCharacter(target.name),co=upsertContact(box.timeline,{name:target.name,avatar:target.avatar,characterId:found?.index??null,identityId:target.id,phoneNumber:target.phoneNumber,source:['number','exchange'].includes(source)?source:'exchange',saved:true});if(!co)return null;co.saved=true;co.phoneNumber=target.phoneNumber;const reln=ensureRelationship(box.timeline,target);if(reln)reln.knownContactInfo.phoneNumber=true;box.root.phones[box.key]=box.timeline;saveMetadataRoot(box.root);return clone(co);
 }
 function contact(x){const t=timeline(),l=lc(x);return t.contacts[x]||Object.values(t.contacts).find(c=>lc(c.name)===l||lc(c.nickname)===l)||null}
 function directThread(cid){
@@ -290,12 +423,19 @@ function directThread(cid){
 function phoneForOwner(ownerName,ownerAvatar='',create=true){
   const r=metadataRoot();if(!r)return null;const name=norm(ownerName);if(!name)return null;
   let hit=Object.entries(r.phones).find(([,v])=>lc(v?.ownerName)===lc(name));
-  if(hit){const t=normalizeTimeline(hit[1]);t.ownerName=name;t.ownerAvatar=ownerAvatar||t.ownerAvatar||'';return{root:r,key:hit[0],timeline:t}}
+  if(hit){const t=normalizeTimeline(hit[1]),identity=identityForName(name,{create:true});t.ownerName=name;t.ownerAvatar=ownerAvatar||identity?.avatar||t.ownerAvatar||'';t.identityId=identity?.id||t.identityId||'';return{root:r,key:hit[0],timeline:t}}
   if(!create)return null;
-  const key=`latent:${slug(name)}`;const t=defaultTimeline(name,ownerAvatar);r.phones[key]=t;return{root:r,key,timeline:t};
+  const identity=identityForName(name,{create:true}),key=`latent:${slug(name)}`;const t=defaultTimeline(name,ownerAvatar||identity?.avatar||'');t.identityId=identity?.id||'';r.phones[key]=t;return{root:r,key,timeline:t};
+}
+function phoneForIdentity(identity,create=true){
+  if(!identity?.id)return null;const r=metadataRoot();if(!r)return null;
+  let hit=Object.entries(r.phones).find(([,value])=>String(value?.identityId||'')===identity.id);
+  if(!hit&&identity.kind!=='provisional')hit=Object.entries(r.phones).find(([,value])=>lc(value?.ownerName)===lc(identity.name));
+  if(hit){const t=normalizeTimeline(hit[1]);t.ownerName=identity.name;t.ownerAvatar=identity.avatar||t.ownerAvatar||'';t.identityId=identity.id;return{root:r,key:hit[0],timeline:t}}
+  if(!create)return null;const key=`latent-id:${encodeURIComponent(identity.id)}`,t=defaultTimeline(identity.name,identity.avatar||'');t.identityId=identity.id;r.phones[key]=t;return{root:r,key,timeline:t};
 }
 function ensurePeerContact(t,name,avatar='',personaDescription=''){
-  const match=findCharacter(name);return upsertContact(t,{name,avatar:avatar||thumb(match?.character),characterId:match?.index??null,personaDescription,source:'phone-peer'});
+  const match=findCharacter(name),identity=identityForName(name,{create:true});return upsertContact(t,{name,avatar:avatar||identity?.avatar||thumb(match?.character),characterId:match?.index??null,identityId:identity?.id||'',phoneNumber:identity?.phoneNumber||'',personaDescription,source:'phone-peer',saved:false});
 }
 function ensureDirectThreadIn(t,cid){
   let th=Object.values(t.threads).find(x=>x.type==='direct'&&x.contactIds.length===1&&x.contactIds[0]===cid);
@@ -308,9 +448,110 @@ function mirrorRichMessageToPhone({phoneOwner,phoneOwnerAvatar='',peerName,peerA
   const th=ensureDirectThreadIn(box.timeline,peer.id),source=normalizeMessage(clone(message));
   if(source.mirrorId&&th.messages.some(m=>m.mirrorId===source.mirrorId))return;
   source.id=id();source.sender=senderName;source.senderId=lc(senderName)===lc(phoneOwner)?'owner':peer.id;source.read=!unread;
-  th.messages.push(source);
+  th.messages.push(source);noteRelationshipInteraction(box.timeline,peer.identityId||peer.name,'messages',messageContext(source),source.timeMs);
   if(unread)box.timeline.notifications.unshift({id:id(),app:'messages',title:peer.nickname||peer.name,text:notificationTextForMessage(source),timeMs:source.timeMs,read:false,targetId:th.id});
   box.timeline.updatedAt=Date.now();box.root.phones[box.key]=box.timeline;saveMetadataRoot(box.root);
+}
+
+function appStore(t,appName){return appName==='instagram'?t.instagram:appName==='snapchat'?t.snapchat:t.facebook}
+function ensureAppThreadIn(t,appName,identity){
+  const store=appStore(t,appName);if(!store||!identity?.id)return null;let th=Object.values(store.threads||{}).find(x=>x.identityId===identity.id);
+  if(!th){const key=`${appName}-thread:${id()}`;th={id:key,identityId:identity.id,peerName:identity.name,peerAvatar:identity.avatar||'',createdAt:Date.now(),messages:[]};store.threads[key]=th;store.threadOrder.unshift(key)}
+  th.peerName=identity.name;th.peerAvatar=identity.avatar||th.peerAvatar||'';return th;
+}
+function pushAppNotification(t,appName,identity,text,targetId='',eventId=''){
+  const notification={id:id(),app:appName,title:identity?.name||appName,text:String(text||'New activity'),timeMs:now().getTime(),read:false,targetId,eventId};t.notifications.unshift(notification);appStore(t,appName)?.notifications?.unshift?.(clone(notification));return notification;
+}
+function mirrorAppMessage({appName,fromName,toName,fromIdentityId='',toIdentityId='',type='text',text='',mediaDescription='',mediaKey='',mediaWidth=0,mediaHeight=0,timeMs=now().getTime(),mirrorId='',unread=true}){
+  if(!['instagram','snapchat','facebook'].includes(appName))return null;const fromIdentity=identityById(fromIdentityId)||identityForName(fromName,{create:true}),toIdentity=identityById(toIdentityId)||identityForName(toName,{create:true});if(!fromIdentity||!toIdentity)return null;
+  if(!identityAppEnabled(toIdentity,appName))return{delivered:false,disabled:true};
+  const sender=phoneForIdentity(fromIdentity,true),recipient=phoneForIdentity(toIdentity,true);if(!sender||!recipient)return null;
+  const senderRel=ensureRelationship(sender.timeline,toIdentity),recipientRel=ensureRelationship(recipient.timeline,fromIdentity),appKey=appName==='snapchat'?'snapchat':appName;
+  if(senderRel?.apps?.[appKey]?.blockedBy||recipientRel?.apps?.[appKey]?.blocked)return{delivered:false};
+  const shared=mirrorId||`${appName}:${id()}`,message=normalizeAppMessage({id:id(),mirrorId:shared,sender:fromIdentity.name,senderId:fromIdentity.id,type,text,mediaDescription,mediaKey,mediaWidth,mediaHeight,timeMs,realMs:Date.now(),read:true,opened:appName!=='snapchat'||type==='text'});
+  const senderThread=ensureAppThreadIn(sender.timeline,appName,toIdentity),recipientThread=ensureAppThreadIn(recipient.timeline,appName,fromIdentity);if(!senderThread||!recipientThread)return null;
+  if(!senderThread.messages.some(x=>x.mirrorId===shared))senderThread.messages.push({...clone(message),id:id(),read:true,opened:true});
+  if(!recipientThread.messages.some(x=>x.mirrorId===shared))recipientThread.messages.push({...clone(message),id:id(),read:!unread,opened:appName!=='snapchat'||type==='text'});
+  noteRelationshipInteraction(sender.timeline,toIdentity,appName,`${fromIdentity.name}: ${text||mediaDescription}`,timeMs);noteRelationshipInteraction(recipient.timeline,fromIdentity,appName,`${fromIdentity.name}: ${text||mediaDescription}`,timeMs);
+  if(unread)pushAppNotification(recipient.timeline,appName,fromIdentity,appName==='snapchat'&&type!=='text'?`${fromIdentity.name} sent you a Snap`:text||`${type==='video'?'Video':'Photo'} message`,recipientThread.id,shared);
+  sender.timeline.updatedAt=Date.now();recipient.timeline.updatedAt=Date.now();sender.root.phones[sender.key]=sender.timeline;sender.root.phones[recipient.key]=recipient.timeline;saveMetadataRoot(sender.root);
+  const appLabel=APPS[appName]?.label||appName,summary=type==='text'?`${fromIdentity.name} sent ${toIdentity.name} a private ${appLabel} message: ${text}`:`${fromIdentity.name} sent ${toIdentity.name} a private ${appLabel} ${type}: ${mediaDescription}${text?` | Caption: ${text}`:''}`;recordContinuityEvent({kind:type==='text'?'social':'media',participants:[fromIdentity.name,toIdentity.name],sender:fromIdentity.name,summary,threadTitle:`${appLabel} with ${toIdentity.name}`,mirrorId:shared,roleplayMs:timeMs});return{delivered:true,message,thread:recipientThread};
+}
+function appThread(appName,threadKey,t=timeline()){return appStore(t,appName)?.threads?.[threadKey]||null}
+function appPeer(thread){return thread?.identityId?identityById(thread.identityId):identityForName(thread?.peerName,{create:false})}
+function appRelationship(t,identity,appName,create=true){const reln=create?ensureRelationship(t,identity):t?.relationships?.[identity?.id||identity];return reln?.apps?.[appName]||null}
+function openAppConversation(appName,identityId){
+  const identity=identityById(identityId);if(!identity)return;const t=timeline(),th=ensureAppThreadIn(t,appName,identity);persist(t,false);app=appName;appView='thread';itemId=th.id;render();
+}
+function socialActionBlocked(t,identity,appName){const state=appRelationship(t,identity,appName);return !!(state?.blocked||state?.blockedBy)}
+async function generateAppReply(appName,threadKey){
+  if(appReplyBusy)return;let t=timeline(),th=appThread(appName,threadKey,t),peer=appPeer(th);if(!th||!peer||socialActionBlocked(t,peer,appName))return;
+  const owner=persona(),ownerIdentity=currentIdentity(),last=th.messages.at(-1);if(!last||lc(last.sender)!==lc(owner.name))return;
+  appReplyBusy=true;islandText=`${peer.name}…`;islandIcon=APPS[appName]?.icon||'fa-solid fa-ellipsis';render();
+  try{
+    const found=findCharacter(peer.name),w=world(),life=w.people.find(p=>lc(p.name)===lc(peer.name))||null,reln=t.relationships?.[peer.id]||null,listing=t.facebook.marketplace.listings.find(x=>x.sellerIdentityId===peer.id)||null;
+    const systemPrompt=`IDENTITY LOCK: You are ${peer.name}. ${owner.name} is the other person. Never swap identities or invent/expand a surname.
+You are replying in ${appName==='instagram'?'an Instagram DM':appName==='snapchat'?'a Snapchat chat':'Facebook Messenger'} inside an ongoing fictional roleplay.
+Sound like ${peer.name}: preserve the character card, personality, relationship, mood, and established chat voice. Natural slang, emojis, teasing, profanity, abbreviations, short messages and silence are allowed when they fit. Do not default to robotic, formal, customer-service or therapy language.
+The identity phoneNumber is authoritative. ${peer.name} knows their own number and must use that exact value if directly asked, never invent another.
+Use Greyhaven Life as current context. Do not invent a location or claim to be with ${owner.name} without evidence.
+You may refuse, tease, leave the message unanswered, or block when that is genuinely in character. Do not force compliance.
+Return up to 3 protocol items using only TEXT:, PHOTO:, VIDEO:, or ACTION: IGNORE. If media is sent, PHOTO/VIDEO must be a concrete description of what the other person sees.
+If ${peer.name} genuinely completes a separate phone action now, you may append the same hidden <!--GH_ACTION {...}--> marker used by roleplay. The from field must be ${peer.name}, targets must be exact existing names, and no action marker is allowed for a request, refusal, hesitation, or promise for later. Never generate the target's response.`;
+    const prompt=`PERSON REPLYING:
+${JSON.stringify({identity:{id:peer.id,name:peer.name,kind:peer.kind,phoneNumber:peer.phoneNumber||'',metadata:peer.metadata},character:found?cardData({name:peer.name,characterId:found.index}):{},life,sharedRelationship:reln,marketplaceListing:listing})}
+
+PHONE OWNER:
+${JSON.stringify({name:owner.name,relationshipContext:owner.description.slice(0,7000)})}
+
+GREYHAVEN LIFE:
+${JSON.stringify({time:w.time,scene:w.scene,snapshot:w.snapshot})}
+
+RECENT MAIN RP:
+${recentChat()}
+
+THIS APP THREAD (independent from iMessage and other apps):
+${JSON.stringify(th.messages.slice(-24).map(messageContext))}
+
+Choose ${peer.name}'s one bounded response now. ACTION: IGNORE is valid.`;
+    const packet=parseDirectPacket(await generate({prompt,systemPrompt,responseLength:680}));
+    for(const row of packet.items.slice(0,3))mirrorAppMessage({appName,fromName:peer.name,toName:owner.name,fromIdentityId:peer.id,toIdentityId:ownerIdentity.id,type:row.type,text:row.text||'',mediaDescription:row.mediaDescription||'',timeMs:now().getTime(),unread:false});
+    if(packet.actions?.length)dispatchGeneratedPhoneActions(packet.actions,peer.name,`app:${appName}:${last.mirrorId||last.id}`);
+  }catch(e){console.error(`[${GHP_MODULE}] ${appName} reply`,e);globalThis.toastr?.error?.(`${APPS[appName]?.label||'App'} reply failed: ${e?.message||e}`)}
+  finally{appReplyBusy=false;islandText='';islandIcon='';render()}
+}
+function sendAppMessage(appName,threadKey,{type='text',text='',mediaDescription='',mediaKey='',mediaWidth=0,mediaHeight=0}={}){
+  const t=timeline(),th=appThread(appName,threadKey,t),peer=appPeer(th),owner=currentIdentity();text=String(text||'').trim();mediaDescription=String(mediaDescription||'').trim();if(!th||!peer||!owner||socialActionBlocked(t,peer,appName))return false;if(type==='text'&&!text||type!=='text'&&!mediaDescription)return false;
+  const result=mirrorAppMessage({appName,fromName:owner.name,toName:peer.name,fromIdentityId:owner.id,toIdentityId:peer.id,type,text,mediaDescription,mediaKey,mediaWidth,mediaHeight,timeMs:now().getTime(),unread:true});render();if(result?.delivered)setTimeout(()=>generateAppReply(appName,threadKey),180);return !!result?.delivered;
+}
+function publishAppItem(appName,kind,row){
+  const root=metadataRoot(),owner=currentIdentity();if(!root||!owner)return;const shared=row.sharedEventId||`${appName}-${kind}:${id()}`,source={...row,sharedEventId:shared,identityId:owner.id,author:owner.name,ownerPost:true};
+  const own=timeline(),ownStore=appStore(own,appName),ownList=kind==='story'?ownStore.stories:ownStore.posts;if(!ownList.some(x=>x.sharedEventId===shared))ownList.unshift(source);
+  for(const [key,raw] of Object.entries(root.phones||{})){
+    const phone=normalizeTimeline(raw),phoneIdentity=identityById(phone.identityId)||identityForName(phone.ownerName,{create:false});if(phone===own||phone.identityId===owner.id||phoneIdentity&&!identityAppEnabled(phoneIdentity,appName))continue;const reln=phone.relationships?.[owner.id]?.apps?.[appName],visible=appName==='instagram'?reln?.following:appName==='snapchat'?reln?.friends:reln?.friends;if(!visible||reln?.blocked||reln?.blockedBy)continue;
+    const list=kind==='story'?appStore(phone,appName).stories:appStore(phone,appName).posts;if(!list.some(x=>x.sharedEventId===shared))list.unshift({...clone(source),ownerPost:false});root.phones[key]=phone;
+  }
+  root.phones[persona().key]=own;saveMetadataRoot(root);render();
+}
+function resolveIdentityRef(value,create=true){return identityById(String(value||''))||identityForName(value,{create})}
+function setInstagramFollowing(actorName,targetName,following=true,{notify=true}={}){
+  const actor=resolveIdentityRef(actorName,true),target=resolveIdentityRef(targetName,true);if(!actor||!target||actor.id===target.id)return false;const a=phoneForIdentity(actor,true),b=phoneForIdentity(target,true);if(!a||!b)return false;
+  const ar=ensureRelationship(a.timeline,target),br=ensureRelationship(b.timeline,actor);ar.apps.instagram.following=!!following;ar.apps.instagram.requestedAt=following?now().getTime():0;br.apps.instagram.followedBy=!!following;if(notify&&identityAppEnabled(target,'instagram'))pushAppNotification(b.timeline,'instagram',actor,following?`${actor.name} started following you`:`${actor.name} unfollowed you`);
+  a.root.phones[a.key]=a.timeline;a.root.phones[b.key]=b.timeline;saveMetadataRoot(a.root);recordContinuityEvent({kind:'social',participants:[actor.name,target.name],sender:actor.name,summary:`${actor.name} ${following?'followed':'unfollowed'} ${target.name} on Instagram.`,threadTitle:'Instagram',mirrorId:`instagram-rel:${id()}`,roleplayMs:now().getTime()});return true;
+}
+function setSnapchatFriendRequest(actorName,targetName,action='request',{notify=true}={}){
+  const actor=resolveIdentityRef(actorName,true),target=resolveIdentityRef(targetName,true);if(!actor||!target||actor.id===target.id)return false;const a=phoneForIdentity(actor,true),b=phoneForIdentity(target,true),ar=ensureRelationship(a.timeline,target),br=ensureRelationship(b.timeline,actor);
+  if(action==='accept'){ar.apps.snapchat.friends=true;br.apps.snapchat.friends=true;ar.apps.snapchat.incomingRequest=false;ar.apps.snapchat.outgoingRequest=false;br.apps.snapchat.incomingRequest=false;br.apps.snapchat.outgoingRequest=false;if(notify&&identityAppEnabled(target,'snapchat'))pushAppNotification(b.timeline,'snapchat',actor,`${actor.name} added you back`)}
+  else if(action==='decline'){ar.apps.snapchat.incomingRequest=false;br.apps.snapchat.outgoingRequest=false}
+  else{ar.apps.snapchat.outgoingRequest=true;br.apps.snapchat.incomingRequest=true;if(notify&&identityAppEnabled(target,'snapchat'))pushAppNotification(b.timeline,'snapchat',actor,`${actor.name} added you`)}
+  a.root.phones[a.key]=a.timeline;a.root.phones[b.key]=b.timeline;saveMetadataRoot(a.root);recordContinuityEvent({kind:'social',participants:[actor.name,target.name],sender:actor.name,summary:action==='accept'?`${actor.name} added ${target.name} back on Snapchat.`:action==='decline'?`${actor.name} ignored ${target.name}'s Snapchat request.`:`${actor.name} added ${target.name} on Snapchat.`,threadTitle:'Snapchat',mirrorId:`snapchat-rel:${id()}`,roleplayMs:now().getTime()});return true;
+}
+function setFacebookFriendRequest(actorName,targetName,action='request',{notify=true}={}){
+  const actor=resolveIdentityRef(actorName,true),target=resolveIdentityRef(targetName,true);if(!actor||!target||actor.id===target.id)return false;const a=phoneForIdentity(actor,true),b=phoneForIdentity(target,true),ar=ensureRelationship(a.timeline,target),br=ensureRelationship(b.timeline,actor);
+  if(action==='accept'){ar.apps.facebook.friends=true;br.apps.facebook.friends=true;ar.apps.facebook.incomingRequest=false;ar.apps.facebook.outgoingRequest=false;br.apps.facebook.incomingRequest=false;br.apps.facebook.outgoingRequest=false;if(notify&&identityAppEnabled(target,'facebook'))pushAppNotification(b.timeline,'facebook',actor,`${actor.name} accepted your friend request`)}
+  else if(action==='decline'){ar.apps.facebook.incomingRequest=false;br.apps.facebook.outgoingRequest=false}
+  else{ar.apps.facebook.outgoingRequest=true;br.apps.facebook.incomingRequest=true;if(notify&&identityAppEnabled(target,'facebook'))pushAppNotification(b.timeline,'facebook',actor,`${actor.name} sent you a friend request`)}
+  a.root.phones[a.key]=a.timeline;a.root.phones[b.key]=b.timeline;saveMetadataRoot(a.root);recordContinuityEvent({kind:'social',participants:[actor.name,target.name],sender:actor.name,summary:action==='accept'?`${actor.name} accepted ${target.name}'s Facebook friend request.`:action==='decline'?`${actor.name} declined ${target.name}'s Facebook friend request.`:`${actor.name} sent ${target.name} a Facebook friend request.`,threadTitle:'Facebook',mirrorId:`facebook-rel:${id()}`,roleplayMs:now().getTime()});return true;
 }
 function mirrorMessageToPhone({phoneOwner,phoneOwnerAvatar='',peerName,peerAvatar='',peerDescription='',senderName,text,timeMs,unread=false,mirrorId=''}) {
   mirrorRichMessageToPhone({phoneOwner,phoneOwnerAvatar,peerName,peerAvatar,peerDescription,senderName,unread,message:{id:id(),mirrorId,sender:senderName,text,timeMs,read:!unread,type:'text'}});
@@ -333,6 +574,7 @@ function syncCrossPhoneBlock(blockerName,blockerAvatar='',blockedName='',blocked
   const blockedContact=ensurePeerContact(a.timeline,blockedName,blockedAvatar,blockedDescription),blockerContact=ensurePeerContact(b.timeline,blockerName,blockerAvatar,'');
   if(blockedContact){blockedContact.blocked=!!blocked;blockedContact.ignoringOwner=false}
   if(blockerContact){blockerContact.blockedByContact=!!blocked;blockerContact.ignoringOwner=false}
+  const blockedIdentity=identityForName(blockedName,{create:true}),blockerIdentity=identityForName(blockerName,{create:true}),ar=ensureRelationship(a.timeline,blockedIdentity),br=ensureRelationship(b.timeline,blockerIdentity);if(ar)ar.apps.messages.blocked=!!blocked;if(br)br.apps.messages.blockedBy=!!blocked;
   a.timeline.updatedAt=Date.now();b.timeline.updatedAt=Date.now();a.root.phones[a.key]=a.timeline;a.root.phones[b.key]=b.timeline;saveMetadataRoot(a.root);
 }
 
@@ -402,6 +644,7 @@ function world(){
     people:(L.getPeople?.()||[]).map(p=>({name:p.name,present:!!p.present,location:p.resolved?.location||p.base?.location||'',area:p.resolved?.area||p.base?.area||'',status:p.resolved?.status||p.base?.status||'',availability:p.resolved?.availability||p.base?.availability||'',exceptions:p.exceptions||[]})),
     snapshot:L.getWorldSnapshot?.()||null,status:L.getWorldSnapshotStatus?.()||null,prompt:L.getPromptSummary?.()||''}}catch(e){console.warn(`[${GHP_MODULE}] life`,e);return{available:false,time:now().toISOString(),scene:null,people:[],snapshot:null,status:null,prompt:''}}
 }
+function scopedWorld(w,names=[]){const wanted=new Set(names.map(lc)),people=(w.people||[]).filter(p=>wanted.has(lc(p.name))||p.present).slice(0,16);return{time:w.time,scene:w.scene,people,snapshot:w.snapshot,snapshotStatus:w.status}}
 function recentChat(){
   const c=ctx(),p=profile(),a=Array.isArray(c?.chat)?c.chat.slice(-p.recentMessages):[],lines=[];let chars=0;
   for(let i=a.length-1;i>=0;i--){const m=a[i],txt=String(m?.mes||m?.text||'').trim();if(!txt)continue;const s=m?.name||(m?.is_user?(c?.name1||'User'):(c?.name2||'Character')),line=`${s}: ${txt}`;if(chars+line.length>p.recentChars&&lines.length)break;lines.unshift(line);chars+=line.length}
@@ -417,13 +660,15 @@ function messageContext(m){
 }
 function messagePreview(m){if(!m)return'';if(m.type==='photo')return`Photo${m.text?` · ${m.text}`:''}`;if(m.type==='video')return`Video${m.text?` · ${m.text}`:''}`;return m.text||''}
 function notificationTextForMessage(m){if(m.type==='photo')return m.text||'Photo';if(m.type==='video')return m.text||'Video';return m.text||'New message'}
-function recentPhone(){
-  const t=timeline(),a=[];
-  for(const th of Object.values(t.threads))for(const m of(th.messages||[]).slice(-4))a.push({ms:m.timeMs,text:`${threadTitle(th,t)} | ${messageContext(m).slice(0,180)}`});
-  for(const x of t.posts.slice(-6))a.push({ms:x.timeMs,text:`Post ${x.author}: ${x.caption}`});
-  for(const x of t.stories.slice(-6))a.push({ms:x.timeMs,text:`Story ${x.author}: ${x.caption}`});
-  for(const x of t.calls.slice(-6))a.push({ms:x.timeMs,text:`Call ${x.contactName}: ${x.status}`});
-  return a.sort((a,b)=>a.ms-b.ms).slice(-30).map(x=>x.text);
+function recentPhone(enabledApps=profile().apps){
+  const t=timeline(),a=[],addThreads=(store,label)=>{for(const th of Object.values(store?.threads||{}))for(const m of(th.messages||[]).slice(-4))a.push({ms:m.timeMs,text:`${label} · ${th.peerName} | ${messageContext(m).slice(0,180)}`})};
+  if(enabledApps.messages)for(const th of Object.values(t.threads))for(const m of(th.messages||[]).slice(-4))a.push({ms:m.timeMs,text:`Messages · ${threadTitle(th,t)} | ${messageContext(m).slice(0,180)}`});
+  if(enabledApps.phone)for(const x of t.calls.slice(-6))a.push({ms:x.timeMs,text:`Call ${x.contactName}: ${x.status}`});
+  if(enabledApps.instagram){for(const x of t.instagram.posts.slice(-6))a.push({ms:x.timeMs,text:`Instagram post ${x.author}: ${x.caption}`});for(const x of t.instagram.stories.slice(-6))a.push({ms:x.timeMs,text:`Instagram story ${x.author}: ${x.caption}`});addThreads(t.instagram,'Instagram DM')}
+  if(enabledApps.snapchat){for(const x of t.snapchat.stories.slice(-6))a.push({ms:x.timeMs,text:`Snapchat story ${x.author}: ${x.caption}`});addThreads(t.snapchat,'Snapchat')}
+  if(enabledApps.facebook){for(const x of t.facebook.posts.slice(-6))a.push({ms:x.timeMs,text:`Facebook post ${x.author}: ${x.text||x.caption}`});addThreads(t.facebook,'Facebook Messenger');for(const x of t.facebook.marketplace.listings.slice(-5))a.push({ms:x.timeMs,text:`Marketplace ${x.sellerName}: ${x.title} · ${x.price}`})}
+  if(enabledApps.mail)for(const x of t.mail.slice(-6))a.push({ms:x.timeMs,text:`Mail ${x.from}: ${x.subject}`});
+  return a.sort((a,b)=>a.ms-b.ms).slice(-36).map(x=>x.text);
 }
 function recentMentions(name,limit=5){
   const q=lc(name),lines=recentChat().split('\n').filter(Boolean).filter(line=>lc(line).includes(q));
@@ -447,26 +692,35 @@ function parseJSON(raw){
   if(raw&&typeof raw==='object')return raw;let s=String(raw||'').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
   const a=s.indexOf('{'),b=s.lastIndexOf('}');if(a>=0&&b>a)s=s.slice(a,b+1);return JSON.parse(s.replace(/,\s*([}\]])/g,'$1'));
 }
-function emptyRefreshResult(){return{summary:'',messages:[],calls:[],posts:[],stories:[],notifications:[],mail:[]}}
+function emptyRefreshResult(){return{summary:'',events:[]}}
 function normalizeRefreshResult(raw){
-  let value=raw;if(typeof raw==='string'){try{value=parseJSON(raw)}catch{value=null}}const out=emptyRefreshResult();if(!value||typeof value!=='object')return out;
-  out.summary=String(value.summary||'');for(const key of ['messages','calls','posts','stories','notifications','mail'])out[key]=Array.isArray(value[key])?value[key]:[];return out;
+  let value=raw;if(typeof raw==='string'){try{value=parseJSON(raw)}catch{value=null}}const out=emptyRefreshResult();if(!value||typeof value!=='object')return out;out.summary=String(value.summary||'');out.events=Array.isArray(value.events)?value.events.filter(x=>x&&typeof x==='object'):[];
+  // Backward compatibility with v1 refresh JSON if an older preset/model still returns it.
+  for(const x of Array.isArray(value.messages)?value.messages:[])out.events.push({type:'message.receive',from:x.sender,threadId:x.threadId,text:x.text,mediaType:x.mediaType,mediaDescription:x.mediaDescription});
+  for(const x of Array.isArray(value.calls)?value.calls:[])out.events.push({type:'phone.call',from:x.contact,status:x.status});
+  for(const x of Array.isArray(value.posts)?value.posts:[])out.events.push({type:'instagram.post',from:x.author,...x});
+  for(const x of Array.isArray(value.stories)?value.stories:[])out.events.push({type:'instagram.story',from:x.author,...x});
+  for(const x of Array.isArray(value.mail)?value.mail:[])out.events.push({type:'mail.receive',...x});return out;
 }
-function refreshEventCount(r){return['messages','calls','posts','stories','notifications','mail'].reduce((sum,key)=>sum+(Array.isArray(r?.[key])?r[key].length:0),0)}
+function refreshEventCount(r){return Array.isArray(r?.events)?r.events.length:0}
 async function generate({prompt,systemPrompt,responseLength=1200}){const c=ctx();if(typeof c?.generateRaw!=='function')throw new Error('SillyTavern generateRaw is unavailable.');return c.generateRaw({prompt,systemPrompt,responseLength,trimNames:false})}
-function ensureAmbientRefreshActivity(result,contacts,p){
-  const out=normalizeRefreshResult(result),target=p.activityLevel==='busy'?Math.min(p.maxNewEvents,Math.max(3,Math.ceil(p.maxNewEvents*.6))):p.activityLevel==='normal'?Math.min(1,p.maxNewEvents):0;
-  let count=refreshEventCount(out);if(count>=target||!contacts.length)return out;
-  const installed=p.apps||{},shuffled=[...contacts].sort(()=>Math.random()-.5);let cursor=0;
-  const socialTexts=['liked your story','reacted to your story','shared a new post','posted something new'],snapTexts=['sent you a Snap','added to their Story','shared a new Snap'];
-  while(count<target&&cursor<Math.max(target*4,contacts.length*3)){
-    const c=shuffled[cursor%shuffled.length];cursor++;
-    if(installed.snap&&Math.random()<.48){out.notifications.push({app:'snap',from:c.name,text:snapTexts[Math.floor(Math.random()*snapTexts.length)]});count++;continue}
-    if(installed.social){out.notifications.push({app:'social',from:c.name,text:socialTexts[Math.floor(Math.random()*socialTexts.length)]});count++;continue}
-    if(installed.messages){out.messages.push({threadId:'',sender:c.name,text:'You around?'});count++;continue}
-    break;
-  }
-  if(!out.summary&&count)out.summary='Ambient phone activity';return out;
+function refreshIdentityCandidates(t,w,apps=profile().apps){
+  const map=new Map(),owner=currentIdentity(),add=identity=>{if(!identity?.id||identity.id===owner?.id)return;map.set(identity.id,identity)},activeState=(state,keys)=>keys.some(key=>state?.[key]===true)||(Number(state?.requestedAt||0)>0);
+  if(apps.messages||apps.phone)for(const co of Object.values(t.contacts||{})){const identity=co.identityId?identityById(co.identityId):identityForName(co.name,{create:false});if(identity)add(identity)}
+  for(const [key,reln] of Object.entries(t.relationships||{})){const relevant=(apps.instagram&&activeState(reln.apps?.instagram,['following','followedBy','blocked','blockedBy']))||(apps.snapchat&&activeState(reln.apps?.snapchat,['friends','outgoingRequest','incomingRequest','blocked','blockedBy']))||(apps.facebook&&activeState(reln.apps?.facebook,['friends','outgoingRequest','incomingRequest','blocked','blockedBy']))||((apps.messages||apps.phone)&&reln.latestInteraction?.app==='messages');if(!relevant)continue;const identity=identityById(key);if(identity)add(identity)}
+  for(const d of [...chatDescriptors(),...lifeDescriptors()]){const identity=identityForName(d.name,{create:true});if(identity)add(identity)}
+  return [...map.values()].slice(0,24).map(identity=>{const found=findCharacter(identity.name),life=w.people.find(p=>lc(p.name)===lc(identity.name))||null,reln=t.relationships?.[identity.id]||null;return{identityId:identity.id,name:identity.name,kind:identity.kind,character:compactCard({name:identity.name,characterId:found?.index??null}),sharedRelationship:reln?{familiarity:reln.familiarity,relationshipType:reln.relationshipType,impression:reln.impression,friendliness:reln.friendliness,tension:reln.tension,interest:reln.interest,latestInteraction:reln.latestInteraction,knownContactInfo:reln.knownContactInfo,apps:reln.apps}:null,locationEvidence:life?{location:life.location,area:life.area,present:life.present,status:life.status,availability:life.availability}:null,recentMentions:recentMentions(identity.name)}});
+}
+function compactAppThreads(store){return(store?.threadOrder||[]).map(key=>store.threads?.[key]).filter(Boolean).slice(0,18).map(th=>({threadId:th.id,peer:th.peerName,recent:(th.messages||[]).slice(-8).map(messageContext)}))}
+function buildInstalledAppContext(t,p,candidates){
+  const out={};
+  if(p.apps.messages)out.messages={contacts:Object.values(t.contacts).filter(c=>!c.blocked).map(c=>refreshContactContext(c,world())),threads:t.threadOrder.map(k=>t.threads[k]).filter(Boolean).map(th=>threadRefreshContext(th,t))};
+  if(p.apps.phone)out.phone={recentCalls:t.calls.slice(0,16).map(x=>({contact:x.contactName,status:x.status,timeMs:x.timeMs}))};
+  if(p.apps.instagram)out.instagram={relationships:candidates.map(x=>({identityId:x.identityId,name:x.name,state:t.relationships?.[x.identityId]?.apps?.instagram||null})).filter(x=>x.state),posts:t.instagram.posts.slice(0,16),stories:t.instagram.stories.slice(0,12),dms:compactAppThreads(t.instagram)};
+  if(p.apps.snapchat)out.snapchat={relationships:candidates.map(x=>({identityId:x.identityId,name:x.name,state:t.relationships?.[x.identityId]?.apps?.snapchat||null})).filter(x=>x.state),stories:t.snapchat.stories.slice(0,12),chats:compactAppThreads(t.snapchat)};
+  if(p.apps.facebook)out.facebook={relationships:candidates.map(x=>({identityId:x.identityId,name:x.name,state:t.relationships?.[x.identityId]?.apps?.facebook||null})).filter(x=>x.state),posts:t.facebook.posts.slice(0,14),messenger:compactAppThreads(t.facebook),marketplace:t.facebook.marketplace.listings.slice(0,16)};
+  if(p.apps.mail)out.mail={recent:t.mail.slice(0,12)};
+  return out;
 }
 
 async function refreshPhone(){
@@ -474,30 +728,36 @@ async function refreshPhone(){
   refreshBusy=true;islandText='Refreshing phone…';islandIcon='fa-solid fa-satellite-dish';render();
   try{
     seedContacts(true);
-    const t=timeline(),p=profile(),owner=persona(),w=world();
-    const contacts=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c&&!c.blocked).map(c=>refreshContactContext(c,w));
-    if(!contacts.length){globalThis.toastr?.warning?.('No relevant contacts yet.');return}
-    const threads=t.threadOrder.map(k=>t.threads[k]).filter(Boolean).map(th=>threadRefreshContext(th,t));
+    const t=timeline(),p=profile(),owner=persona(),w=world(),refreshable=['messages','phone','instagram','snapchat','facebook','mail'],enabledApps=refreshable.filter(key=>p.apps[key]),enabledSocial=enabledApps.filter(key=>['instagram','snapchat','facebook'].includes(key)),rawCandidates=refreshIdentityCandidates(t,w,p.apps),candidates=rawCandidates.map(row=>{const copy=clone(row);if(copy.sharedRelationship?.apps)copy.sharedRelationship.apps=Object.fromEntries(Object.entries(copy.sharedRelationship.apps).filter(([key])=>enabledApps.includes(key)||key==='messages'&&enabledApps.includes('phone')));if(copy.sharedRelationship?.latestInteraction&&!enabledApps.includes(copy.sharedRelationship.latestInteraction.app)&&!(copy.sharedRelationship.latestInteraction.app==='messages'&&p.apps.phone))delete copy.sharedRelationship.latestInteraction;if(!p.apps.messages&&!p.apps.phone&&copy.sharedRelationship)delete copy.sharedRelationship.knownContactInfo;return copy}),appContext=buildInstalledAppContext(t,p,candidates),allowedLines=[],relationshipLabels=[...(p.apps.messages||p.apps.phone?['phone-number messaging']:[]),...enabledSocial.map(key=>APPS[key].label)];
+    if(p.apps.messages)allowedLines.push('- messages: message.receive');if(p.apps.phone)allowedLines.push('- phone: phone.call');if(p.apps.instagram)allowedLines.push('- instagram: instagram.follow, instagram.unfollow, instagram.post, instagram.story, instagram.dm, instagram.story.view, instagram.post.like, instagram.post.comment');if(p.apps.snapchat)allowedLines.push('- snapchat: snapchat.add, snapchat.accept, snapchat.decline, snapchat.snap, snapchat.story');if(p.apps.facebook)allowedLines.push('- facebook: facebook.friend.request, facebook.friend.accept, facebook.friend.decline, facebook.post, facebook.post.like, facebook.post.comment, facebook.messenger, marketplace.listing');if(p.apps.mail)allowedLines.push('- mail: mail.receive');
+    if(!enabledApps.length){globalThis.toastr?.warning?.('No refresh-capable apps are installed.');return}if(!candidates.length&&!p.apps.facebook){globalThis.toastr?.warning?.('No relevant phone identities yet.');return}
     const minEvents=p.activityLevel==='busy'?Math.min(p.maxNewEvents,Math.max(3,Math.ceil(p.maxNewEvents*.6))):p.activityLevel==='normal'?Math.min(1,p.maxNewEvents):0;
-    const systemPrompt=`You simulate background activity on a fictional iPhone inside an ongoing roleplay.
+    const systemPrompt=`You simulate ONE unified background refresh for a fictional Greyhaven Phone inside an ongoing roleplay.
 Return ONLY one valid JSON object. No markdown and no commentary.
 Use Greyhaven Life as authoritative current time/world state when available.
-Use ONLY ALLOWED CONTACTS.
+Use only ALLOWED IDENTITIES for named existing characters.${p.apps.facebook?' Marketplace may introduce a provisional seller using ONE first name only.':''}
 IDENTITY LOCK: every generated sender is that named contact, never the PHONE OWNER and never another contact. Do not swap names, biographies, relationships, homes, jobs or possessions between people.
+Never invent, expand, or guess surnames. Preserve every existing name exactly.${p.apps.facebook?' A provisional Marketplace NPC must have one first name such as Daniel, Sara or Leo.':''}
 Every message should sound like that contact's own private texting voice, using their character/personality and existing thread tail. Avoid generic formal customer-service/therapy language. Slang, lowercase, abbreviations, emojis, teasing, profanity, short double-texts and expressive punctuation are allowed when they fit that specific person; do not force the same style on everyone.
 Never teleport contacts to the phone owner's location. The owner's current scene/location is NOT evidence that another contact is there.
 A contact may mention/post a specific location only when that contact's own LOCATION EVIDENCE or RECENT MENTIONS clearly supports it. When there is no evidence, keep their post/message location-neutral.
 Existing message threads matter. If a contact has a recent active conversation, new messages should usually continue it naturally, behave like a double-text, or follow the same topic. Do not abruptly reset to a generic unrelated invitation. If enough RP time has passed, a new topic is fine.
-If you add a message to an existing thread, use that exact threadId when possible.
+${relationshipLabels.length>1?`${relationshipLabels.join(', ')} relationships are separate. Never infer one merely from another.`:''}
+${enabledSocial.length?'Pending follow/add/friend requests in the installed social apps are real context. Decide naturally from familiarity, personality, impression, popularity, attraction/interest, tension and recent interactions. Do not auto-reciprocate by default and do not impose hard morality rules.':''}
+If you add a message to an existing app thread, use that exact threadId when possible.${enabledSocial.length?` ${enabledSocial.map(key=>key==='instagram'?'Instagram DMs':key==='snapchat'?'Snapchat Chats':'Facebook Messenger').join(', ')}${p.apps.messages?' and iMessage are':' are'} independent.`:''}
 Do not repeat existing phone history.
 Do not invent major plot developments, emergencies, betrayals, travel or secrets merely to create activity.
 Harmless everyday activity is allowed even with little context.
-A message can optionally contain fictional media. For a photo/video, set mediaType to "photo" or "video" and describe exactly what the recipient would see in mediaDescription. It may also include text, or mediaDescription may stand alone.
+A message${p.apps.snapchat?' or Snap':''} can contain fictional media. Set mediaType to "photo" or "video" and describe exactly what the recipient sees in mediaDescription.${p.apps.snapchat?' Notifications must correspond to a real stored event; never emit a fake standalone Snap notification without a snapchat.snap event. Snap Map locations require that person\'s own Greyhaven Life evidence.':''}
+${p.apps.facebook?'Marketplace items must plausibly fit the seller. Provisional sellers are separate identities and must never be merged by name alone.':''}
 NORMAL should normally create at least ${minEvents} event. BUSY must create at least ${minEvents} unless installed apps prevent it. QUIET may return zero.
 Maximum total events: ${p.maxNewEvents}.
 Required JSON shape:
-{"summary":"short note","messages":[{"threadId":"","sender":"Name","text":"optional text","mediaType":"","mediaDescription":""}],"calls":[{"contact":"Name","status":"missed"}],"posts":[{"author":"Name","visual":"photo description","caption":"caption","likes":12,"comments":2}],"stories":[{"author":"Name","visual":"story description","caption":"caption"}],"notifications":[{"app":"social","from":"Name","text":"liked your story"}],"mail":[]}
-Use empty arrays where there is no activity.`;
+{"summary":"short note","events":[{"type":"event.type","from":"Exact Name","to":"${owner.name}","text":"","mediaType":"","mediaDescription":""}]}
+Allowed event types are limited by installed apps:
+${allowedLines.join('\n')}
+${p.apps.facebook?'For marketplace.listing include seller, sellerType ("existing" or "provisional"), title, description, price, area and visual. Use an exact allowed name only when sellerType is existing.':''}
+Return an empty events array when nobody would naturally do anything.`;
     const prompt=`ROLEPLAY TIME:
 ${w.time}
 
@@ -513,14 +773,14 @@ ${minEvents}
 MAXIMUM TOTAL EVENTS:
 ${p.maxNewEvents}
 
-INSTALLED APPS:
-${JSON.stringify(p.apps)}
+INSTALLED APPS — these are the ONLY apps that exist for this refresh:
+${JSON.stringify(enabledApps)}
 
-ALLOWED CONTACTS WITH THEIR OWN LOCATION EVIDENCE:
-${JSON.stringify(contacts)}
+ALLOWED IDENTITIES WITH CHARACTER, RELATIONSHIP AND OWN LOCATION EVIDENCE:
+${JSON.stringify(candidates)}
 
-EXISTING THREADS WITH RECENT TAILS:
-${JSON.stringify(threads)}
+INSTALLED-APP STATE ONLY:
+${JSON.stringify(appContext)}
 
 GREYHAVEN LIFE WORLD:
 ${JSON.stringify({scene:w.scene,people:w.people,snapshot:w.snapshot,snapshotStatus:w.status})}
@@ -529,15 +789,14 @@ RECENT MAIN RP:
 ${recentChat()||'(none)'}
 
 RECENT PHONE HISTORY TO AVOID REPEATING:
-${JSON.stringify(recentPhone())}
+${JSON.stringify(recentPhone(p.apps))}
 
 Generate plausible NEW activity now. Respect each person's own location evidence.`;
-    const raw=await generate({prompt,systemPrompt,responseLength:p.responseTokens}),parsed=normalizeRefreshResult(raw),result=ensureAmbientRefreshActivity(parsed,contacts,p),before=refreshEventCount(parsed),after=refreshEventCount(result);
-    applyRefresh(result);globalThis.toastr?.success?.(after?`Phone refreshed · ${after} new event${after===1?'':'s'}`:'Phone refreshed · nothing new this time');
-    if(!before&&after)console.info(`[${GHP_MODULE}] AI returned no usable refresh events; ambient fallback supplied ${after}.`);
+    const raw=await generate({prompt,systemPrompt,responseLength:p.responseTokens}),result=normalizeRefreshResult(raw),after=applyRefresh(result);
+    globalThis.toastr?.success?.(after?`Phone refreshed · ${after} new event${after===1?'':'s'}`:'Phone refreshed · nothing new this time');
   }catch(e){
     console.error(`[${GHP_MODULE}] refresh`,e);
-    try{const p=profile(),t=timeline(),w=world(),contacts=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c&&!c.blocked).map(c=>refreshContactContext(c,w)),fallback=ensureAmbientRefreshActivity(emptyRefreshResult(),contacts,p);if(refreshEventCount(fallback)){applyRefresh(fallback);globalThis.toastr?.warning?.('AI refresh failed, so Phone added safe ambient activity instead.')}else globalThis.toastr?.error?.(`Phone refresh failed: ${e?.message||e}`)}catch{globalThis.toastr?.error?.(`Phone refresh failed: ${e?.message||e}`)}
+    globalThis.toastr?.error?.(`Phone refresh failed: ${e?.message||e}`)
   }finally{refreshBusy=false;islandText='';islandIcon='';render()}
 }
 
@@ -548,51 +807,66 @@ function appendIncomingMessage(t,th,c,{text='',mediaType='',mediaDescription=''}
   if(!items.length)return created;
   for(const item of items){
     const mirrorId=`mirror:${id()}`,msg=normalizeMessage({id:id(),mirrorId,sender:c.name,senderId:c.id,text:item.text,type:item.type,mediaDescription:item.mediaDescription||'',timeMs:stamp,realMs:Date.now(),read:!unreadFlag});
-    th.messages.push(msg);created.push(msg);
+    th.messages.push(msg);created.push(msg);noteRelationshipInteraction(t,c.identityId||c.name,'messages',messageContext(msg),stamp);
     mirrorRichMessageToPhone({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:persona().name,peerAvatar:persona().avatar,peerDescription:persona().description,senderName:c.name,message:msg,unread:false});
   }
   return created;
 }
+function mirrorOwnedAppItem(appName,authorIdentity,kind,item){
+  const box=phoneForOwner(authorIdentity.name,authorIdentity.avatar,true);if(!box)return;const store=appStore(box.timeline,appName),list=kind==='story'?store.stories:store.posts;if(!Array.isArray(list))return;const shared=item.sharedEventId||'';if(shared&&list.some(x=>x.sharedEventId===shared))return;list.unshift({...clone(item),ownerPost:true});box.root.phones[box.key]=box.timeline;saveMetadataRoot(box.root);
+}
 function applyRefresh(r){
-  const t=timeline(),installed=profile().apps,allowed=new Map(Object.values(t.contacts).map(c=>[lc(c.name),c])),keys=new Set(t.refresh.eventKeys||[]),stamp=now().getTime(),max=profile().maxNewEvents,continuityEntries=[];let count=0;
+  const t=timeline(),installed=profile().apps,w=world(),candidateList=refreshIdentityCandidates(t,w,installed),allowedById=new Map(candidateList.map(x=>[x.identityId,identityById(x.identityId)])),allowedByName=new Map(candidateList.map(x=>[lc(x.name),identityById(x.identityId)])),contactsByName=new Map(Object.values(t.contacts).map(c=>[lc(c.name),c])),keys=new Set(t.refresh.eventKeys||[]),stamp=now().getTime(),max=profile().maxNewEvents,continuityEntries=[];let count=0;
   const addKey=k=>{keys.add(k);t.refresh.eventKeys=[...keys].slice(-80)};
-  if(installed.messages)for(const x of Array.isArray(r?.messages)?r.messages:[]){
-    if(count>=max)break;const c=allowed.get(lc(x.sender)),text=String(x.text||'').trim(),mediaType=['photo','video'].includes(x.mediaType)?x.mediaType:'',mediaDescription=String(x.mediaDescription||'').trim();
-    if(!c||c.blocked||c.blockedByContact||(!text&&!mediaDescription))continue;const key=`m:${c.name}:${text.toLowerCase().slice(0,80)}:${mediaType}:${mediaDescription.toLowerCase().slice(0,80)}`;if(keys.has(key))continue;
-    let th=x.threadId&&t.threads[x.threadId]?t.threads[x.threadId]:Object.values(t.threads).find(v=>v.type==='direct'&&v.contactIds[0]===c.id);
-    if(!th){th={id:`thread:${id()}`,type:'direct',title:c.nickname||c.name,contactIds:[c.id],createdAt:stamp,messages:[]};t.threads[th.id]=th;t.threadOrder.unshift(th.id)}
-    if(th.type==='group'&&!th.contactIds.includes(c.id))continue;
-    const created=appendIncomingMessage(t,th,c,{text,mediaType,mediaDescription},stamp,true);for(const msg of created)continuityEntries.push({th,msg,ownerName:persona().name});
-    if(!c.muted)t.notifications.unshift({id:id(),app:'messages',title:c.nickname||c.name,text:text||(mediaType==='video'?'Video':'Photo'),timeMs:stamp,read:false,targetId:th.id});
+  const owner=persona(),ownerIdentity=currentIdentity(),events=Array.isArray(r?.events)?r.events:[];
+  for(const x of events){
+    if(count>=max)break;const type=norm(x.type),identity=allowedById.get(String(x.identityId||x.fromIdentityId||''))||allowedByName.get(lc(x.from||x.actor||x.author||x.contact||x.seller));
+    const appName=type.startsWith('instagram.')?'instagram':type.startsWith('snapchat.')?'snapchat':type.startsWith('facebook.')||type.startsWith('marketplace.')?'facebook':type.startsWith('message.')?'messages':type.startsWith('phone.')?'phone':type.startsWith('mail.')?'mail':'';
+    if(!appName||!installed[appName])continue;if(!['marketplace.listing','mail.receive'].includes(type)&&!identity)continue;
+    const signature=JSON.stringify([type,identity?.id||lc(x.seller),x.text||x.caption||x.title||'',x.mediaType||'',x.mediaDescription||x.visual||'',x.price||'']).slice(0,900),key=`u:${hashString(signature)}`;if(keys.has(key))continue;
+
+    if(type==='message.receive'){
+      const co=contactsByName.get(lc(identity.name)),text=String(x.text||'').trim(),mediaType=['photo','video'].includes(x.mediaType)?x.mediaType:'',mediaDescription=String(x.mediaDescription||'').trim();if(!co||co.blocked||co.blockedByContact||(!text&&!mediaDescription))continue;
+      let th=x.threadId&&t.threads[x.threadId]?t.threads[x.threadId]:Object.values(t.threads).find(v=>v.type==='direct'&&v.contactIds[0]===co.id);if(!th){th={id:`thread:${id()}`,type:'direct',title:co.nickname||co.name,contactIds:[co.id],createdAt:stamp,messages:[]};t.threads[th.id]=th;t.threadOrder.unshift(th.id)}if(th.type==='group'&&!th.contactIds.includes(co.id))continue;
+      const created=appendIncomingMessage(t,th,co,{text,mediaType,mediaDescription},stamp,true);for(const msg of created)continuityEntries.push({th,msg,ownerName:owner.name});if(!co.muted)t.notifications.unshift({id:id(),app:'messages',title:co.nickname||co.name,text:text||(mediaType==='video'?'Video':'Photo'),timeMs:stamp,read:false,targetId:th.id});
+    }else if(type==='phone.call'){
+      const co=contactsByName.get(lc(identity.name));if(!co||co.blocked||co.blockedByContact)continue;const st=x.status==='incoming'?'incoming':'missed',sharedCallId=`call:${id()}`,call={id:id(),sharedCallId,contactId:co.id,contactName:co.name,direction:'incoming',status:st,timeMs:stamp,durationSec:0,transcript:[]};t.calls.unshift(call);if(!co.muted)t.notifications.unshift({id:id(),app:'phone',title:st==='missed'?`Missed call · ${co.name}`:`${co.name} is calling`,text:st==='missed'?'Tap to call back':'Incoming call',timeMs:stamp,read:false,targetId:call.id});mirrorCallToOwner({phoneOwner:co.name,phoneOwnerAvatar:co.avatar,peerName:owner.name,peerAvatar:owner.avatar,peerDescription:owner.description,direction:'outgoing',status:st==='missed'?'no answer':'active',timeMs:stamp,sharedCallId});
+    }else if(type==='instagram.follow'||type==='instagram.unfollow'){
+      setInstagramFollowing(identity.name,owner.name,type==='instagram.follow',{notify:true});
+    }else if(type==='instagram.post'||type==='instagram.story'){
+      const state=t.relationships?.[identity.id]?.apps?.instagram;if(!state?.following&&!state?.followedBy)continue;const visual=String(x.visual||x.mediaDescription||'').trim(),caption=String(x.caption||x.text||'').trim();if(!visual&&!caption)continue;const sharedEventId=`instagram:${id()}`,row={id:id(),sharedEventId,identityId:identity.id,author:identity.name,contactId:contactsByName.get(lc(identity.name))?.id||'',visual,caption,likes:Math.max(0,Number(x.likes||0)),comments:Array.isArray(x.comments)?x.comments:[],commentCount:Math.max(0,Number(x.commentCount||x.comments||0)),timeMs:stamp,expiresAt:type.endsWith('.story')?stamp+86400000:0,viewed:false};const kind=type.endsWith('.story')?'story':'post';t.instagram[kind==='story'?'stories':'posts'].unshift(row);mirrorOwnedAppItem('instagram',identity,kind,row);if(kind==='post')pushAppNotification(t,'instagram',identity,`${identity.name} shared a post`);
+    }else if(type==='instagram.dm'){
+      const text=String(x.text||'').trim(),mediaType=['photo','video'].includes(x.mediaType)?x.mediaType:'text',mediaDescription=String(x.mediaDescription||'').trim();if(!text&&mediaType==='text'||mediaType!=='text'&&!mediaDescription)continue;mirrorAppMessage({appName:'instagram',fromName:identity.name,toName:owner.name,type:mediaType,text,mediaDescription,timeMs:stamp,unread:true});
+    }else if(['instagram.story.view','instagram.post.like','instagram.post.comment'].includes(type)){
+      const target=type==='instagram.story.view'?(t.instagram.stories.find(p=>p.id===x.storyId)||t.instagram.stories.find(p=>p.ownerPost)):(t.instagram.posts.find(p=>p.id===x.postId)||t.instagram.posts.find(p=>p.ownerPost));if(!target)continue;
+      if(type==='instagram.story.view'){target.viewers=Array.isArray(target.viewers)?target.viewers:[];if(!target.viewers.includes(identity.id))target.viewers.push(identity.id)}
+      else if(type==='instagram.post.like'){target.likedBy=Array.isArray(target.likedBy)?target.likedBy:[];if(!target.likedBy.includes(identity.id)){target.likedBy.push(identity.id);target.likes=Math.max(0,Number(target.likes||0)+1)}}
+      else{const comment=String(x.text||x.comment||'').trim();if(!comment)continue;target.comments=Array.isArray(target.comments)?target.comments:[];target.comments.push({id:id(),author:identity.name,identityId:identity.id,text:comment,timeMs:stamp});target.commentCount=target.comments.length}
+      const text=type==='instagram.story.view'?`${identity.name} viewed your story`:type==='instagram.post.like'?`${identity.name} liked your post`:`${identity.name} commented: ${String(x.text||x.comment||'').trim()}`;pushAppNotification(t,'instagram',identity,text);
+    }else if(type==='snapchat.add'||type==='snapchat.accept'||type==='snapchat.decline'){
+      setSnapchatFriendRequest(identity.name,owner.name,type==='snapchat.add'?'request':type==='snapchat.accept'?'accept':'decline',{notify:type!=='snapchat.decline'});
+    }else if(type==='snapchat.snap'){
+      const state=t.relationships?.[identity.id]?.apps?.snapchat,mediaType=['photo','video'].includes(x.mediaType)?x.mediaType:'photo',description=String(x.mediaDescription||x.visual||'').trim();if(!state?.friends||!description)continue;mirrorAppMessage({appName:'snapchat',fromName:identity.name,toName:owner.name,type:mediaType,text:String(x.text||x.caption||'').trim(),mediaDescription:description,timeMs:stamp,unread:true});
+    }else if(type==='snapchat.story'){
+      const state=t.relationships?.[identity.id]?.apps?.snapchat,visual=String(x.visual||x.mediaDescription||'').trim();if(!state?.friends||!visual)continue;const row={id:id(),sharedEventId:`snap-story:${id()}`,identityId:identity.id,author:identity.name,visual,caption:String(x.caption||x.text||''),timeMs:stamp,expiresAt:stamp+86400000,viewed:false};t.snapchat.stories.unshift(row);mirrorOwnedAppItem('snapchat',identity,'story',row);
+    }else if(type==='facebook.friend.request'||type==='facebook.friend.accept'||type==='facebook.friend.decline'){
+      setFacebookFriendRequest(identity.name,owner.name,type.endsWith('.request')?'request':type.endsWith('.accept')?'accept':'decline',{notify:!type.endsWith('.decline')});
+    }else if(type==='facebook.post'){
+      const visual=String(x.visual||x.mediaDescription||'').trim(),body=String(x.text||x.caption||'').trim();if(!visual&&!body)continue;const row={id:id(),sharedEventId:`facebook-post:${id()}`,identityId:identity.id,author:identity.name,visual,text:body,likes:Math.max(0,Number(x.likes||0)),comments:Array.isArray(x.comments)?x.comments:[],timeMs:stamp};t.facebook.posts.unshift(row);mirrorOwnedAppItem('facebook',identity,'post',row);
+    }else if(type==='facebook.post.like'||type==='facebook.post.comment'){
+      const target=t.facebook.posts.find(p=>p.id===x.postId)||t.facebook.posts.find(p=>p.ownerPost);if(!target)continue;if(type.endsWith('.like')){target.likedBy=Array.isArray(target.likedBy)?target.likedBy:[];if(!target.likedBy.includes(identity.id)){target.likedBy.push(identity.id);target.likes=Math.max(0,Number(target.likes||0)+1)}}else{const comment=String(x.text||x.comment||'').trim();if(!comment)continue;target.comments=Array.isArray(target.comments)?target.comments:[];target.comments.push({id:id(),author:identity.name,identityId:identity.id,text:comment,timeMs:stamp})}pushAppNotification(t,'facebook',identity,type.endsWith('.like')?`${identity.name} liked your post`:`${identity.name} commented: ${String(x.text||x.comment||'').trim()}`);
+    }else if(type==='facebook.messenger'){
+      const text=String(x.text||'').trim(),mediaType=['photo','video'].includes(x.mediaType)?x.mediaType:'text',mediaDescription=String(x.mediaDescription||'').trim();if(!text&&mediaType==='text'||mediaType!=='text'&&!mediaDescription)continue;mirrorAppMessage({appName:'facebook',fromName:identity.name,toName:owner.name,type:mediaType,text,mediaDescription,timeMs:stamp,unread:true});
+    }else if(type==='marketplace.listing'){
+      const sellerType=x.sellerType==='existing'&&identity?'existing':'provisional',seller=sellerType==='existing'?identity:createProvisionalIdentity(x.seller||'Seller',{source:'marketplace'}),title=String(x.title||'').trim(),description=String(x.description||'').trim(),price=String(x.price||'').trim(),area=String(x.area||'').trim(),visual=String(x.visual||x.mediaDescription||'').trim();if(!seller||!title||!price)continue;const row={id:id(),sellerIdentityId:seller.id,sellerName:seller.name,sellerType,title,description,price,area,visual,timeMs:stamp,status:'available',linkedManually:false};t.facebook.marketplace.listings.unshift(row);pushAppNotification(t,'facebook',seller,`New Marketplace listing · ${title}`,'',row.id);
+    }else if(type==='mail.receive'){
+      const from=norm(x.from),subject=String(x.subject||'').trim(),body=String(x.body||'').trim();if(!from||!subject||!body)continue;t.mail.unshift({id:id(),from,subject,body,timeMs:stamp,read:false});t.notifications.unshift({id:id(),app:'mail',title:from,text:subject,timeMs:stamp,read:false});
+    }else continue;
     addKey(key);count++;
-  }
-  if(installed.phone)for(const x of Array.isArray(r?.calls)?r.calls:[]){
-    if(count>=max)break;const c=allowed.get(lc(x.contact));if(!c||c.blocked||c.blockedByContact)continue;const st=x.status==='incoming'?'incoming':'missed',key=`c:${c.name}:${st}:${Math.floor(stamp/3600000)}`;if(keys.has(key))continue;
-    const sharedCallId=`call:${id()}`,call={id:id(),sharedCallId,contactId:c.id,contactName:c.name,direction:'incoming',status:st,timeMs:stamp,durationSec:0,transcript:[]};t.calls.unshift(call);
-    if(!c.muted)t.notifications.unshift({id:id(),app:'phone',title:st==='missed'?`Missed call · ${c.name}`:`${c.name} is calling`,text:st==='missed'?'Tap to call back':'Incoming call',timeMs:stamp,read:false,targetId:call.id});
-    mirrorCallToOwner({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:persona().name,peerAvatar:persona().avatar,peerDescription:persona().description,direction:'outgoing',status:st==='missed'?'no answer':'active',timeMs:stamp,sharedCallId});addKey(key);count++;
-  }
-  if(installed.social)for(const x of Array.isArray(r?.posts)?r.posts:[]){
-    if(count>=max)break;const c=allowed.get(lc(x.author)),cap=String(x.caption||'').trim(),vis=String(x.visual||'').trim();if(!c||c.blocked||(!cap&&!vis))continue;
-    const key=`p:${c.name}:${cap.toLowerCase().slice(0,80)}:${vis.toLowerCase().slice(0,60)}`;if(keys.has(key))continue;
-    const sharedEventId=`post:${id()}`,post={id:id(),sharedEventId,author:c.name,contactId:c.id,visual:vis,caption:cap,likes:Math.max(0,Number(x.likes||0)),comments:Math.max(0,Number(x.comments||0)),timeMs:stamp};t.posts.unshift(post);mirrorSocialToAuthor('post',c.name,c.avatar,post);
-    if(!c.muted)t.notifications.unshift({id:id(),app:'social',title:`${c.name} posted`,text:cap||vis,timeMs:stamp,read:false});addKey(key);count++;
-  }
-  if(installed.social)for(const x of Array.isArray(r?.stories)?r.stories:[]){
-    if(count>=max)break;const c=allowed.get(lc(x.author)),cap=String(x.caption||'').trim(),vis=String(x.visual||'').trim();if(!c||c.blocked||(!cap&&!vis))continue;
-    const key=`s:${c.name}:${cap.toLowerCase().slice(0,80)}:${vis.toLowerCase().slice(0,60)}`;if(keys.has(key))continue;
-    const sharedEventId=`story:${id()}`,story={id:id(),sharedEventId,author:c.name,contactId:c.id,visual:vis,caption:cap,timeMs:stamp,expiresAt:stamp+86400000,viewed:false};t.stories.unshift(story);mirrorSocialToAuthor('story',c.name,c.avatar,story);addKey(key);count++;
-  }
-  for(const x of Array.isArray(r?.notifications)?r.notifications:[]){
-    if(count>=max)break;const c=allowed.get(lc(x.from)),text=String(x.text||'').trim(),a=x.app==='snap'?'snap':'social';if(!installed[a]||!c||c.blocked||!text)continue;
-    const key=`n:${a}:${c.name}:${text.toLowerCase().slice(0,100)}`;if(keys.has(key))continue;if(!c.muted)t.notifications.unshift({id:id(),app:a,title:c.nickname||c.name,text,timeMs:stamp,read:false});addKey(key);count++;
-  }
-  if(profile().apps.mail)for(const x of Array.isArray(r?.mail)?r.mail:[]){
-    if(count>=max)break;const from=norm(x.from),sub=String(x.subject||'').trim(),body=String(x.body||'').trim();if(!from||!sub||!body)continue;
-    const key=`e:${from}:${sub}`.toLowerCase();if(keys.has(key))continue;t.mail.unshift({id:id(),from,subject:sub,body,timeMs:stamp,read:false});t.notifications.unshift({id:id(),app:'mail',title:from,text:sub,timeMs:stamp,read:false});addKey(key);count++;
   }
   t.refresh.lastAt=Date.now();t.refresh.chatLength=Array.isArray(ctx()?.chat)?ctx().chat.length:0;t.refresh.summary=String(r?.summary||'').trim();persist(t,false);
   for(const e of continuityEntries)recordMessageContinuity(e.th,t,e.msg,e.ownerName);
+  return count;
 }
 function cleanPlainReply(raw){
   let text=String(raw||'').trim().replace(/^```(?:text|txt)?\s*/i,'').replace(/\s*```$/,'').trim();
@@ -617,8 +891,11 @@ function inferMediaFromText(text,requested=''){
   if(!desc)return null;
   return {type:kind,mediaDescription:desc,text:''};
 }
+function extractPhoneActionMarkers(raw){
+  const actions=[],clean=String(raw||'').replace(PHONE_ACTION_RE,(full,payload)=>{try{const data=JSON.parse(String(payload||'').trim());if(data&&typeof data==='object')actions.push(data)}catch(e){console.warn(`[${GHP_MODULE}] invalid phone GH_ACTION`,payload,e)}return''}).replace(/\n{3,}/g,'\n\n').trim();return{clean,actions};
+}
 function parseDirectPacket(raw,requested=''){
-  const text=cleanPlainReply(raw);if(!text)return{items:[],action:''};
+  const extracted=extractPhoneActionMarkers(raw),text=cleanPlainReply(extracted.clean);if(!text)return{items:[],action:'',actions:extracted.actions};
   const markers=[...text.matchAll(/\b(TEXT|PHOTO|VIDEO|ACTION)\s*:\s*/gi)],items=[];let action='';
   if(markers.length){
     for(let i=0;i<markers.length;i++){
@@ -627,13 +904,22 @@ function parseDirectPacket(raw,requested=''){
       if(kind==='action'){const a=value.match(/^(IGNORE|BLOCK)\b/i)?.[1]?.toLowerCase();if(a)action=a;continue}
       if(kind==='text')items.push({type:'text',text:value});else items.push({type:kind,mediaDescription:value,text:''});
     }
-    if(items.length||action)return{items:items.slice(0,4),action};
+    if(items.length||action)return{items:items.slice(0,4),action,actions:extracted.actions};
   }
   const inferred=inferMediaFromText(text,requested);
-  return{items:inferred?[inferred]:[{type:'text',text}],action:''};
+  return{items:inferred?[inferred]:[{type:'text',text}],action:'',actions:extracted.actions};
 }
 function parseDirectReply(raw,requested=''){return parseDirectPacket(raw,requested).items}
 function extractDirectAction(raw){return parseDirectPacket(raw,'').action}
+function dispatchGeneratedPhoneActions(actions=[],actorName='',parentKey=''){
+  const allowed=new Set(['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange']),actor=norm(actorName);
+  for(let index=0;index<actions.length;index++){
+    const data=actions[index]&&typeof actions[index]==='object'?clone(actions[index]):{},type=norm(data.type),from=norm(data.from||actor),to=norm(data.to||data.target);if(!allowed.has(type)||lc(from)!==lc(actor)||!to||lc(to)===lc(actor))continue;
+    const target=identityForName(to,{create:false});if(!target)continue;data.from=actor;data.to=target.name;const sourceKey=`phone-ai:${chatIdentity()}:${parentKey}:${index}:${hashString(JSON.stringify([type,lc(actor),target.id,data.text||'',data.mediaType||'',data.description||data.mediaDescription||'']))}`;
+    if(typeof globalThis.GreyhavenLife?.dispatchWorldAction==='function')globalThis.GreyhavenLife.dispatchWorldAction(data,{source:'greyhaven-phone-ai',sourceKey,roleplayMs:now().getTime()});
+    else window.dispatchEvent(new CustomEvent('greyhaven-world-action',{detail:{id:sourceKey,type,actor,from:actor,target:target.name,to:target.name,text:data.text||'',roleplayMs:now().getTime(),realMs:Date.now(),source:'greyhaven-phone-ai',sourceKey,data:{...data,mediaDescription:data.description||data.mediaDescription||'',caption:data.caption||'',expectsReply:data.expectsReply===true}}}));
+  }
+}
 function hasExplicitMediaPacket(items=[],kind=''){return items.some(x=>['photo','video'].includes(x?.type)&&(!kind||x.type===kind))}
 function recentMediaCommitment(conversation=[],contactName='',kind='photo'){
   const own=(conversation||[]).filter(m=>lc(m?.sender)===lc(contactName)).slice(-8);
@@ -774,7 +1060,7 @@ async function generateReply(th,mode='text'){
   const boundaryQuiet=th.type==='direct'&&(contacts[0]?.ignoringOwner===true||preBoundary.action==='ignore'||preBoundary.action==='block');
   if(th.type==='direct'&&contacts[0]?.blockedByContact)return;
   replyBusy=true;replyHidden=boundaryQuiet;islandText=replyHidden?'':(mode==='call'?'On call…':'Typing…');islandIcon=replyHidden?'':(mode==='call'?'fa-solid fa-phone':'fa-solid fa-ellipsis');render();
-  const continuityToRecord=[];let directAction='',directContact=null,boundaryRecord=null;
+  const continuityToRecord=[];let directAction='',directContact=null,boundaryRecord=null,secondaryActions=[],actionParentKey=String(th.messages?.at(-1)?.mirrorId||th.messages?.at(-1)?.id||id());
   try{
     const w=world(),activeCall=mode==='call'&&callId?t.calls.find(x=>x.id===callId):null,conversation=mode==='call'?(activeCall?.transcript||[]):th.messages;let replies=[];
     if(th.type==='direct'){
@@ -789,12 +1075,13 @@ Facts under CONTACT are about YOU. Facts under PHONE OWNER are about the other p
 
 You are ${c.name} on a private phone call inside an ongoing fictional roleplay.
 Reply ONLY with what ${c.name} says aloud. No JSON, speaker label, narration or stage directions.
+${c.name}'s authoritative stored 9-digit phone number is ${identityForName(c.name,{create:true})?.phoneNumber||'unavailable'}. If directly asked for their own number, use that exact value and never invent another.
 Preserve ${c.name}'s actual personality and relationship. Speak like a real person, not a formal assistant or therapist.
 Use slang, teasing, profanity, warmth, hesitation, laughter, emojis-as-words only if they genuinely fit ${c.name}; do not force any one style.
 Match established conversational rhythm and emotion.
 Use Greyhaven Life as authoritative current world/time context when available.`;
         const prompt=`CONTACT — AUTHORITATIVE IDENTITY:
-${JSON.stringify({name:c.name,character:cardData(c),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})}
+${JSON.stringify({name:c.name,phoneNumber:identityForName(c.name,{create:true})?.phoneNumber||'',character:cardData(c),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})}
 
 CONTACT VOICE EVIDENCE:
 ${JSON.stringify(voice)}
@@ -803,7 +1090,7 @@ PHONE OWNER — THE OTHER PERSON:
 ${JSON.stringify({name:owner.name,relationshipContext:owner.description.slice(0,9000)||'(not found)'})}
 
 GREYHAVEN LIFE:
-${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
+${JSON.stringify(scopedWorld(w,[c.name,owner.name]))}
 
 RECENT MAIN RP:
 ${recentChat()}
@@ -824,6 +1111,7 @@ CONTACT CARD facts are about YOU. PHONE OWNER context is only background about t
 
 You are ${c.name}, texting privately with ${owner.name} inside an ongoing fictional roleplay.
 Write like ${c.name} actually texts — emotionally alive, personal and character-specific. Do NOT default to polished formal prose, customer-service language, therapy-speak, or repetitive "I'm not sure / can we talk about it" phrasing unless that genuinely matches ${c.name}.
+${c.name}'s authoritative stored 9-digit phone number is ${identityForName(c.name,{create:true})?.phoneNumber||'unavailable'}. ${c.name} knows their own number; if directly asked, use that exact value and never invent another.
 Use the CONTACT VOICE EVIDENCE and existing thread as the strongest style reference. Short messages, multiple texts, lowercase, abbreviations, slang, emojis, teasing, dry humor, profanity, typos or expressive punctuation are all allowed when they fit this character. More mature/formal characters may naturally text differently.
 Preserve established personality, relationship, knowledge and current mood.
 Use Greyhaven Life as authoritative current world/time context when available.
@@ -834,6 +1122,18 @@ If you have ALREADY agreed/offered/promised to send the requested media in the r
 If refusing or changing your mind, return TEXT only and make the refusal/delay clear.
 If sending media NOW — including if you say "I sent it", "here it is", "I just took it", "fine I'll send it", or similar — you MUST include the actual PHOTO: or VIDEO: line in the SAME response. Never claim an attachment was sent without the media line.
 PHOTO:/VIDEO: must contain a concrete visual description of what the recipient sees, never conversational filler like "omg fine I'll send one".
+
+PHONE-INSIDE-PHONE ACTIONS:
+If ${c.name} genuinely decides to complete a separate phone action NOW while replying — for example texting/calling another person, forwarding them a photo/video, blocking/unblocking them, saving a number, or mutually exchanging numbers — append a hidden GH_ACTION HTML comment after the visible TEXT/PHOTO/VIDEO protocol.
+Supported examples:
+<!--GH_ACTION {"type":"message.send","from":"${c.name}","to":"Exact Existing Name","text":"the natural private message","expectsReply":true}-->
+<!--GH_ACTION {"type":"media.send","from":"${c.name}","to":"Exact Existing Name","mediaType":"photo","description":"what the recipient sees","caption":"optional caption","expectsReply":true}-->
+<!--GH_ACTION {"type":"call.place","from":"${c.name}","to":"Exact Existing Name"}-->
+<!--GH_ACTION {"type":"contact.block","from":"${c.name}","to":"Exact Existing Name"}-->
+<!--GH_ACTION {"type":"contact.unblock","from":"${c.name}","to":"Exact Existing Name"}-->
+<!--GH_ACTION {"type":"contact.add","from":"${c.name}","to":"Exact Existing Name"}-->
+<!--GH_ACTION {"type":"contact.exchange","from":"${c.name}","to":"Exact Existing Name"}-->
+Use only exact known names and never invent/expand a surname. The from field MUST be ${c.name}. Only emit an action after ${c.name} actually agrees and performs it now; requests, promises for later, hesitation and refusal create no marker. Do not force compliance. Keep an exact third-party private message body out of the visible TEXT reply; the hidden marker owns it. Do not generate the third person's response.
 
 SOCIAL BOUNDARIES:
 Do not keep a pleasant, cooperative conversation alive merely because a response is expected.
@@ -852,9 +1152,10 @@ PHOTO: concise visual description of the photo
 VIDEO: concise visual description of the video
 ACTION: IGNORE
 ACTION: BLOCK
+Optional completed GH_ACTION comments may follow those protocol lines.
 No JSON, speaker labels, markdown or narration.`;
         const prompt=`CONTACT — AUTHORITATIVE IDENTITY:
-${JSON.stringify({name:c.name,character:cardData(c),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})}
+${JSON.stringify({name:c.name,phoneNumber:identityForName(c.name,{create:true})?.phoneNumber||'',character:cardData(c),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})}
 
 CONTACT VOICE EVIDENCE:
 ${JSON.stringify(voice)}
@@ -863,7 +1164,7 @@ PHONE OWNER — THE OTHER PERSON:
 ${JSON.stringify({name:owner.name,relationshipContext:owner.description.slice(0,9000)||'(not found)'})}
 
 GREYHAVEN LIFE:
-${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
+${JSON.stringify(scopedWorld(w,[c.name,owner.name]))}
 
 RECENT MAIN RP:
 ${recentChat()}
@@ -882,7 +1183,7 @@ ${preBoundary?.state?.boundaryKind?`Recent explicit boundary: ${preBoundary.stat
 Continue the conversation naturally in ${c.name}'s own texting voice.`;
         let raw=await generate({prompt,systemPrompt,responseLength:760});
         if(replyIdentityConflict(raw,c,owner))raw=await generate({prompt:`${prompt}\n\nIDENTITY CORRECTION: The last draft swapped identities. You are ${c.name}; ${owner.name} is the phone owner. Keep ${c.name}'s own personality and texting style and answer again.`,systemPrompt,responseLength:760});
-        let packet=parseDirectPacket(raw,requested||''),items=packet.items;directAction=packet.action||'';
+        let packet=parseDirectPacket(raw,requested||''),items=packet.items;directAction=packet.action||'';secondaryActions=packet.actions||[];
         const hasRequestedMedia=requested&&hasExplicitMediaPacket(items,requested);
         const needsMediaRepair=requested&&!hasRequestedMedia&&!directAction&&!mediaRefusalText(raw)&&(pendingMedia||mediaSendClaim(raw,requested));
         if(needsMediaRepair){
@@ -901,9 +1202,9 @@ Fix ONLY the delivery:
 - Preserve ${c.name}'s texting voice and identity.
 Return protocol lines only.`;
           raw=await generate({prompt:repairPrompt,systemPrompt:`You are ${c.name}; ${owner.name} is the other person. Preserve character voice. If media is sent, ${requested.toUpperCase()}: is mandatory.`,responseLength:520});
-          packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||'';
+          packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||'';secondaryActions=packet.actions||[];
         }
-        if(!items.length&&!directAction){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. You are ${c.name}, not ${owner.name}. Match ${c.name}'s natural texting voice. Return TEXT: followed by the reply, ACTION: IGNORE if ${c.name} chooses silence, or ACTION: BLOCK if ${c.name} is done with unwanted contact.`,systemPrompt:`You are ${c.name}. ${owner.name} is the other person. Never swap identities. Silence and blocking are valid in-character outcomes.`,responseLength:350});packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||''}
+        if(!items.length&&!directAction&&!secondaryActions.length){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. You are ${c.name}, not ${owner.name}. Match ${c.name}'s natural texting voice. Return TEXT: followed by the reply, ACTION: IGNORE if ${c.name} chooses silence, or ACTION: BLOCK if ${c.name} is done with unwanted contact.`,systemPrompt:`You are ${c.name}. ${owner.name} is the other person. Never swap identities. Silence and blocking are valid in-character outcomes.`,responseLength:350});packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||'';secondaryActions=packet.actions||[]}
         replies=items.map(x=>({sender:c.name,...x}));
         if(!directAction&&boundaryReplyClaimsBlock(replies))directAction='block';
         if(directAction==='ignore')replies=[];
@@ -913,17 +1214,18 @@ Return protocol lines only.`;
 Only these contacts may speak: ${contacts.map(c=>c.name).join(', ')}.
 Each sender MUST remain themselves. Never make a sender adopt the phone owner's identity or another member's name/history.
 Match each person's established personality and their existing texting style. Do not flatten everyone into formal, polite prose. Emojis, slang, abbreviations, teasing and different punctuation are welcome when character-appropriate.
+Each contact's provided phoneNumber is authoritative and known to that contact. If directly asked for their own number, use that exact value; never invent another number or surname.
 Return 1-4 lines only. Every line MUST use exactly: Sender Name: message
 No JSON, markdown or narration.`;
       const prompt=`PHONE OWNER (not an allowed generated speaker unless listed above): ${owner.name}
-CONTACT DATA: ${JSON.stringify(contacts.map(c=>({name:c.name,character:compactCard(c),voice:textingVoiceEvidence(c,conversation),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})))}
-GREYHAVEN LIFE: ${JSON.stringify({time:w.time,scene:w.scene,people:w.people,snapshot:w.snapshot})}
+CONTACT DATA: ${JSON.stringify(contacts.map(c=>({name:c.name,phoneNumber:identityForName(c.name,{create:true})?.phoneNumber||'',character:compactCard(c),voice:textingVoiceEvidence(c,conversation),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})))}
+GREYHAVEN LIFE: ${JSON.stringify(scopedWorld(w,[owner.name,...contacts.map(c=>c.name)]))}
 THREAD:
 ${conversation.slice(-28).map(messageContext).join('\n')}
 Continue naturally without swapping identities.`;
       replies=parseGroupReply(await generate({prompt,systemPrompt,responseLength:760}),contacts);
     }
-    if(!replies.length&&!directAction)throw new Error('The model returned no usable phone reply.');
+    if(!replies.length&&!directAction&&!secondaryActions.length)throw new Error('The model returned no usable phone reply.');
     const allowed=new Map(contacts.map(c=>[lc(c.name),c])),stamp=now().getTime();
     mutate(cur=>{
       const target=cur.threads[th.id];if(!target)return;
@@ -959,6 +1261,7 @@ Continue naturally without swapping identities.`;
       }
     },false);
     for(const e of continuityToRecord){if(e.msg)recordMessageContinuity(e.th,e.t,e.msg,e.ownerName);else recordContinuityEvent(e)}
+    if(directContact&&secondaryActions.length)dispatchGeneratedPhoneActions(secondaryActions,directContact.name,actionParentKey);
     if(boundaryRecord?.action==='block'&&directContact){
       syncCrossPhoneBlock(directContact.name,directContact.avatar,owner.name,owner.avatar,owner.description,true);
       recordContinuityEvent({kind:'message',participants:[owner.name,directContact.name],sender:directContact.name,summary:`${directContact.name} blocked ${owner.name} after the private phone conversation.`,threadTitle:`Messages with ${directContact.name}`,roleplayMs:now().getTime(),persistent:true});
@@ -1002,7 +1305,7 @@ function statusBar(){return`<div class="ghp-status"><span>${esc(timeText())}</sp
 function notifCards(){const t=timeline(),p=profile(),n=t.notifications.filter(x=>!x.read&&p.apps[x.app]!==false).slice(0,3);return n.length?n.map(x=>`<button class="ghp-lock-notif" data-notif="${esc(x.id)}"><i class="${APPS[x.app]?.icon||'fa-solid fa-bell'}"></i><span><b>${esc(x.title)}</b><small>${p.notificationPreviews?esc(x.text):'Notification'}</small></span><time>${esc(rel(x.timeMs))}</time></button>`).join(''):`<div class="ghp-lock-empty">No new notifications</div>`}
 function renderLock(){return`<div class="ghp-screen ghp-lock" style="${wallpaper()}">${statusBar()}<main><i class="fa-solid fa-lock"></i><h1>${esc(timeText())}</h1><h2>${esc(dateText())}</h2><section>${notifCards()}</section></main><button class="ghp-unlock" data-unlock>Tap to unlock <i class="fa-solid fa-chevron-up"></i></button><div class="ghp-indicator"></div></div>`}
 function renderHome(){
-  const p=profile(),installed=Object.entries(p.apps).filter(([k,v])=>v&&k!=='settings').map(([k])=>k),dock=['phone','messages','social','snap'].filter(k=>p.apps[k]).slice(0,4),grid=installed.filter(k=>!dock.includes(k)),s=stale(),own=persona();
+  const p=profile(),installed=Object.entries(p.apps).filter(([k,v])=>v&&k!=='settings'&&APPS[k]).map(([k])=>k),dock=['phone','messages','instagram','snapchat'].filter(k=>p.apps[k]).slice(0,4),grid=installed.filter(k=>!dock.includes(k)),s=stale(),own=persona();
   return`<div class="ghp-screen ghp-home" style="${wallpaper()}">${statusBar()}<div class="ghp-widgets"><div><b>${esc(timeText())}</b><span>${esc(dateText(now(),true))}</span></div><button data-refresh class="${s.stale?'stale':''}"><i class="fa-solid fa-arrows-rotate"></i><span>${refreshBusy?'Refreshing…':s.stale?(s.newMessages>99?'Lots of new RP context':s.newMessages?`${s.newMessages} new RP messages`:'Phone needs refresh'):'Phone up to date'}</span></button></div><div class="ghp-grid">${grid.map(k=>icon(k)).join('')}${icon('settings')}</div><div class="ghp-owner">${avatarHtml({name:own.name,avatar:own.avatar},'small')}<span>${esc(own.name)}'s ${esc(p.deviceName)}</span></div><div class="ghp-dock">${dock.map(k=>icon(k,true)).join('')}</div><div class="ghp-indicator"></div></div>`;
 }
 function header(title,sub='',right=''){return`<header class="ghp-app-header"><button data-back><i class="fa-solid fa-chevron-left"></i></button><div><b>${esc(title)}</b>${sub?`<small>${esc(sub)}</small>`:''}</div><span>${right}</span></header>`}
@@ -1046,26 +1349,104 @@ function renderCall(){
   return`<div class="ghp-call-screen">${statusBar()}<section>${avatarHtml(co,'huge')}<h1>${esc(co.nickname||co.name)}</h1><small>${c.status==='active'?'call in progress':esc(c.status)}</small></section><main>${(c.transcript||[]).slice(-30).map(x=>`<div class="${x.sender===persona().name?'mine':''}"><b>${esc(x.sender)}</b><span>${esc(x.text)}</span></div>`).join('')}${replyBusy?'<div class="ghp-typing"><i></i><i></i><i></i></div>':''}</main><div class="ghp-call-actions"><button><i class="fa-solid fa-microphone-slash"></i><small>mute</small></button><button><i class="fa-solid fa-volume-high"></i><small>speaker</small></button><button data-end-call><i class="fa-solid fa-phone-slash"></i><small>end</small></button></div><form data-call-form="${esc(th?.id||'')}"><input placeholder="Say something…" ${replyBusy?'disabled':''}><button ${replyBusy?'disabled':''}><i class="fa-solid fa-arrow-up"></i></button></form></div>`;
 }
 function renderContacts(){
-  const t=timeline(),cs=t.contactOrder.map(k=>t.contacts[k]).filter(Boolean).sort((a,b)=>Number(b.favorite)-Number(a.favorite)||a.name.localeCompare(b.name)),removed=t.suppressedContacts?.length||0;
-  return`<div class="ghp-app">${header('Contacts','','<button data-add-contact><i class="fa-solid fa-plus"></i></button>')}<main><button class="ghp-discover" data-discover><i class="fa-solid fa-wand-magic-sparkles"></i> Discover relevant contacts</button>${removed?`<button class="ghp-removed-row" data-removed-contacts><i class="fa-solid fa-user-slash"></i><span><b>Removed Contacts</b><small>${removed} hidden from automatic discovery</small></span><i class="fa-solid fa-chevron-right"></i></button>`:''}${cs.map(c=>`<button class="ghp-row" data-contact="${esc(c.id)}">${avatarHtml(c)}<span><b>${esc(c.nickname||c.name)}</b><small>${c.favorite?'★ Favorite · ':''}${esc(c.source)}</small></span><em><i class="fa-solid fa-chevron-right"></i></em></button>`).join('')}</main></div>`;
+  const t=timeline(),cs=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c?.saved).sort((a,b)=>Number(b.favorite)-Number(a.favorite)||a.name.localeCompare(b.name)),removed=t.suppressedContacts?.length||0;
+  return`<div class="ghp-app">${header('Contacts','','<button data-add-contact><i class="fa-solid fa-plus"></i></button>')}<main>${removed?`<button class="ghp-removed-row" data-removed-contacts><i class="fa-solid fa-user-slash"></i><span><b>Removed Contacts</b><small>${removed} removed from this phone</small></span><i class="fa-solid fa-chevron-right"></i></button>`:''}${cs.length?cs.map(c=>`<button class="ghp-row" data-contact="${esc(c.id)}">${avatarHtml(c)}<span><b>${esc(c.nickname||c.name)}</b><small>${c.favorite?'★ Favorite · ':''}${esc(c.phoneNumber||'Number unavailable')}</small></span><em><i class="fa-solid fa-chevron-right"></i></em></button>`).join(''):empty('fa-solid fa-address-book','No saved contacts','Tap + and enter an exact 9-digit phone number.')}</main></div>`;
 }
 function renderContact(){
   const c=contact(contactId);if(!c){app='contacts';return renderContacts()}let l=null;try{l=globalThis.GreyhavenLife?.getPerson?.(c.name)}catch{}const loc=l?.resolved?[l.resolved.location,l.resolved.area].filter(Boolean).join(' · '):'';
-  return`<div class="ghp-app">${header(c.nickname||c.name)}<main class="ghp-contact-card">${avatarHtml(c,'hero')}<h1>${esc(c.nickname||c.name)}</h1>${c.nickname?`<small>${esc(c.name)}</small>`:''}${c.blockedByContact?`<div class="ghp-remote-blocked"><i class="fa-solid fa-user-slash"></i><span><b>Contact unavailable</b><small>Messages and calls are not being delivered.</small></span></div>`:''}<div class="ghp-contact-actions"><button data-message-contact="${esc(c.id)}"><i class="fa-solid fa-comment"></i><span>message</span></button><button data-call="${esc(c.id)}" ${c.blockedByContact?'disabled':''}><i class="fa-solid fa-phone"></i><span>call</span></button></div>${loc?`<div class="ghp-life-link"><i class="fa-solid fa-location-dot"></i><span><b>Greyhaven Life</b><small>${esc(loc)}</small></span></div>`:''}<div class="ghp-settings-list"><label><span><b>Nickname</b><small>Phone-only display name</small></span><input data-nickname="${esc(c.id)}" value="${esc(c.nickname||'')}"></label><label><span><b>Favorite</b></span><input type="checkbox" data-favorite="${esc(c.id)}" ${c.favorite?'checked':''}></label><label><span><b>Mute notifications</b></span><input type="checkbox" data-muted="${esc(c.id)}" ${c.muted?'checked':''}></label><label><span><b>Location sharing</b></span><select data-location-sharing="${esc(c.id)}"><option value="precise" ${c.locationSharing==='precise'?'selected':''}>Precise</option><option value="approximate" ${c.locationSharing==='approximate'?'selected':''}>Approximate</option><option value="off" ${c.locationSharing==='off'?'selected':''}>Off</option></select></label><label><span><b>Blocked</b></span><input type="checkbox" data-blocked="${esc(c.id)}" ${c.blocked?'checked':''}></label></div><button class="ghp-contact-remove" data-remove-contact="${esc(c.id)}"><i class="fa-solid fa-user-minus"></i> Remove Contact</button><small class="ghp-contact-remove-note">Removed contacts stay hidden from automatic discovery until you restore or manually add them.</small></main></div>`;
+  return`<div class="ghp-app">${header(c.nickname||c.name)}<main class="ghp-contact-card">${avatarHtml(c,'hero')}<h1>${esc(c.nickname||c.name)}</h1>${c.nickname?`<small>${esc(c.name)}</small>`:''}<div class="ghp-contact-number">${esc(c.phoneNumber||'Number unavailable')}</div>${c.blockedByContact?`<div class="ghp-remote-blocked"><i class="fa-solid fa-user-slash"></i><span><b>Contact unavailable</b><small>Messages and calls are not being delivered.</small></span></div>`:''}<div class="ghp-contact-actions"><button data-message-contact="${esc(c.id)}"><i class="fa-solid fa-comment"></i><span>message</span></button><button data-call="${esc(c.id)}" ${c.blockedByContact?'disabled':''}><i class="fa-solid fa-phone"></i><span>call</span></button></div>${loc?`<div class="ghp-life-link"><i class="fa-solid fa-location-dot"></i><span><b>Greyhaven Life</b><small>${esc(loc)}</small></span></div>`:''}<div class="ghp-settings-list"><label><span><b>Nickname</b><small>Phone-only display name</small></span><input data-nickname="${esc(c.id)}" value="${esc(c.nickname||'')}"></label><label><span><b>Favorite</b></span><input type="checkbox" data-favorite="${esc(c.id)}" ${c.favorite?'checked':''}></label><label><span><b>Mute notifications</b></span><input type="checkbox" data-muted="${esc(c.id)}" ${c.muted?'checked':''}></label><label><span><b>Location sharing</b></span><select data-location-sharing="${esc(c.id)}"><option value="precise" ${c.locationSharing==='precise'?'selected':''}>Precise</option><option value="approximate" ${c.locationSharing==='approximate'?'selected':''}>Approximate</option><option value="off" ${c.locationSharing==='off'?'selected':''}>Off</option></select></label><label><span><b>Blocked in Messages/Phone</b></span><input type="checkbox" data-blocked="${esc(c.id)}" ${c.blocked?'checked':''}></label></div><button class="ghp-contact-remove" data-remove-contact="${esc(c.id)}"><i class="fa-solid fa-user-minus"></i> Remove Contact</button><small class="ghp-contact-remove-note">This does not change Instagram, Snapchat or Facebook relationships.</small></main></div>`;
 }
 
-function renderSocial(){
-  const t=timeline(),stories=t.stories.filter(x=>Number(x.expiresAt||0)>now().getTime()).slice(0,20);
-  return`<div class="ghp-app">${header('Social','','<button data-new-post><i class="fa-solid fa-plus"></i></button>')}<main><div class="ghp-stories">${stories.map(s=>{const c=t.contacts[s.contactId]||{name:s.author};return`<button data-story="${esc(s.id)}" class="${s.viewed?'viewed':''}"><span>${avatarHtml(c)}</span><small>${esc(c.nickname||s.author)}</small></button>`}).join('')||'<small>No active stories</small>'}</div><div class="ghp-feed">${t.posts.length?t.posts.slice(0,40).map(p=>{const c=t.contacts[p.contactId]||{name:p.author};return`<article><header>${avatarHtml(c,'small')}<span><b>${esc(p.author)}</b><small>${esc(rel(p.timeMs))}</small></span></header><div class="ghp-fake-photo"><i class="fa-regular fa-image"></i><p>${esc(p.visual||'Photo')}</p></div><div class="ghp-social-icons"><i class="fa-regular fa-heart"></i><i class="fa-regular fa-comment"></i><i class="fa-regular fa-paper-plane"></i></div><b>${Number(p.likes||0).toLocaleString()} likes</b><p><strong>${esc(p.author)}</strong> ${esc(p.caption)}</p><small>${Number(p.comments||0)} comments</small></article>`}).join(''):empty('fa-solid fa-camera-retro','Your feed is quiet','Refresh Phone to let relevant contacts post naturally.')}</div></main></div>`;
+function identityDirectory({includeProvisional=false}={}){
+  ensureAllIdentities();const own=currentIdentity();return Object.values(settingsRoot().identities||{}).map(x=>normalizeIdentity(x,x.id)).filter(x=>x.id!==own?.id&&(includeProvisional||x.kind!=='provisional')).sort((a,b)=>a.name.localeCompare(b.name));
 }
-function renderStory(){
-  const t=timeline(),s=t.stories.find(x=>x.id===threadId);if(!s){app='social';return renderSocial()}s.viewed=true;persist(t,false);const c=t.contacts[s.contactId]||{name:s.author};return`<div class="ghp-story-view"><div class="ghp-progress"><i></i></div><header>${avatarHtml(c,'small')}<b>${esc(s.author)}</b><time>${esc(rel(s.timeMs))}</time><button data-open-app="social"><i class="fa-solid fa-xmark"></i></button></header><main><i class="fa-regular fa-image"></i><p>${esc(s.visual||'Story')}</p></main><footer>${esc(s.caption||'')}</footer></div>`;
+function socialTabs(appName,tabs,current){
+  return`<nav class="ghp-social-tabs">${tabs.map(([key,iconClass,label])=>`<button data-app-view="${esc(key)}" class="${current===key?'active':''}" aria-label="${esc(label)}"><i class="${iconClass}"></i><small>${esc(label)}</small></button>`).join('')}</nav>`;
 }
-function renderSnap(){
-  const t=timeline();let people=[];try{people=globalThis.GreyhavenLife?.getPeople?.()||[]}catch{}const rows=[];
-  for(const c of t.contactOrder.map(k=>t.contacts[k]).filter(Boolean)){if(c.locationSharing==='off'||c.blocked)continue;const p=people.find(x=>lc(x.name)===lc(c.name));if(!p)continue;const place=p.resolved?.location||p.base?.location||'',area=p.resolved?.area||p.base?.area||'',display=c.locationSharing==='approximate'?(area||place||'Location unavailable'):([place,area].filter(Boolean).join(' · ')||'Location unavailable');rows.push({c,p,display})}
-  return`<div class="ghp-app">${header('Snap Map',globalThis.GreyhavenLife?'Powered by Greyhaven Life':'Greyhaven Life not detected')}<main class="ghp-map">${rows.length?rows.map(x=>`<div>${avatarHtml(x.c)}<span><b>${esc(x.c.nickname||x.c.name)}</b><small>${esc(x.display)}</small>${x.p.resolved?.status?`<em>${esc(x.p.resolved.status)}</em>`:''}</span><i class="${x.p.present?'here':''}">${x.p.present?'Here':'Off-screen'}</i></div>`).join(''):empty('fa-solid fa-location-dot','No shared locations yet','Track contacts in Greyhaven Life or enable location sharing.')}</main></div>`;
+function socialIdentity(identityId,name='',avatar=''){
+  return identityById(identityId)||identityForName(name,{create:false})||{id:identityId||'',name:norm(name)||'Unknown',avatar};
 }
+function socialMediaCard(row,label='Photo'){
+  const type=row.type==='video'?'video':'photo',key=String(row.mediaKey||'');
+  if(key)return type==='video'?`<video class="ghp-social-media" data-media-key="${esc(key)}" controls playsinline preload="metadata"></video>`:`<img class="ghp-social-media" data-media-key="${esc(key)}" alt="${esc(row.visual||row.mediaDescription||label)}">`;
+  return`<div class="ghp-fake-photo"><i class="${type==='video'?'fa-solid fa-video':'fa-regular fa-image'}"></i><p>${esc(row.visual||row.mediaDescription||label)}</p></div>`;
+}
+function appThreadRows(appName){
+  const store=appStore(timeline(),appName),rows=store.threadOrder.map(key=>store.threads[key]).filter(Boolean).sort((a,b)=>Number(b.messages.at(-1)?.timeMs||b.createdAt)-Number(a.messages.at(-1)?.timeMs||a.createdAt));
+  return rows.length?rows.map(th=>{const peer=appPeer(th)||{name:th.peerName,avatar:th.peerAvatar},last=th.messages.at(-1),unreadCount=th.messages.filter(m=>lc(m.sender)!==lc(persona().name)&&!m.read).length,streak=appName==='snapchat'?snapStreak(th):0;return`<button class="ghp-row" data-open-social-thread="${esc(appName)}" data-social-thread="${esc(th.id)}">${avatarHtml(peer)}<span><b>${esc(peer.name)}${streak?` <em class="ghp-streak">🔥 ${streak}</em>`:''}</b><small>${last?esc(messagePreview(last)):'Start a conversation'}</small></span><em><time>${last?esc(rel(last.timeMs)):''}</time>${unreadCount?`<i>${unreadCount}</i>`:''}</em></button>`}).join(''):empty('fa-regular fa-comments','No conversations yet',`${APPS[appName].label} chats stay separate from iMessage.`);
+}
+function renderAppThread(appName){
+  const t=timeline(),th=appThread(appName,itemId,t);if(!th){appView=appName==='instagram'?'dms':appName==='facebook'?'messenger':'chats';itemId='';return appName==='instagram'?renderInstagram():appName==='facebook'?renderFacebook():renderSnapchat()}
+  const peer=appPeer(th)||{name:th.peerName,avatar:th.peerAvatar},blocked=socialActionBlocked(t,peer,appName);for(const m of th.messages)if(lc(m.sender)!==lc(persona().name))m.read=true;for(const n of t.notifications)if(n.app===appName&&n.targetId===th.id)n.read=true;persist(t,false);
+  const bubbles=th.messages.slice(-100).map(m=>{const mine=lc(m.sender)===lc(persona().name),media=['photo','video'].includes(m.type),closed=appName==='snapchat'&&media&&!mine&&!m.opened;return`<div class="ghp-msg ${mine?'mine':''} ${media?'has-media':''}">${closed?`<button class="ghp-unopened-snap" data-open-snap-thread="${esc(th.id)}" data-open-snap-message="${esc(m.id)}"><i class="${m.type==='video'?'fa-solid fa-video':'fa-solid fa-square'}"></i><span>Tap to view ${m.type==='video'?'video':'photo'} Snap</span></button>`:(media?`${socialMediaCard({type:m.type,mediaKey:m.mediaKey,mediaDescription:m.mediaDescription},m.type)}${m.text?`<p class="ghp-media-caption">${esc(m.text)}</p>`:''}<button class="ghp-save-snap" data-app-link-media="${esc(appName)}" data-app-link-thread="${esc(th.id)}" data-app-link-message="${esc(m.id)}"><i class="fa-solid ${m.mediaKey?'fa-pen':'fa-paperclip'}"></i> ${m.mediaKey?'Replace':'Attach'} local preview</button>${appName==='snapchat'?`<button class="ghp-save-snap" data-save-snap-thread="${esc(th.id)}" data-save-snap-message="${esc(m.id)}"><i class="fa-regular fa-bookmark"></i> Save to Memories</button>`:''}`:`<p>${esc(m.text)}</p>`)}<time>${esc(timeText(new Date(m.timeMs)))}</time></div>`}).join('');
+  const subtitle=appName==='instagram'?'Instagram DM':appName==='facebook'?'Messenger':'Snapchat Chat';
+  return`<div class="ghp-app ghp-thread ghp-social-thread">${header(peer.name,blocked?'Blocked in this app':subtitle,`<button data-social-thread-menu="${esc(appName)}" data-social-thread-id="${esc(th.id)}"><i class="fa-solid fa-ellipsis"></i></button>`)}<main>${bubbles}${appReplyBusy?'<div class="ghp-typing"><i></i><i></i><i></i></div>':''}</main><form data-app-thread-form="${esc(appName)}" data-app-thread-id="${esc(th.id)}"><button type="button" class="ghp-plus" data-app-media="${esc(appName)}" data-app-media-thread="${esc(th.id)}" ${blocked||appReplyBusy?'disabled':''}><i class="fa-solid fa-plus"></i></button><input placeholder="${blocked?'Unavailable':'Message…'}" ${blocked||appReplyBusy?'disabled':''}><button ${blocked||appReplyBusy?'disabled':''}><i class="fa-solid fa-arrow-up"></i></button></form></div>`;
+}
+function renderInstagram(){
+  const t=timeline(),view=appView||'feed',own=currentIdentity(),store=t.instagram;
+  if(view==='thread')return renderAppThread('instagram');
+  if(view==='story'){
+    const s=store.stories.find(x=>x.id===itemId);if(!s){appView='feed';itemId='';return renderInstagram()}s.viewed=true;persist(t,false);const who=socialIdentity(s.identityId,s.author);return`<div class="ghp-story-view"><div class="ghp-progress"><i></i></div><header>${avatarHtml(who,'small')}<b>${esc(who.name)}</b><time>${esc(rel(s.timeMs))}</time><button data-app-view="feed"><i class="fa-solid fa-xmark"></i></button></header><main>${socialMediaCard({visual:s.visual,mediaKey:s.mediaKey,type:s.type},'Instagram Story')}</main><footer>${esc(s.caption||'')}</footer></div>`;
+  }
+  const tabs=[['feed','fa-solid fa-house','Feed'],['people','fa-solid fa-user-group','People'],['dms','fa-regular fa-paper-plane','DMs'],['notifications','fa-regular fa-heart','Activity'],['profile','fa-regular fa-user','Profile']];let body='';
+  if(view==='feed'){
+    const stories=store.stories.filter(x=>Number(x.expiresAt||0)>now().getTime()).slice(0,24);
+    body=`<div class="ghp-stories"><button data-instagram-create-story><span>${avatarHtml(own)}</span><small>Your story +</small></button>${stories.map(s=>{const who=socialIdentity(s.identityId,s.author);return`<button data-instagram-story="${esc(s.id)}" class="${s.viewed?'viewed':''}"><span>${avatarHtml(who)}</span><small>${esc(who.name)}</small></button>`}).join('')}</div><div class="ghp-feed">${store.posts.length?store.posts.slice(0,50).map(p=>{const who=socialIdentity(p.identityId,p.author,persona().avatar),comments=Array.isArray(p.comments)?p.comments:[];return`<article><header>${avatarHtml(who,'small')}<span><b>${esc(who.name)}</b><small>${esc(rel(p.timeMs))}</small></span></header>${socialMediaCard(p,'Instagram post')}<div class="ghp-social-icons"><button data-instagram-like="${esc(p.id)}"><i class="${p.likedByOwner?'fa-solid':'fa-regular'} fa-heart"></i></button><button data-instagram-comment="${esc(p.id)}"><i class="fa-regular fa-comment"></i></button><button data-open-social-thread="instagram" data-social-identity="${esc(who.id)}"><i class="fa-regular fa-paper-plane"></i></button></div><b>${Number(p.likes||0).toLocaleString()} likes</b><p><strong>${esc(who.name)}</strong> ${esc(p.caption||'')}</p>${comments.slice(-3).map(c=>`<p class="ghp-comment"><strong>${esc(c.author||'Someone')}</strong> ${esc(c.text||c)}</p>`).join('')}<small>${comments.length||Number(p.commentCount||0)} comments</small></article>`}).join(''):empty('fa-brands fa-instagram','Your feed is quiet','Follow people or use Refresh Phone for natural activity.')}</div>`;
+  }else if(view==='people'){
+    const rows=identityDirectory().map(who=>({who,state:appRelationship(t,who,'instagram',false)})),mode=itemId,filtered=rows.filter(x=>x.state&&(mode==='followers'?x.state.followedBy:mode==='following'?x.state.following:(x.state.following||x.state.followedBy)));
+    body=`<div class="ghp-social-section"><button class="ghp-wide-action" data-find-social="instagram"><i class="fa-solid fa-magnifying-glass"></i> Find an exact character</button><h3>${mode==='followers'?'Followers':mode==='following'?'Following':'Instagram relationships'}</h3>${filtered.map(({who,state})=>`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>${state.following?'Following':''}${state.following&&state.followedBy?' · ':''}${state.followedBy?'Follows you':''}</small></span><button data-instagram-follow="${esc(who.id)}">${state.following?'Unfollow':'Follow'}</button><button data-open-social-thread="instagram" data-social-identity="${esc(who.id)}"><i class="fa-regular fa-paper-plane"></i></button></div>`).join('')||empty('fa-solid fa-user-plus','No connections yet','Following someone does not make them follow back.')}</div>`;
+  }else if(view==='dms')body=appThreadRows('instagram');
+  else if(view==='notifications')body=`<div class="ghp-social-section">${t.notifications.filter(n=>n.app==='instagram').slice(0,60).map(n=>`<button class="ghp-notification-row ${n.read?'':'unread'}" data-notif="${esc(n.id)}"><i class="fa-brands fa-instagram"></i><span><b>${esc(n.title)}</b><small>${esc(n.text)}</small></span><time>${esc(rel(n.timeMs))}</time></button>`).join('')||empty('fa-regular fa-heart','No activity yet','Follows, likes, comments, story views and DMs appear here.')}</div>`;
+  else{
+    const rels=Object.values(t.relationships),following=rels.filter(r=>r.apps?.instagram?.following).length,followers=rels.filter(r=>r.apps?.instagram?.followedBy).length;
+    body=`<section class="ghp-social-profile">${avatarHtml(own,'hero')}<h2>${esc(own.name)}</h2><div><button data-instagram-people="followers"><b>${followers}</b><small>followers</small></button><button data-instagram-people="following"><b>${following}</b><small>following</small></button><span><b>${store.posts.filter(p=>p.ownerPost||p.identityId===own.id).length}</b><small>posts</small></span></div><p>Phone numbers and other app relationships stay separate.</p></section>`;
+  }
+  return`<div class="ghp-app ghp-social-app ghp-instagram">${header('Instagram','',view==='feed'?'<button data-new-instagram-post><i class="fa-solid fa-plus"></i></button>':'')}<main>${body}</main>${socialTabs('instagram',tabs,view)}</div>`;
+}
+function snapStreak(th){
+  const byDay=new Map();for(const m of th?.messages||[]){if(!['photo','video'].includes(m.type))continue;const day=new Date(m.timeMs).toISOString().slice(0,10),set=byDay.get(day)||new Set();set.add(lc(m.sender));byDay.set(day,set)}const mutual=[...byDay.entries()].filter(([,set])=>set.size>1).map(([day])=>day).sort().reverse();if(!mutual.length)return 0;let count=1,cursor=new Date(`${mutual[0]}T12:00:00Z`);for(let i=1;i<mutual.length;i++){cursor.setUTCDate(cursor.getUTCDate()-1);if(mutual[i]!==cursor.toISOString().slice(0,10))break;count++}return count;
+}
+function renderSnapMap(){
+  const t=timeline(),rows=[];for(const [identityId,reln] of Object.entries(t.relationships)){if(!reln.apps?.snapchat?.friends||reln.apps.snapchat.blocked||reln.apps.snapchat.blockedBy||reln.apps.snapchat.mapSharing==='off')continue;const who=identityById(identityId);if(!who)continue;let person=null;try{person=globalThis.GreyhavenLife?.getPerson?.(who.name)||null}catch{}const resolved=person?.resolved||null,place=resolved?.location||'',area=resolved?.area||'';if(!place&&!area)continue;const display=reln.apps.snapchat.mapSharing==='approximate'?(area||place):[place,area].filter(Boolean).join(' · ');rows.push({who,person,display})}
+  return`<div class="ghp-map">${rows.length?rows.map(x=>`<div>${avatarHtml(x.who)}<span><b>${esc(x.who.name)}</b><small>${esc(x.display)}</small>${x.person?.resolved?.status?`<em>${esc(x.person.resolved.status)}</em>`:''}</span><i class="${x.person?.present?'here':''}">${x.person?.present?'Here':'Off-screen'}</i></div>`).join(''):empty('fa-solid fa-location-dot','No evidenced locations','Only Snapchat friends with their own Greyhaven Life location evidence appear here.')}</div>`;
+}
+function renderSnapchat(){
+  const t=timeline(),view=appView||'camera',store=t.snapchat;
+  if(view==='thread')return renderAppThread('snapchat');
+  if(view==='story'){
+    const s=store.stories.find(x=>x.id===itemId);if(!s){appView='stories';itemId='';return renderSnapchat()}s.viewed=true;persist(t,false);const who=socialIdentity(s.identityId,s.author);return`<div class="ghp-story-view ghp-snap-story"><div class="ghp-progress"><i></i></div><header>${avatarHtml(who,'small')}<b>${esc(who.name)}</b><time>${esc(rel(s.timeMs))}</time><button data-app-view="stories"><i class="fa-solid fa-xmark"></i></button></header><main>${socialMediaCard({visual:s.visual,mediaKey:s.mediaKey,type:s.type},'Snap')}</main><footer>${esc(s.caption||'')}</footer></div>`;
+  }
+  const tabs=[['camera','fa-solid fa-camera','Camera'],['chats','fa-solid fa-comment','Chats'],['stories','fa-solid fa-play','Stories'],['map','fa-solid fa-location-dot','Map'],['memories','fa-solid fa-images','Memories']];let body='';
+  if(view==='camera')body=`<section class="ghp-snap-camera"><i class="fa-solid fa-camera"></i><h2>Send a Snap</h2><p>Describe a photo or video for the recipient AI. A local upload can replace the placeholder visually.</p><button data-compose-snap><i class="fa-regular fa-circle"></i></button><button class="ghp-wide-action" data-app-view="add"><i class="fa-solid fa-user-plus"></i> Add Friends</button></section>`;
+  else if(view==='chats')body=appThreadRows('snapchat');
+  else if(view==='stories')body=`<div class="ghp-stories"><button data-snap-create-story><span>${avatarHtml(currentIdentity())}</span><small>Your story +</small></button>${store.stories.filter(x=>Number(x.expiresAt||0)>now().getTime()).map(s=>{const who=socialIdentity(s.identityId,s.author);return`<button data-snap-story="${esc(s.id)}" class="${s.viewed?'viewed':''}"><span>${avatarHtml(who)}</span><small>${esc(who.name)}</small></button>`}).join('')}</div>${store.stories.length?'':empty('fa-solid fa-play','No active Stories','Stories expire after 24 hours.')}`;
+  else if(view==='map')body=renderSnapMap();
+  else if(view==='add'){
+    const rows=identityDirectory().map(who=>({who,state:appRelationship(t,who,'snapchat',false)}));body=`<div class="ghp-social-section"><button class="ghp-wide-action" data-find-social="snapchat"><i class="fa-solid fa-magnifying-glass"></i> Find an exact character</button>${rows.filter(x=>x.state&&(x.state.friends||x.state.outgoingRequest||x.state.incomingRequest)).map(({who,state})=>`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>${state.friends?'Friends':state.incomingRequest?'Added you':state.outgoingRequest?'Pending':'Not friends'}</small></span>${state.incomingRequest?`<button data-snap-accept="${esc(who.id)}">Accept</button><button data-snap-decline="${esc(who.id)}">Ignore</button>`:state.friends?`<button data-open-social-thread="snapchat" data-social-identity="${esc(who.id)}"><i class="fa-solid fa-comment"></i></button>`:`<button data-snap-add="${esc(who.id)}" ${state.outgoingRequest?'disabled':''}>${state.outgoingRequest?'Pending':'Add'}</button>`}</div>`).join('')||empty('fa-solid fa-user-plus','No friend activity','Adding someone is one-sided until they add you back.')}</div>`;
+  }else{
+    const eyes=appView==='eyes',items=eyes?store.eyesOnly:store.memories;body=`<div class="ghp-memory-switch"><button data-app-view="memories" class="${!eyes?'active':''}">Memories</button><button data-app-view="eyes" class="${eyes?'active':''}"><i class="fa-solid fa-lock"></i> My Eyes Only</button></div><button class="ghp-wide-action" data-upload-private="${eyes?'eyes':'memories'}"><i class="fa-solid fa-plus"></i> Add saved media</button><div class="ghp-memory-grid">${items.map(m=>`<article>${socialMediaCard(m,m.type==='video'?'Video':'Photo')}<p>${esc(m.caption||m.mediaDescription||m.visual||'Saved Snap')}</p><small>${esc(rel(m.timeMs))}</small><div><button data-send-saved-snap="${esc(m.id)}" data-saved-section="${eyes?'eyesOnly':'memories'}"><i class="fa-solid fa-paper-plane"></i></button>${eyes?'':`<button data-move-snap-eyes="${esc(m.id)}"><i class="fa-solid fa-lock"></i></button>`}<button data-delete-saved-snap="${esc(m.id)}" data-saved-section="${eyes?'eyesOnly':'memories'}"><i class="fa-solid fa-trash"></i></button></div></article>`).join('')||empty('fa-regular fa-images',eyes?'My Eyes Only is empty':'No Memories yet',eyes?'Private saved media stays in this section.':'Open a Snap and save it, or add media manually.')}</div>`;
+  }
+  return`<div class="ghp-app ghp-social-app ghp-snapchat">${header('Snapchat',view==='map'?'Greyhaven Life evidence only':'',view==='chats'?'<button data-app-view="add"><i class="fa-solid fa-user-plus"></i></button>':'')}<main>${body}</main>${socialTabs('snapchat',tabs,view)}</div>`;
+}
+function renderFacebook(){
+  const t=timeline(),view=appView||'feed',store=t.facebook,own=currentIdentity();
+  if(view==='thread')return renderAppThread('facebook');
+  if(view==='listing'){
+    const row=store.marketplace.listings.find(x=>x.id===itemId);if(!row){appView='marketplace';itemId='';return renderFacebook()}const seller=identityById(row.sellerIdentityId)||{id:row.sellerIdentityId,name:row.sellerName};return`<div class="ghp-app ghp-social-app ghp-facebook">${header(row.title,'Marketplace')}<main class="ghp-market-detail">${socialMediaCard({visual:row.visual},'Marketplace listing')}<h2>${esc(row.title)}</h2><h3>${esc(row.price)}</h3><p>${esc(row.description||'')}</p><small><i class="fa-solid fa-location-dot"></i> ${esc(row.area||'Area not specified')}</small><div class="ghp-market-seller">${avatarHtml(seller)}<span><b>${esc(seller.name)}</b><small>${row.sellerType==='provisional'?'Provisional Marketplace identity':'Existing Greyhaven identity'}</small></span></div><button class="ghp-wide-action primary" data-market-message="${esc(row.id)}"><i class="fa-brands fa-facebook-messenger"></i> Message seller</button><div class="ghp-market-actions"><button data-market-action="question" data-market-action-listing="${esc(row.id)}">Ask</button><button data-market-action="offer" data-market-action-listing="${esc(row.id)}">Make offer</button><button data-market-action="buy" data-market-action-listing="${esc(row.id)}">Buy</button><button data-market-action="pickup" data-market-action-listing="${esc(row.id)}">Pickup</button></div>${row.sellerType==='provisional'?`<button class="ghp-wide-action" data-market-link="${esc(row.id)}"><i class="fa-solid fa-link"></i> Manually link to a character</button><small class="ghp-muted">Never linked automatically by matching a name.</small>`:''}</main></div>`;
+  }
+  const tabs=[['feed','fa-solid fa-house','Feed'],['friends','fa-solid fa-user-group','Friends'],['messenger','fa-brands fa-facebook-messenger','Messenger'],['marketplace','fa-solid fa-store','Marketplace'],['notifications','fa-solid fa-bell','Alerts']];let body='';
+  if(view==='feed')body=`<div class="ghp-feed">${store.posts.length?store.posts.map(p=>{const who=socialIdentity(p.identityId,p.author),comments=Array.isArray(p.comments)?p.comments:[];return`<article><header>${avatarHtml(who,'small')}<span><b>${esc(who.name)}</b><small>${esc(rel(p.timeMs))}</small></span></header><p>${esc(p.text||'')}</p>${p.visual?socialMediaCard(p,'Facebook post'):''}<small>${Number(p.likes||0)} likes · ${comments.length} comments</small>${comments.slice(-3).map(c=>`<p class="ghp-comment"><strong>${esc(c.author||'Someone')}</strong> ${esc(c.text||c)}</p>`).join('')}<div class="ghp-social-icons"><button data-facebook-like="${esc(p.id)}"><i class="${p.likedByOwner?'fa-solid':'fa-regular'} fa-thumbs-up"></i> Like</button><button data-facebook-comment="${esc(p.id)}"><i class="fa-regular fa-comment"></i> Comment</button></div></article>`}).join(''):empty('fa-brands fa-facebook','Your Feed is quiet','Friends and Refresh Phone can add natural activity.')}</div>`;
+  else if(view==='friends'){
+    const rows=identityDirectory().map(who=>({who,state:appRelationship(t,who,'facebook',false)}));body=`<div class="ghp-social-section"><button class="ghp-wide-action" data-find-social="facebook"><i class="fa-solid fa-user-plus"></i> Find an exact character</button><h3>Friend requests</h3>${rows.filter(x=>x.state?.incomingRequest).map(({who})=>`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>Sent you a request</small></span><button data-facebook-accept="${esc(who.id)}">Accept</button><button data-facebook-decline="${esc(who.id)}">Delete</button></div>`).join('')||'<small class="ghp-muted">No incoming requests.</small>'}<h3>Friends & pending</h3>${rows.filter(x=>x.state&&(x.state.friends||x.state.outgoingRequest)).map(({who,state})=>`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>${state.friends?'Friends':'Request pending'}</small></span>${state.friends?`<button data-open-social-thread="facebook" data-social-identity="${esc(who.id)}"><i class="fa-brands fa-facebook-messenger"></i></button>`:''}</div>`).join('')||'<small class="ghp-muted">No friends or sent requests yet.</small>'}</div>`;
+  }else if(view==='messenger')body=appThreadRows('facebook');
+  else if(view==='marketplace')body=`<div class="ghp-market-grid">${store.marketplace.listings.map(row=>`<button data-market-listing="${esc(row.id)}">${socialMediaCard({visual:row.visual},'Listing')}<b>${esc(row.price)}</b><span>${esc(row.title)}</span><small>${esc(row.area||row.sellerName)}</small></button>`).join('')||empty('fa-solid fa-store','No listings yet','Unified Phone Refresh can create plausible listings from existing or provisional sellers.')}</div>`;
+  else if(view==='notifications')body=t.notifications.filter(n=>n.app==='facebook').map(n=>`<button class="ghp-notification-row ${n.read?'':'unread'}" data-notif="${esc(n.id)}"><i class="fa-brands fa-facebook-f"></i><span><b>${esc(n.title)}</b><small>${esc(n.text)}</small></span><time>${esc(rel(n.timeMs))}</time></button>`).join('')||empty('fa-regular fa-bell','No notifications','Friend requests, Messenger and Marketplace activity appears here.');
+  else body=`<section class="ghp-social-profile">${avatarHtml(own,'hero')}<h2>${esc(own.name)}</h2><p>Facebook profile on this Greyhaven identity. Friend, phone-number, Instagram and Snapchat relationships remain independent.</p></section>`;
+  const right=`<span class="ghp-header-actions">${view==='feed'?'<button data-new-facebook-post><i class="fa-solid fa-plus"></i></button>':''}<button data-app-view="profile"><i class="fa-regular fa-user"></i></button></span>`;return`<div class="ghp-app ghp-social-app ghp-facebook">${header('Facebook','',right)}<main>${body}</main>${socialTabs('facebook',tabs,view)}</div>`;
+}
+function renderStory(){return renderInstagram()}
+function renderSocial(){return renderInstagram()}
+function renderSnap(){return renderSnapchat()}
 function scheduleText(x){const e=x?.entry||x;if(!e)return'';return`${e.label||'Schedule'} · ${e.start||''}–${e.end||''}${e.location||e.area?` · ${[e.location,e.area].filter(Boolean).join(' · ')}`:''}`}
 function renderCalendar(){
   const p=persona();let cur=null,up=[],person=null;try{cur=globalThis.GreyhavenLife?.getCurrentSchedule?.(p.name)||null;up=globalThis.GreyhavenLife?.getUpcomingSchedules?.(p.name,72)||[];person=globalThis.GreyhavenLife?.getPerson?.(p.name)||null}catch{}
@@ -1075,8 +1456,10 @@ function renderCalendar(){
 function renderPhotos(){
   const t=timeline(),messageMedia=[];
   for(const th of Object.values(t.threads))for(const m of th.messages||[])if(['photo','video'].includes(m.type))messageMedia.push({id:m.id,visual:m.mediaDescription,caption:m.text,timeMs:m.timeMs,source:`Messages · ${m.sender}`,type:m.type,mediaKey:m.mediaKey});
-  const a=[...t.photos,...messageMedia,...t.posts.map(x=>({id:x.id,visual:x.visual,caption:x.caption,timeMs:x.timeMs,source:`Social · ${x.author}`,type:'photo'})),...t.stories.map(x=>({id:x.id,visual:x.visual,caption:x.caption,timeMs:x.timeMs,source:`Story · ${x.author}`,type:'photo'}))].sort((a,b)=>Number(b.timeMs||0)-Number(a.timeMs||0));
-  return`<div class="ghp-app">${header('Photos')}<main><div class="ghp-photos">${a.length?a.slice(0,80).map(x=>`<div>${x.mediaKey?(x.type==='video'?`<video data-media-key="${esc(x.mediaKey)}" muted playsinline></video>`:`<img data-media-key="${esc(x.mediaKey)}" alt="${esc(x.visual||'Photo')}">`):`<i class="${x.type==='video'?'fa-solid fa-video':'fa-regular fa-image'}"></i><p>${esc(x.visual||x.caption||'Photo')}</p>`}<small>${esc(x.source||'Photos')}</small></div>`).join(''):empty('fa-regular fa-images','No photos yet','Message media, Social and Stories will appear here.')}</div></main></div>`;
+  for(const appName of ['instagram','snapchat','facebook']){const store=appStore(t,appName);for(const th of Object.values(store.threads||{}))for(const m of th.messages||[])if(['photo','video'].includes(m.type)&&m.opened!==false)messageMedia.push({id:m.id,visual:m.mediaDescription,caption:m.text,timeMs:m.timeMs,source:`${APPS[appName].label} · ${m.sender}`,type:m.type,mediaKey:m.mediaKey})}
+  const social=[...t.instagram.posts.map(x=>({...x,source:`Instagram · ${x.author}`,type:x.type||'photo'})),...t.instagram.stories.map(x=>({...x,source:`Instagram Story · ${x.author}`,type:x.type||'photo'})),...t.facebook.posts.filter(x=>x.visual).map(x=>({...x,source:`Facebook · ${x.author}`,type:x.type||'photo'})),...t.snapchat.memories.map(x=>({...x,source:'Snapchat Memories'}))];
+  const a=[...t.photos,...messageMedia,...social].sort((a,b)=>Number(b.timeMs||0)-Number(a.timeMs||0));
+  return`<div class="ghp-app">${header('Photos')}<main><div class="ghp-photos">${a.length?a.slice(0,100).map(x=>`<div>${x.mediaKey?(x.type==='video'?`<video data-media-key="${esc(x.mediaKey)}" muted playsinline></video>`:`<img data-media-key="${esc(x.mediaKey)}" alt="${esc(x.visual||x.mediaDescription||'Photo')}">`):`<i class="${x.type==='video'?'fa-solid fa-video':'fa-regular fa-image'}"></i><p>${esc(x.visual||x.mediaDescription||x.caption||'Photo')}</p>`}<small>${esc(x.source||'Photos')}</small></div>`).join(''):empty('fa-regular fa-images','No photos yet','Opened message media and social media will appear here.')}</div></main></div>`;
 }
 function renderNotes(){const t=timeline();return`<div class="ghp-app">${header('Notes','','<button data-new-note><i class="fa-solid fa-square-plus"></i></button>')}<main>${t.notes.length?t.notes.map(n=>`<button class="ghp-note" data-note="${esc(n.id)}"><b>${esc(n.title||'Note')}</b><span>${esc(n.body||'')}</span><time>${esc(rel(n.updatedAt||n.timeMs))}</time></button>`).join(''):empty('fa-regular fa-note-sticky','No notes','Notes are private to this persona in this timeline.','<button data-new-note>New note</button>')}</main></div>`}
 function renderMail(){const t=timeline();return`<div class="ghp-app">${header('Mail')}<main>${t.mail.length?t.mail.map(m=>`<button class="ghp-mail ${m.read?'':'unread'}" data-mail="${esc(m.id)}"><i></i><b>${esc(m.from)}</b><strong>${esc(m.subject)}</strong><small>${esc(m.body)}</small><time>${esc(rel(m.timeMs))}</time></button>`).join(''):empty('fa-regular fa-envelope','Inbox empty','Mail is generated only when it makes sense.')}</main></div>`}
@@ -1085,7 +1468,7 @@ function renderSettings(){
 }
 function renderApp(){
   if(app==='call')return renderCall();if(app==='story')return renderStory();
-  const body=app==='messages'?renderMessages():app==='thread'?renderThread():app==='phone'?renderPhone():app==='contacts'?renderContacts():app==='contact'?renderContact():app==='social'?renderSocial():app==='snap'?renderSnap():app==='calendar'?renderCalendar():app==='photos'?renderPhotos():app==='notes'?renderNotes():app==='mail'?renderMail():app==='settings'?renderSettings():renderHome();
+  const body=app==='messages'?renderMessages():app==='thread'?renderThread():app==='phone'?renderPhone():app==='contacts'?renderContacts():app==='contact'?renderContact():app==='instagram'?renderInstagram():app==='snapchat'?renderSnapchat():app==='facebook'?renderFacebook():app==='calendar'?renderCalendar():app==='photos'?renderPhotos():app==='notes'?renderNotes():app==='mail'?renderMail():app==='settings'?renderSettings():renderHome();
   return app?`<div class="ghp-screen ghp-app-host">${statusBar()}${body}</div>`:body;
 }
 
@@ -1100,15 +1483,16 @@ function goBack(){
   composeRequest={threadId:'',kind:''};
   if(app==='thread'){threadId='';app='messages';return render()}
   if(app==='contact'){contactId='';app='contacts';return render()}
-  if(app==='story'){threadId='';app='social';return render()}
+  if(['instagram','snapchat','facebook'].includes(app)&&appView){const from=appView;itemId='';appView=from==='thread'?(app==='instagram'?'dms':app==='snapchat'?'chats':'messenger'):from==='story'?(app==='instagram'?'feed':'stories'):from==='listing'?'marketplace':from==='profile'?'feed':from==='add'?'camera':from==='eyes'?'memories':'';if(appView)return render()}
+  if(app==='story'){threadId='';app='instagram';appView='feed';return render()}
   if(app==='call'){callId='';app='phone';return render()}
-  if(app){threadId='';contactId='';callId='';app='';return render()}
+  if(app){threadId='';contactId='';callId='';appView='';itemId='';app='';return render()}
   render();
 }
 
-async function openPhone(){if(!hasChat()){globalThis.toastr?.warning?.('Open a SillyTavern chat first.');return}buildOverlay();seedContacts(true);unlocked=!profile().lockScreen;app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};const o=document.querySelector('#ghp-overlay');o.hidden=false;document.body.classList.add('ghp-open');render();if(profile().refreshMode==='stale-open'&&stale().stale)setTimeout(refreshPhone,250)}
-function closePhone(){const o=document.querySelector('#ghp-overlay');if(o)o.hidden=true;document.body.classList.remove('ghp-open');app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=false}
-function openApp(a){if(a==='settings'||profile().apps[a]){if(['phone','social','snap'].includes(a))mutate(t=>{for(const n of t.notifications)if(n.app===a)n.read=true},false);unlocked=true;app=a;threadId='';contactId='';composeRequest={threadId:'',kind:''};render()}}
+async function openPhone(){if(!hasChat()){globalThis.toastr?.warning?.('Open a SillyTavern chat first.');return}buildOverlay();seedContacts(true);unlocked=!profile().lockScreen;app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};const o=document.querySelector('#ghp-overlay');o.hidden=false;document.body.classList.add('ghp-open');render();if(profile().refreshMode==='stale-open'&&stale().stale)setTimeout(refreshPhone,250)}
+function closePhone(){const o=document.querySelector('#ghp-overlay');if(o)o.hidden=true;document.body.classList.remove('ghp-open');app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=false}
+function openApp(a){if(a==='settings'||profile().apps[a]){if(a==='phone')mutate(t=>{for(const n of t.notifications)if(n.app===a)n.read=true},false);unlocked=true;app=a;appView='';itemId='';threadId='';contactId='';composeRequest={threadId:'',kind:''};render()}}
 function startCall(cid){
   const t=timeline(),c=t.contacts[cid];if(!c||c.blocked)return;if(c.blockedByContact){globalThis.toastr?.info?.('Call did not connect.');return;}const stamp=now().getTime(),sharedCallId=`call:${id()}`,call={id:id(),sharedCallId,contactId:cid,contactName:c.name,direction:'outgoing',status:'active',timeMs:stamp,durationSec:0,transcript:[]};t.calls.unshift(call);mirrorCallToOwner({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:persona().name,peerAvatar:persona().avatar,peerDescription:persona().description,direction:'incoming',status:'active',timeMs:stamp,sharedCallId});persist(t,false);callId=call.id;app='call';render();const th=directThread(cid);if(th&&!replyBusy)setTimeout(()=>generateReply(th,'call'),180);
 }
@@ -1116,34 +1500,35 @@ function endCall(){let shared='';mutate(t=>{const c=t.calls.find(x=>x.id===callI
 
 function popup(html){const d=document.createElement('dialog');d.className='ghp-popup';d.innerHTML=html;document.body.appendChild(d);d.addEventListener('close',()=>d.remove());d.showModal();return d}
 function newThreadPopup(){
-  const t=timeline(),cs=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c&&!c.blocked);if(!cs.length){globalThis.toastr?.warning?.('No contacts yet.');return}
+  const t=timeline(),cs=t.contactOrder.map(k=>t.contacts[k]).filter(c=>c&&c.saved&&!c.blocked);if(!cs.length){globalThis.toastr?.warning?.('Add a contact by phone number first.');return}
   const d=popup(`<form method="dialog"><header><b>New Message</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><p>Select one person, or several for a group chat.</p><div class="ghp-picker">${cs.map(c=>`<label>${avatarHtml(c,'small')}<span>${esc(c.nickname||c.name)}</span><input type="checkbox" value="${esc(c.id)}"></label>`).join('')}</div><input class="group-name" placeholder="Group name (optional)"><button type="button" class="primary" data-create-thread>Create</button></form>`);
   d.querySelector('[data-create-thread]').onclick=()=>{const ids=[...d.querySelectorAll('input[type=checkbox]:checked')].map(x=>x.value);if(!ids.length)return;if(ids.length===1){const th=directThread(ids[0]);threadId=th.id;app='thread'}else{const t=timeline(),tid=`thread:${id()}`;t.threads[tid]={id:tid,type:'group',title:d.querySelector('.group-name').value.trim()||ids.map(k=>t.contacts[k]?.name).filter(Boolean).join(', '),contactIds:ids,createdAt:Date.now(),messages:[]};t.threadOrder.unshift(tid);persist(t,false);threadId=tid;app='thread'}d.close();render()};
 }
 function addContactPopup(){
-  const c=ctx(),t=timeline(),p=persona(),existing=new Set(Object.values(t.contacts).map(x=>lc(x.name))),choices=(c?.characters||[]).map((ch,i)=>({ch,i})).filter(x=>x.ch?.name&&lc(x.ch.name)!==lc(p.name)&&!existing.has(lc(x.ch.name))).sort((a,b)=>a.ch.name.localeCompare(b.ch.name));
-  const d=popup(`<form method="dialog"><header><b>Add Contact</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><select class="contact-select"><option value="">Choose a SillyTavern character…</option>${choices.map(x=>`<option value="${x.i}">${esc(x.ch.name)}</option>`).join('')}</select><button type="button" class="primary" data-confirm-add>Add Contact</button></form>`);
-  d.querySelector('[data-confirm-add]').onclick=()=>{const i=Number(d.querySelector('.contact-select').value),ch=c?.characters?.[i];if(!ch)return;mutate(t=>{unsuppress(t,ch.name);upsertContact(t,{name:ch.name,avatar:thumb(ch),characterId:i,source:'manual'})},false);d.close();render()};
+  ensureAllIdentities();let match=null;const d=popup(`<form method="dialog" class="ghp-number-add"><header><b>Add Contact</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><p class="ghp-popup-copy">Enter the person's exact 9-digit Greyhaven phone number. Meeting somebody or knowing their name does not add them here.</p><label><span><b>Phone number</b><small>9 digits</small></span><input class="contact-number" inputmode="numeric" maxlength="9" autocomplete="off" placeholder="000000000"></label><div class="ghp-number-match"><i class="fa-solid fa-magnifying-glass"></i><span><b>Waiting for a number</b><small>No character list is exposed.</small></span></div><button type="button" class="primary" data-confirm-add disabled>Add Contact</button></form>`),input=d.querySelector('.contact-number'),row=d.querySelector('.ghp-number-match'),button=d.querySelector('[data-confirm-add]');
+  const update=()=>{input.value=cleanPhoneNumber(input.value);match=validPhoneNumber(input.value)?identityByNumber(input.value):null;if(match&&match.id!==currentIdentity()?.id&&match.kind!=='provisional'){row.innerHTML=`${avatarHtml(match,'small')}<span><b>${esc(match.name)}</b><small>${esc(match.phoneNumber)}</small></span>`;button.disabled=false}else{row.innerHTML=`<i class="fa-solid ${validPhoneNumber(input.value)?'fa-user-slash':'fa-magnifying-glass'}"></i><span><b>${validPhoneNumber(input.value)?'No known character matches':'Enter all 9 digits'}</b><small>${validPhoneNumber(input.value)?'Check the number and try again.':'No character list is exposed.'}</small></span>`;button.disabled=true}};input.addEventListener('input',update);
+  button.onclick=()=>{if(!match)return;mutate(t=>{unsuppress(t,match.name);const co=upsertContact(t,{name:match.name,avatar:match.avatar,identityId:match.id,phoneNumber:match.phoneNumber,source:'number',saved:true});if(co){co.saved=true;const reln=ensureRelationship(t,match);if(reln)reln.knownContactInfo.phoneNumber=true}},false);d.close();render()};
 }
 function restoreContactsPopup(){
   const t=timeline(),removed=t.suppressedContacts||[];if(!removed.length){globalThis.toastr?.info?.('No removed contacts.');return}
-  const c=ctx(),rows=removed.map(name=>{const ch=c?.characters?.find(x=>lc(x?.name)===name);return{name:ch?.name||name,ch}}).sort((a,b)=>a.name.localeCompare(b.name));
-  const d=popup(`<div><header><b>Removed Contacts</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><p>These people stay hidden from automatic contact discovery and Phone Refresh.</p><div class="ghp-restore-list">${rows.map((x,i)=>`<button data-restore-index="${i}"><span><b>${esc(x.name)}</b><small>Restore to Contacts</small></span><i class="fa-solid fa-rotate-left"></i></button>`).join('')}</div></div>`);
+  const c=ctx(),rows=removed.map(name=>{const ch=c?.characters?.find(x=>lc(x?.name)===name),identity=identityForName(ch?.name||name,{create:false});return{name:ch?.name||identity?.name||name,ch,identity}}).sort((a,b)=>a.name.localeCompare(b.name));
+  const d=popup(`<div><header><b>Removed Contacts</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><p>These numbers stay out of Contacts and new iMessage selection. Instagram, Snapchat and Facebook relationships remain separate.</p><div class="ghp-restore-list">${rows.map((x,i)=>`<button data-restore-index="${i}"><span><b>${esc(x.name)}</b><small>Restore to Contacts</small></span><i class="fa-solid fa-rotate-left"></i></button>`).join('')}</div></div>`);
   d.querySelector('[data-popup-close]').onclick=()=>d.close();
-  d.querySelectorAll('[data-restore-index]').forEach(btn=>btn.onclick=()=>{const x=rows[Number(btn.dataset.restoreIndex)];mutate(t=>{unsuppress(t,x.name);if(x.ch){const i=c.characters.indexOf(x.ch);upsertContact(t,{name:x.ch.name,avatar:thumb(x.ch),characterId:i,source:'manual'})}},false);d.close();render()});
+  d.querySelectorAll('[data-restore-index]').forEach(btn=>btn.onclick=()=>{const x=rows[Number(btn.dataset.restoreIndex)];mutate(t=>{unsuppress(t,x.name);if(x.identity){const co=upsertContact(t,{name:x.identity.name,avatar:x.identity.avatar,identityId:x.identity.id,phoneNumber:x.identity.phoneNumber,characterId:x.ch?c.characters.indexOf(x.ch):null,source:'manual',saved:true});if(co)co.saved=true}},false);d.close();render()});
 }
 function removeContact(cid){
   const t=timeline(),c=t.contacts[cid];if(!c)return;if(!confirm(`Remove ${c.nickname||c.name} from this phone's contacts?`))return;
   mutate(t=>{
     const key=lc(c.name);if(!t.suppressedContacts.includes(key))t.suppressedContacts.push(key);
     delete t.contacts[cid];t.contactOrder=t.contactOrder.filter(k=>k!==cid);
+    const removedThreads=new Set();
     for(const [tid,th] of Object.entries(t.threads)){
       if(!th.contactIds.includes(cid))continue;
-      if(th.type==='direct'||th.contactIds.length<=1){delete t.threads[tid];t.threadOrder=t.threadOrder.filter(k=>k!==tid)}
+      if(th.type==='direct'||th.contactIds.length<=1){removedThreads.add(tid);delete t.threads[tid];t.threadOrder=t.threadOrder.filter(k=>k!==tid)}
       else th.contactIds=th.contactIds.filter(k=>k!==cid);
     }
     t.calls=t.calls.filter(x=>x.contactId!==cid);
-    t.notifications=t.notifications.filter(x=>!(x.contactId===cid));
+    t.notifications=t.notifications.filter(x=>x.contactId!==cid&&!removedThreads.has(x.targetId));
   },false);
   contactId='';app='contacts';render();globalThis.toastr?.success?.(`${c.name} removed from Contacts.`);
 }
@@ -1251,16 +1636,65 @@ function mediaComposerPopup(tid,kind){
   const d=popup(`<form method="dialog" class="ghp-media-form"><header><b>Send ${label}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label><span><b>What does it show?</b><small>This description is what the AI can understand.</small></span><textarea class="media-description" placeholder="${kind==='video'?'A short video of me walking along the beach…':'A selfie of myself lying in bed…'}"></textarea></label><label><span><b>Caption / message</b><small>Optional text sent with it.</small></span><textarea class="media-caption" placeholder="Optional message…"></textarea></label><label class="ghp-file-label"><span><b>Optional local ${label.toLowerCase()}</b><small>Only changes what you see in the bubble; the AI still uses the written description above.</small></span><input class="media-file" type="file" accept="${accept}"></label><button type="button" class="primary" data-confirm-media>Send ${label}</button></form>`);
   d.querySelector('[data-confirm-media]').onclick=async()=>{const description=d.querySelector('.media-description').value.trim(),caption=d.querySelector('.media-caption').value.trim(),file=d.querySelector('.media-file').files?.[0];if(!description){globalThis.toastr?.warning?.('Describe what the media shows first.');return}const btn=d.querySelector('[data-confirm-media]');btn.disabled=true;btn.textContent='Sending…';let mediaKey='',meta=null;if(file){mediaKey=await saveMediaBlob(file);meta=await fileMediaMeta(file,kind)}sendMediaMessage(tid,kind,description,caption,mediaKey,meta);d.close();render()};
 }
-function postPopup(){
-  const d=popup(`<form method="dialog"><header><b>New Social Post</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label>What does the photo show?<textarea class="visual"></textarea></label><label>Caption<textarea class="caption"></textarea></label><button type="button" class="primary" data-post>Post</button></form>`);
-  d.querySelector('[data-post]').onclick=()=>{const vis=d.querySelector('.visual').value.trim(),cap=d.querySelector('.caption').value.trim();if(!vis&&!cap)return;mutate(t=>t.posts.unshift({id:id(),author:persona().name,contactId:'',visual:vis,caption:cap,likes:0,comments:0,timeMs:now().getTime(),ownerPost:true}),false);d.close();render()};
+function findSocialPopup(appName){
+  const label=APPS[appName]?.label||appName,own=currentIdentity(),d=popup(`<div><header><b>Find on ${esc(label)}</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><p class="ghp-popup-copy">Search an existing Greyhaven identity. This does not add their phone number or change another app.</p><input class="social-search" placeholder="Exact character name"><div class="social-search-result"></div></div>`),input=d.querySelector('.social-search'),result=d.querySelector('.social-search-result');
+  d.querySelector('[data-popup-close]').onclick=()=>d.close();
+  const update=()=>{const q=lc(input.value),matches=q?identityDirectory().filter(x=>lc(x.name).includes(q)).slice(0,8):[];result.innerHTML=matches.map(who=>{const state=appRelationship(timeline(),who,appName,false),status=appName==='instagram'?(state?.following?'Following':state?.followedBy?'Follows you':'Not following'):appName==='snapchat'?(state?.friends?'Friends':state?.outgoingRequest?'Pending':state?.incomingRequest?'Added you':'Not friends'):(state?.friends?'Friends':state?.outgoingRequest?'Pending':state?.incomingRequest?'Requested you':'Not friends');return`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>${esc(status)}</small></span><button data-social-result="${esc(who.id)}">${appName==='instagram'?(state?.following?'Unfollow':'Follow'):appName==='snapchat'?(state?.incomingRequest?'Accept':state?.friends?'Chat':state?.outgoingRequest?'Pending':'Add'):(state?.incomingRequest?'Accept':state?.friends?'Message':state?.outgoingRequest?'Pending':'Add')}</button></div>`}).join('')||(q?'<small class="ghp-muted">No matching existing identity.</small>':'')};
+  input.addEventListener('input',update);result.addEventListener('click',e=>{const b=e.target.closest('[data-social-result]');if(!b)return;const who=identityById(b.dataset.socialResult);if(!who||who.id===own?.id)return;const state=appRelationship(timeline(),who,appName,false);if(appName==='instagram')setInstagramFollowing(own.id,who.id,!state?.following);else if(appName==='snapchat'){if(state?.friends){d.close();return openAppConversation('snapchat',who.id)}setSnapchatFriendRequest(own.id,who.id,state?.incomingRequest?'accept':'request')}else{if(state?.friends){d.close();return openAppConversation('facebook',who.id)}setFacebookFriendRequest(own.id,who.id,state?.incomingRequest?'accept':'request')}update();render()});
 }
+function createSocialPostPopup(appName,kind='post'){
+  const isFacebook=appName==='facebook',isVideoAllowed=appName==='snapchat'||kind==='story',title=appName==='instagram'?(kind==='story'?'New Instagram Story':'New Instagram Post'):appName==='snapchat'?'New Snapchat Story':'New Facebook Post';
+  const d=popup(`<form method="dialog" class="ghp-media-form"><header><b>${esc(title)}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label><span><b>${isFacebook?'Photo description (optional)':'What does it show?'}</b><small>This is what the AI can understand.</small></span><textarea class="visual"></textarea></label><label><span><b>${isFacebook?'Post text':'Caption'}</b></span><textarea class="caption"></textarea></label>${isVideoAllowed?'<label><span><b>Media type</b></span><select class="media-type"><option value="photo">Photo</option><option value="video">Video</option></select></label>':''}<label class="ghp-file-label"><span><b>Optional local media</b><small>Visual replacement only; AI uses the description.</small></span><input class="media-file" type="file" accept="image/*,video/*"></label><button type="button" class="primary" data-publish-social>Share</button></form>`);
+  d.querySelector('[data-publish-social]').onclick=async()=>{const visual=d.querySelector('.visual').value.trim(),caption=d.querySelector('.caption').value.trim(),file=d.querySelector('.media-file').files?.[0],type=d.querySelector('.media-type')?.value||((file?.type||'').startsWith('video/')?'video':'photo');if(!isFacebook&&!visual){globalThis.toastr?.warning?.('Describe the media first.');return}if(isFacebook&&!visual&&!caption)return;const btn=d.querySelector('[data-publish-social]');btn.disabled=true;let mediaKey='',meta=null;if(file){mediaKey=await saveMediaBlob(file);meta=await fileMediaMeta(file,type)}const stamp=now().getTime(),row={id:id(),visual,caption:appName==='facebook'?'':caption,text:appName==='facebook'?caption:'',type,mediaKey,mediaWidth:meta?.width||0,mediaHeight:meta?.height||0,likes:0,comments:[],timeMs:stamp,expiresAt:kind==='story'?stamp+86400000:0};publishAppItem(appName,kind,row);d.close()};
+}
+function socialCommentPopup(appName,postId){
+  const store=appStore(timeline(),appName),post=store.posts.find(x=>x.id===postId);if(!post)return;const d=popup(`<form method="dialog"><header><b>Add comment</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><textarea class="comment" placeholder="Comment as ${esc(persona().name)}"></textarea><button type="button" class="primary" data-save-comment>Post</button></form>`);d.querySelector('[data-save-comment]').onclick=()=>{const text=d.querySelector('.comment').value.trim();if(!text)return;post.comments=Array.isArray(post.comments)?post.comments:[];post.comments.push({id:id(),author:persona().name,identityId:currentIdentity()?.id||'',text,timeMs:now().getTime()});post.commentCount=post.comments.length;persist(timeline(),false);d.close();render()};
+}
+function appMediaComposerPopup(appName,threadKey){
+  const label=appName==='snapchat'?'Snap':'media message',d=popup(`<form method="dialog" class="ghp-media-form"><header><b>Send ${esc(label)}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label><span><b>Media type</b></span><select class="media-type"><option value="photo">Photo</option><option value="video">Video</option></select></label><label><span><b>What does it show?</b><small>This description remains AI-visible.</small></span><textarea class="media-description"></textarea></label><label><span><b>Caption</b><small>Optional.</small></span><textarea class="media-caption"></textarea></label><label class="ghp-file-label"><span><b>Optional local media</b><small>Replaces the placeholder visually.</small></span><input class="media-file" type="file" accept="image/*,video/*"></label><button type="button" class="primary" data-send-app-media>Send</button></form>`);d.querySelector('[data-send-app-media]').onclick=async()=>{const type=d.querySelector('.media-type').value,mediaDescription=d.querySelector('.media-description').value.trim(),text=d.querySelector('.media-caption').value.trim(),file=d.querySelector('.media-file').files?.[0];if(!mediaDescription){globalThis.toastr?.warning?.('Describe the media first.');return}const button=d.querySelector('[data-send-app-media]');button.disabled=true;let mediaKey='',meta=null;if(file){mediaKey=await saveMediaBlob(file);meta=await fileMediaMeta(file,type)}if(sendAppMessage(appName,threadKey,{type,text,mediaDescription,mediaKey,mediaWidth:meta?.width||0,mediaHeight:meta?.height||0}))d.close()};
+}
+function composeSnapPopup(saved=null){
+  const t=timeline(),friends=identityDirectory({includeProvisional:true}).filter(who=>appRelationship(t,who,'snapchat',false)?.friends);if(!friends.length){globalThis.toastr?.warning?.('Add a Snapchat friend first.');return}
+  const d=popup(`<form method="dialog" class="ghp-media-form"><header><b>Send a Snap</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label><span><b>To</b></span><select class="snap-to">${friends.map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select></label><label><span><b>Media type</b></span><select class="media-type"><option value="photo" ${saved?.type==='photo'?'selected':''}>Photo</option><option value="video" ${saved?.type==='video'?'selected':''}>Video</option></select></label><label><span><b>What does it show?</b></span><textarea class="media-description">${esc(saved?.mediaDescription||saved?.visual||'')}</textarea></label><label><span><b>Caption</b></span><textarea class="media-caption">${esc(saved?.caption||'')}</textarea></label>${saved?.mediaKey?'':`<label class="ghp-file-label"><span><b>Optional local media</b></span><input class="media-file" type="file" accept="image/*,video/*"></label>`}<button type="button" class="primary" data-send-snap>Send Snap</button></form>`);
+  d.querySelector('[data-send-snap]').onclick=async()=>{const peer=identityById(d.querySelector('.snap-to').value),type=d.querySelector('.media-type').value,mediaDescription=d.querySelector('.media-description').value.trim(),text=d.querySelector('.media-caption').value.trim(),file=d.querySelector('.media-file')?.files?.[0];if(!peer||!mediaDescription)return;let mediaKey=saved?.mediaKey||'',meta={width:saved?.mediaWidth||0,height:saved?.mediaHeight||0};if(file){mediaKey=await saveMediaBlob(file);meta=await fileMediaMeta(file,type)||meta}const th=ensureAppThreadIn(timeline(),'snapchat',peer);persist(timeline(),false);if(sendAppMessage('snapchat',th.id,{type,text,mediaDescription,mediaKey,mediaWidth:meta.width||0,mediaHeight:meta.height||0})){app='snapchat';appView='thread';itemId=th.id;d.close();render()}};
+}
+function openSnapMessage(threadKey,messageId){
+  const t=timeline(),th=appThread('snapchat',threadKey,t),m=th?.messages.find(x=>x.id===messageId);if(!m)return;m.opened=true;m.read=true;for(const n of t.notifications)if(n.app==='snapchat'&&(n.targetId===threadKey||n.eventId===m.mirrorId))n.read=true;persist(t,false);render();
+}
+function attachAppMediaPopup(appName,threadKey,messageId){
+  const m=appThread(appName,threadKey,timeline())?.messages.find(x=>x.id===messageId);if(!m||!['photo','video'].includes(m.type))return;const accept=m.type==='video'?'video/*':'image/*',d=popup(`<form method="dialog" class="ghp-media-form"><header><b>${m.mediaKey?'Replace':'Attach'} local preview</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><p class="ghp-popup-copy">The AI continues to use the existing written description. This changes only the phone's visual preview.</p><input class="media-file" type="file" accept="${accept}"><button type="button" class="primary" data-save-app-preview>Save preview</button></form>`);d.querySelector('[data-save-app-preview]').onclick=async()=>{const file=d.querySelector('.media-file').files?.[0];if(!file)return;const mediaKey=await saveMediaBlob(file),meta=await fileMediaMeta(file,m.type),root=metadataRoot(),mirrorId=m.mirrorId;for(const raw of Object.values(root?.phones||{})){const phone=normalizeTimeline(raw);for(const th of Object.values(appStore(phone,appName)?.threads||{}))for(const row of th.messages||[])if((mirrorId&&row.mirrorId===mirrorId)||phone===timeline()&&th.id===threadKey&&row.id===messageId){row.mediaKey=mediaKey;row.mediaWidth=meta?.width||0;row.mediaHeight=meta?.height||0}}if(root)saveMetadataRoot(root);d.close();render()};
+}
+function saveSnapMemory(threadKey,messageId){
+  const t=timeline(),m=appThread('snapchat',threadKey,t)?.messages.find(x=>x.id===messageId);if(!m||!m.opened)return;const key=m.mirrorId||m.id;if(t.snapchat.memories.some(x=>x.originId===key)){globalThis.toastr?.info?.('Already saved to Memories.');return}t.snapchat.memories.unshift({id:id(),originId:key,type:m.type,mediaDescription:m.mediaDescription,caption:m.text,mediaKey:m.mediaKey,mediaWidth:m.mediaWidth,mediaHeight:m.mediaHeight,timeMs:m.timeMs,sender:m.sender});m.saved=true;persist(t,false);globalThis.toastr?.success?.('Saved to Memories.');render();
+}
+function moveSnapToEyes(savedId){mutate(t=>{const index=t.snapchat.memories.findIndex(x=>x.id===savedId);if(index<0)return;const [row]=t.snapchat.memories.splice(index,1);t.snapchat.eyesOnly.unshift({...row,id:id(),movedToEyesAt:Date.now()})},false);render()}
+function deleteSavedSnap(section,savedId){mutate(t=>{const list=section==='eyesOnly'?t.snapchat.eyesOnly:t.snapchat.memories;t.snapchat[section]=list.filter(x=>x.id!==savedId)},false);render()}
+function uploadPrivateMediaPopup(section='memories'){
+  const eyes=section==='eyes',d=popup(`<form method="dialog" class="ghp-media-form"><header><b>Add to ${eyes?'My Eyes Only':'Memories'}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><label><span><b>What does it show?</b><small>Private description stored on this phone.</small></span><textarea class="media-description"></textarea></label><label class="ghp-file-label"><span><b>Choose photo or video</b></span><input class="media-file" type="file" accept="image/*,video/*"></label><button type="button" class="primary" data-save-private>Save</button></form>`);d.querySelector('[data-save-private]').onclick=async()=>{const description=d.querySelector('.media-description').value.trim(),file=d.querySelector('.media-file').files?.[0];if(!description||!file){globalThis.toastr?.warning?.('Add a description and choose media.');return}const type=(file.type||'').startsWith('video/')?'video':'photo',mediaKey=await saveMediaBlob(file),meta=await fileMediaMeta(file,type),row={id:id(),type,mediaDescription:description,caption:'',mediaKey,mediaWidth:meta?.width||0,mediaHeight:meta?.height||0,timeMs:now().getTime(),manual:true};mutate(t=>(eyes?t.snapchat.eyesOnly:t.snapchat.memories).unshift(row),false);d.close();render()};
+}
+function socialThreadMenuPopup(appName,threadKey){
+  const t=timeline(),th=appThread(appName,threadKey,t),peer=appPeer(th),state=peer?appRelationship(t,peer,appName):null;if(!th||!peer||!state)return;const blocked=!!state.blocked,d=popup(`<div><header><b>${esc(peer.name)}</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><button class="ghp-popup-action danger" data-toggle-social-block><i class="fa-solid fa-ban"></i><span><b>${blocked?'Unblock':'Block'} in ${esc(APPS[appName].label)}</b><small>Does not change Messages, Phone, or other apps.</small></span></button><button class="ghp-popup-action danger subtle" data-delete-social-thread><i class="fa-solid fa-trash"></i><span><b>Delete conversation</b><small>Only this app thread is removed from this phone.</small></span></button></div>`);d.querySelector('[data-popup-close]').onclick=()=>d.close();d.querySelector('[data-toggle-social-block]').onclick=()=>{state.blocked=!blocked;const other=phoneForIdentity(peer,true),owner=currentIdentity(),otherState=other?ensureRelationship(other.timeline,owner)?.apps?.[appName]:null;if(otherState)otherState.blockedBy=!blocked;persist(t,false);if(other){other.root.phones[other.key]=other.timeline;saveMetadataRoot(other.root)}d.close();render()};d.querySelector('[data-delete-social-thread]').onclick=()=>{const store=appStore(t,appName);delete store.threads[threadKey];store.threadOrder=store.threadOrder.filter(x=>x!==threadKey);t.notifications=t.notifications.filter(n=>!(n.app===appName&&n.targetId===threadKey));persist(t,false);appView=appName==='instagram'?'dms':appName==='snapchat'?'chats':'messenger';itemId='';d.close();render()};
+}
+function marketMessagePopup(listingId,kind='question'){
+  const row=timeline().facebook.marketplace.listings.find(x=>x.id===listingId),seller=row?identityById(row.sellerIdentityId):null;if(!row||!seller)return;const starters={question:`Hi, is the ${row.title} still available?`,offer:`Hi, would you take a lower offer for the ${row.title}?`,buy:`Hi, I'd like to buy the ${row.title}. Is it still available?`,pickup:`Hi, where and when could I pick up the ${row.title}?`},d=popup(`<form method="dialog"><header><b>Message ${esc(seller.name)}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><textarea class="market-message">${esc(starters[kind]||starters.question)}</textarea><button type="button" class="primary" data-send-market-message>Send in Messenger</button></form>`);d.querySelector('[data-send-market-message]').onclick=()=>{const text=d.querySelector('.market-message').value.trim();if(!text)return;const th=ensureAppThreadIn(timeline(),'facebook',seller);persist(timeline(),false);if(sendAppMessage('facebook',th.id,{type:'text',text})){app='facebook';appView='thread';itemId=th.id;d.close();render()}};
+}
+function marketLinkPopup(listingId){
+  const row=timeline().facebook.marketplace.listings.find(x=>x.id===listingId);if(!row||row.sellerType!=='provisional')return;const d=popup(`<div><header><b>Link Marketplace identity</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><p class="ghp-popup-copy">This is a manual identity decision. Matching the seller's name is not enough.</p><input class="link-name" placeholder="Exact existing character name"><div class="link-result"></div></div>`),input=d.querySelector('.link-name'),result=d.querySelector('.link-result');d.querySelector('[data-popup-close]').onclick=()=>d.close();input.addEventListener('input',()=>{const q=lc(input.value),matches=identityDirectory().filter(x=>lc(x.name)===q);result.innerHTML=matches.map(x=>`<div class="ghp-row static">${avatarHtml(x)}<span><b>${esc(x.name)}</b><small>Existing identity</small></span><button data-confirm-market-link="${esc(x.id)}">Link</button></div>`).join('')||(q?'<small class="ghp-muted">Enter one exact existing name.</small>':'')});result.addEventListener('click',e=>{const b=e.target.closest('[data-confirm-market-link]'),who=identityById(b?.dataset.confirmMarketLink);if(!who)return;if(!confirm(`Link this provisional seller to ${who.name}?`))return;const old=row.sellerIdentityId;row.sellerIdentityId=who.id;row.sellerName=who.name;row.sellerType='existing';row.linkedManually=true;row.linkedFromIdentityId=old;persist(timeline(),false);d.close();render()});
+}
+function postPopup(){return createSocialPostPopup('instagram','post')}
 function notePopup(nid=''){
   const t=timeline(),n=t.notes.find(x=>x.id===nid),d=popup(`<form method="dialog"><header><b>${n?'Edit Note':'New Note'}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><input class="note-title" value="${esc(n?.title||'')}" placeholder="Title"><textarea class="note-body" placeholder="Note…">${esc(n?.body||'')}</textarea><button type="button" class="primary" data-save-note>Save</button></form>`);
   d.querySelector('[data-save-note]').onclick=()=>{const title=d.querySelector('.note-title').value.trim(),body=d.querySelector('.note-body').value.trim();if(!title&&!body)return;mutate(t=>{let x=t.notes.find(v=>v.id===nid);if(x){x.title=title;x.body=body;x.updatedAt=Date.now()}else t.notes.unshift({id:id(),title,body,timeMs:now().getTime(),updatedAt:Date.now()})},false);d.close();render()};
 }
 function openMail(mid){const t=timeline(),m=t.mail.find(x=>x.id===mid);if(!m)return;m.read=true;persist(t,false);const d=popup(`<div><header><b>${esc(m.subject)}</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><small>From: ${esc(m.from)}</small><p>${esc(m.body)}</p></div>`);d.querySelector('[data-popup-close]').onclick=()=>d.close()}
-function notification(nid){const t=timeline(),n=t.notifications.find(x=>x.id===nid);if(!n)return;n.read=true;unlocked=true;if(n.app==='messages'&&n.targetId){app='thread';threadId=n.targetId}else if(n.app==='phone'&&n.targetId){const c=t.calls.find(x=>x.id===n.targetId);if(c&&c.status==='incoming'){c.status='active';callId=c.id;app='call';updateSharedCallStatus(c.sharedCallId,'active')}else app='phone'}else if(n.app==='mail')app='mail';else app=n.app==='snap'?'snap':'social';persist(t,false);render()}
+function notification(nid){
+  const t=timeline(),n=t.notifications.find(x=>x.id===nid);if(!n)return;n.read=true;unlocked=true;const appName=n.app==='social'?'instagram':n.app==='snap'?'snapchat':n.app;
+  if(appName==='messages'&&n.targetId){app='thread';threadId=n.targetId}
+  else if(appName==='phone'&&n.targetId){const c=t.calls.find(x=>x.id===n.targetId);if(c&&c.status==='incoming'){c.status='active';callId=c.id;app='call';updateSharedCallStatus(c.sharedCallId,'active')}else app='phone'}
+  else if(appName==='mail')app='mail';
+  else if(['instagram','snapchat','facebook'].includes(appName)){app=appName;if(n.targetId&&appStore(t,appName)?.threads?.[n.targetId]){appView='thread';itemId=n.targetId}else if(appName==='facebook'&&n.eventId&&t.facebook.marketplace.listings.some(x=>x.id===n.eventId)){appView='listing';itemId=n.eventId}else appView=appName==='snapchat'?'chats':'notifications'}
+  persist(t,false);render();
+}
 function saveSettings(){
   const o=document.querySelector('#ghp-overlay'),apps={...profile().apps,settings:true};o.querySelectorAll('[data-app-setting]').forEach(x=>apps[x.dataset.appSetting]=x.checked);
   saveProfile({wallpaper:o.querySelector('#ghp-wall')?.value||'aurora',wallpaperUrl:o.querySelector('#ghp-wall-url')?.value.trim()||'',lockScreen:o.querySelector('#ghp-lock-setting')?.checked??true,notificationPreviews:o.querySelector('#ghp-preview-setting')?.checked??true,refreshMode:o.querySelector('#ghp-refresh-mode')?.value||'manual',staleAfterMessages:Number(o.querySelector('#ghp-stale')?.value||12),maxNewEvents:Number(o.querySelector('#ghp-max-events')?.value||4),activityLevel:o.querySelector('#ghp-activity')?.value||'normal',apps});globalThis.toastr?.success?.('Phone settings saved.');
@@ -1269,10 +1703,29 @@ function click(e){
   const x=e.target.closest('button,[data-thread],[data-contact],[data-story],[data-note],[data-mail]');if(!x)return;
   if(x.matches('[data-close]'))return closePhone();if(x.matches('[data-unlock]')){unlocked=true;app='';return render()}if(x.matches('[data-back]'))return goBack()
   if(x.dataset.openApp)return openApp(x.dataset.openApp);if(x.matches('[data-refresh]'))return refreshPhone();if(x.matches('[data-new-thread]'))return newThreadPopup();
+  if(x.dataset.appView){appView=x.dataset.appView;itemId='';return render()}
+  if(x.dataset.openSocialThread){const appName=x.dataset.openSocialThread,identityId=x.dataset.socialIdentity;if(identityId)return openAppConversation(appName,identityId);app=appName;appView='thread';itemId=x.dataset.socialThread||'';return render()}
+  if(x.dataset.socialThreadMenu)return socialThreadMenuPopup(x.dataset.socialThreadMenu,x.dataset.socialThreadId);
+  if(x.dataset.findSocial)return findSocialPopup(x.dataset.findSocial);
+  if(x.dataset.instagramFollow){const who=identityById(x.dataset.instagramFollow),state=who?appRelationship(timeline(),who,'instagram',false):null;if(who)setInstagramFollowing(currentIdentity().id,who.id,!state?.following);return render()}
+  if(x.dataset.instagramPeople){app='instagram';appView='people';itemId=x.dataset.instagramPeople;return render()}
+  if(x.dataset.instagramStory){app='instagram';appView='story';itemId=x.dataset.instagramStory;return render()}
+  if(x.dataset.instagramLike){mutate(t=>{const p=t.instagram.posts.find(v=>v.id===x.dataset.instagramLike);if(p){p.likedByOwner=!p.likedByOwner;p.likes=Math.max(0,Number(p.likes||0)+(p.likedByOwner?1:-1))}},false);return render()}
+  if(x.dataset.instagramComment)return socialCommentPopup('instagram',x.dataset.instagramComment);
+  if(x.matches('[data-new-instagram-post]'))return createSocialPostPopup('instagram','post');if(x.matches('[data-instagram-create-story]'))return createSocialPostPopup('instagram','story');
+  if(x.dataset.snapAdd){setSnapchatFriendRequest(currentIdentity().id,x.dataset.snapAdd,'request');return render()}if(x.dataset.snapAccept){setSnapchatFriendRequest(currentIdentity().id,x.dataset.snapAccept,'accept');return render()}if(x.dataset.snapDecline){setSnapchatFriendRequest(currentIdentity().id,x.dataset.snapDecline,'decline',{notify:false});return render()}
+  if(x.matches('[data-compose-snap]'))return composeSnapPopup();if(x.dataset.snapStory){app='snapchat';appView='story';itemId=x.dataset.snapStory;return render()}if(x.matches('[data-snap-create-story]'))return createSocialPostPopup('snapchat','story');
+  if(x.dataset.openSnapMessage)return openSnapMessage(x.dataset.openSnapThread,x.dataset.openSnapMessage);if(x.dataset.saveSnapMessage)return saveSnapMemory(x.dataset.saveSnapThread,x.dataset.saveSnapMessage);
+  if(x.dataset.appLinkMedia)return attachAppMediaPopup(x.dataset.appLinkMedia,x.dataset.appLinkThread,x.dataset.appLinkMessage);if(x.dataset.moveSnapEyes)return moveSnapToEyes(x.dataset.moveSnapEyes);
+  if(x.dataset.deleteSavedSnap)return deleteSavedSnap(x.dataset.savedSection,x.dataset.deleteSavedSnap);if(x.dataset.sendSavedSnap){const list=x.dataset.savedSection==='eyesOnly'?timeline().snapchat.eyesOnly:timeline().snapchat.memories;return composeSnapPopup(list.find(v=>v.id===x.dataset.sendSavedSnap))}if(x.dataset.uploadPrivate)return uploadPrivateMediaPopup(x.dataset.uploadPrivate);
+  if(x.dataset.facebookAccept){setFacebookFriendRequest(currentIdentity().id,x.dataset.facebookAccept,'accept');return render()}if(x.dataset.facebookDecline){setFacebookFriendRequest(currentIdentity().id,x.dataset.facebookDecline,'decline',{notify:false});return render()}
+  if(x.dataset.facebookLike){mutate(t=>{const p=t.facebook.posts.find(v=>v.id===x.dataset.facebookLike);if(p){p.likedByOwner=!p.likedByOwner;p.likes=Math.max(0,Number(p.likes||0)+(p.likedByOwner?1:-1))}},false);return render()}if(x.dataset.facebookComment)return socialCommentPopup('facebook',x.dataset.facebookComment);if(x.matches('[data-new-facebook-post]'))return createSocialPostPopup('facebook','post');
+  if(x.dataset.marketListing){app='facebook';appView='listing';itemId=x.dataset.marketListing;return render()}if(x.dataset.marketMessage){const row=timeline().facebook.marketplace.listings.find(v=>v.id===x.dataset.marketMessage);if(row)return openAppConversation('facebook',row.sellerIdentityId)}if(x.dataset.marketAction)return marketMessagePopup(x.dataset.marketActionListing,x.dataset.marketAction);if(x.dataset.marketLink)return marketLinkPopup(x.dataset.marketLink);
+  if(x.dataset.appMedia)return appMediaComposerPopup(x.dataset.appMedia,x.dataset.appMediaThread);
   if(x.dataset.thread){threadId=x.dataset.thread;app='thread';return render()}if(x.matches('[data-add-contact]'))return addContactPopup();if(x.matches('[data-discover]')){seedContacts(true);globalThis.toastr?.success?.('Relevant contacts refreshed.');return render()}if(x.matches('[data-removed-contacts]'))return restoreContactsPopup();
   if(x.dataset.contact){contactId=x.dataset.contact;app='contact';return render()}if(x.dataset.messageContact){const th=directThread(x.dataset.messageContact);threadId=th.id;app='thread';return render()}if(x.dataset.removeContact)return removeContact(x.dataset.removeContact);
   if(x.dataset.threadMenu)return threadMenuPopup(x.dataset.threadMenu);if(x.dataset.mediaMenu)return mediaMenuPopup(x.dataset.mediaMenu);if(x.dataset.linkMedia)return attachExistingMediaPopup(x.dataset.linkThread,x.dataset.linkMedia,x.dataset.linkKind||'photo');if(x.matches('[data-cancel-media-request]')){composeRequest={threadId:'',kind:''};return render()}
-  if(x.dataset.call)return startCall(x.dataset.call);if(x.matches('[data-end-call]'))return endCall();if(x.dataset.story){threadId=x.dataset.story;app='story';return render()}
+  if(x.dataset.call)return startCall(x.dataset.call);if(x.matches('[data-end-call]'))return endCall();if(x.dataset.story){itemId=x.dataset.story;app='instagram';appView='story';return render()}
   if(x.matches('[data-new-post]'))return postPopup();if(x.matches('[data-new-note]'))return notePopup();if(x.dataset.note)return notePopup(x.dataset.note);if(x.dataset.mail)return openMail(x.dataset.mail);if(x.matches('[data-save-settings]'))return saveSettings();
   if(x.matches('[data-reset-phone]')){if(confirm(`Reset ${persona().name}'s phone timeline in this chat?`)){const r=metadataRoot();r.phones[persona().key]=defaultTimeline(persona().name,persona().avatar);saveMetadataRoot(r);app='';threadId='';contactId='';composeRequest={threadId:'',kind:''};render();globalThis.toastr?.success?.('Phone timeline reset.')}return}
   if(x.dataset.notif)return notification(x.dataset.notif);
@@ -1286,6 +1739,7 @@ function submit(e){
   e.preventDefault();const f=e.target;
   if(f.dataset.threadForm){const input=f.querySelector('input'),v=input.value;input.value='';const request=composeRequest.threadId===f.dataset.threadForm?composeRequest.kind:'';composeRequest={threadId:'',kind:''};sendThread(f.dataset.threadForm,v,'text',{requestMedia:request})}
   if(f.dataset.callForm){const input=f.querySelector('input'),v=input.value;input.value='';sendThread(f.dataset.callForm,v,'call')}
+  if(f.dataset.appThreadForm){const input=f.querySelector('input'),value=input.value;input.value='';sendAppMessage(f.dataset.appThreadForm,f.dataset.appThreadId,{type:'text',text:value})}
 }
 
 function latestUserText(){const a=Array.isArray(ctx()?.chat)?ctx().chat:[];for(let i=a.length-1;i>=0;i--){const m=a[i];if(m?.is_user)return String(m.mes||m.text||'')}return''}
@@ -1331,17 +1785,46 @@ function markRoleplayCheckpointIfAdvanced(){
   if(last?.is_user||len===Number(cp.chatLength||0))return;markRoleplayCheckpoint();
 }
 
-function updatePrompt(){const c=ctx();if(!c?.setExtensionPrompt)return;const summary=hasChat()?phonePromptSummary():'';try{c.setExtensionPrompt(GHP_PROMPT_KEY,summary,GHP_PROMPT_POSITION_IN_CHAT,1,false,GHP_PROMPT_ROLE_SYSTEM)}catch(e){console.error(`[${GHP_MODULE}] setExtensionPrompt`,e)}}
+function identityPromptSummary(){
+  if(!hasChat())return'';ensureAllIdentities();const identities=new Map(),add=x=>{if(x?.id&&validPhoneNumber(x.phoneNumber))identities.set(x.id,x)};add(currentIdentity());for(const descriptor of chatDescriptors())add(identityForName(descriptor.name,{create:true}));
+  const latest=latestUserText();for(const identity of Object.values(settingsRoot().identities||{})){const name=norm(identity?.name);if(!name)continue;const q=name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');if(new RegExp(`(^|[^\\p{L}\\p{N}])${q}([^\\p{L}\\p{N}]|$)`,'iu').test(latest))add(normalizeIdentity(identity,identity.id))}
+  const rows=[...identities.values()].slice(0,14).map(x=>`${x.name}: ${x.phoneNumber}`);if(!rows.length)return'';
+  return`[Greyhaven Phone — authoritative identity and phone-number facts.]
+${rows.join('\n')}
+
+RULES:
+- These exact 9-digit values are persistent Greyhaven phone numbers. A person always remembers their own number and must use it if directly asked; never invent a different number.
+- Do not invent, expand, or guess surnames. Preserve the exact character names above.
+- Knowing or meeting somebody does not mean possessing their number. A person may reveal their own number or explicitly exchange numbers when it fits the relationship and scene.
+- An explicit mutual number exchange can use a hidden GH_ACTION contact.exchange marker; merely mentioning, following, or meeting somebody cannot.
+- Do not expose technical identity IDs or action syntax in visible roleplay.`;
+}
+function updatePrompt(){
+  const c=ctx();if(!c?.setExtensionPrompt)return;const summary=hasChat()?phonePromptSummary():'',identities=hasChat()?identityPromptSummary():'';
+  try{c.setExtensionPrompt(GHP_PROMPT_KEY,summary,GHP_PROMPT_POSITION_IN_CHAT,1,false,GHP_PROMPT_ROLE_SYSTEM);c.setExtensionPrompt(GHP_IDENTITY_PROMPT_KEY,identities,GHP_PROMPT_POSITION_IN_CHAT,1,false,GHP_PROMPT_ROLE_SYSTEM)}catch(e){console.error(`[${GHP_MODULE}] setExtensionPrompt`,e)}
+}
+function characterManagementIdentity(){
+  const c=ctx(),name=document.querySelector('#character_name_pole')?.value?.trim();if(!c?.characters?.length)return null;let index=name?c.characters.findIndex(ch=>norm(ch?.name)===norm(name)):-1;if(index<0&&Number.isInteger(Number(c.characterId)))index=Number(c.characterId);return index>=0&&c.characters[index]?identityForCharacter(c.characters[index],index,true):null;
+}
+function propagateIdentityNumber(identity){
+  const root=metadataRoot();if(!root||!identity)return;for(const [key,raw] of Object.entries(root.phones||{})){const t=normalizeTimeline(raw);for(const co of Object.values(t.contacts||{}))if(co.identityId===identity.id){co.phoneNumber=identity.phoneNumber;const reln=ensureRelationship(t,identity);if(reln)reln.knownContactInfo.phoneNumber=co.saved===true}root.phones[key]=t}saveMetadataRoot(root);
+}
+function characterPhonePopup(identity){
+  const d=popup(`<form method="dialog"><header><b>Greyhaven Phone · ${esc(identity.name)}</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header><p class="ghp-popup-copy">One persistent number is shared by Contacts, Messages and every enabled social app identity. It does not automatically add this character to anyone's contacts.</p><label><span><b>Phone number</b><small>Exactly 9 digits</small></span><input class="character-phone-number" inputmode="numeric" maxlength="9" value="${esc(identity.phoneNumber)}"></label><div class="ghp-inline-actions"><button type="button" data-save-character-phone class="primary">Save number</button><button type="button" data-generate-character-phone>Generate new number</button></div></form>`),input=d.querySelector('.character-phone-number');input.addEventListener('input',()=>input.value=cleanPhoneNumber(input.value));d.querySelector('[data-save-character-phone]').onclick=()=>{try{const updated=updateIdentityNumber(identity.id,input.value);propagateIdentityNumber(updated);d.close();installCharacterPhoneEditor();globalThis.toastr?.success?.(`${updated.name}'s phone number saved.`)}catch(e){globalThis.toastr?.error?.(e.message)}};d.querySelector('[data-generate-character-phone]').onclick=()=>{if(identity.phoneNumber&&!confirm(`Replace ${identity.name}'s current phone number everywhere?`))return;try{const updated=updateIdentityNumber(identity.id,nextPhoneNumber(settingsRoot().identities));input.value=updated.phoneNumber;identity=updated;propagateIdentityNumber(updated);installCharacterPhoneEditor();globalThis.toastr?.success?.('New unique number generated.')}catch(e){globalThis.toastr?.error?.(e.message)}};
+}
+function installCharacterPhoneEditor(){
+  const panel=document.querySelector('#rm_ch_create_block');if(!panel)return;let button=panel.querySelector('#ghp-character-phone-button');if(!button){button=document.createElement('button');button.type='button';button.id='ghp-character-phone-button';button.className='menu_button interactable';button.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i><span>Greyhaven Phone</span>';button.title='View, generate or edit this character\'s persistent Greyhaven phone number';button.addEventListener('click',()=>{const identity=characterManagementIdentity();if(!identity){globalThis.toastr?.warning?.('Select an existing character first.');return}characterPhonePopup(identity)});const lifeButton=panel.querySelector('#gh-life-character-defaults-button'),anchor=lifeButton||panel.querySelector('#avatar-and-name-block');if(anchor?.parentElement)anchor.insertAdjacentElement('afterend',button);else panel.prepend(button)}const identity=characterManagementIdentity(),label=identity?`Greyhaven Phone · ${identity.phoneNumber}`:'Greyhaven Phone',span=button.querySelector('span');button.disabled=!identity;if(span&&span.textContent!==label)span.textContent=label;
+}
 function buildMenu(){const m=document.querySelector('#extensionsMenu');if(!m||document.querySelector('#ghp-menu-entry'))return;const d=document.createElement('div');d.id='ghp-menu-entry';d.className='list-group-item flex-container flexGap5 interactable';d.tabIndex=0;d.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i><span>Greyhaven Phone</span>';d.onclick=openPhone;d.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openPhone()}};m.appendChild(d)}
 function observeMenu(){if(menuObserver)return;const m=document.querySelector('#extensionsMenu');if(!m)return;let q=false;menuObserver=new MutationObserver(()=>{if(q)return;q=true;requestAnimationFrame(()=>{q=false;buildMenu()})});menuObserver.observe(m,{childList:true})}
-function onChat(){const k=chatIdentity();if(k===currentChat)return;currentChat=k;app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;if(hasChat()){timeline();seedContacts(true)}if(!document.querySelector('#ghp-overlay')?.hidden)render()}
+function onChat(){const k=chatIdentity();if(k===currentChat)return;currentChat=k;app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;if(hasChat()){timeline();seedContacts(true)}if(!document.querySelector('#ghp-overlay')?.hidden)render()}
 function bind(){
   if(bound)return;const c=ctx();if(!c?.eventSource||!c.eventTypes)return;const b=(k,fn)=>{const e=c.eventTypes[k];if(e)c.eventSource.on(e,fn)};
-  b('CHAT_CHANGED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('CHAT_CREATED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('PERSONA_CHANGED',()=>setTimeout(()=>{app='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;timeline();seedContacts(true);updatePrompt();render()},50));b('GENERATION_STARTED',()=>updatePrompt());b('GROUP_UPDATED',()=>setTimeout(()=>seedContacts(true),50));b('CHARACTER_EDITED',()=>setTimeout(()=>seedContacts(true),50));b('MESSAGE_SENT',()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()});b('CHARACTER_MESSAGE_RENDERED',()=>setTimeout(()=>{markRoleplayCheckpointIfAdvanced();if(!document.querySelector('#ghp-overlay')?.hidden)render()},20));bound=true;
+  b('CHAT_CHANGED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('CHAT_CREATED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('PERSONA_CHANGED',()=>setTimeout(()=>{app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;timeline();seedContacts(true);updatePrompt();render()},50));b('GENERATION_STARTED',()=>updatePrompt());b('GROUP_UPDATED',()=>setTimeout(()=>seedContacts(true),50));b('CHARACTER_EDITED',()=>setTimeout(()=>{seedContacts(true);installCharacterPhoneEditor()},50));b('CHARACTER_EDITOR_OPENED',()=>setTimeout(installCharacterPhoneEditor,30));b('MESSAGE_SENT',()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()});b('CHARACTER_MESSAGE_RENDERED',()=>setTimeout(()=>{markRoleplayCheckpointIfAdvanced();if(!document.querySelector('#ghp-overlay')?.hidden)render()},20));bound=true;
 }
 function subscribeLife(){try{lifeUnsub?.()}catch{}lifeUnsub=null;if(typeof globalThis.GreyhavenLife?.subscribe==='function')lifeUnsub=globalThis.GreyhavenLife.subscribe(()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()})}
 function startClock(){clearInterval(clockTimer);clockTimer=setInterval(()=>{const o=document.querySelector('#ghp-overlay');if(o?.hidden)return;o.querySelectorAll('.ghp-status>span:first-child').forEach(x=>x.textContent=timeText());o.querySelectorAll('.ghp-lock h1').forEach(x=>x.textContent=timeText())},15000)}
-function expose(){globalThis.GreyhavenPhone={version:GHP_VERSION,open:openPhone,close:closePhone,refresh:refreshPhone,getProfile:()=>clone(profile()),getTimeline:()=>clone(timeline(false)),getContacts:()=>{const t=timeline(false);return clone(t?t.contactOrder.map(k=>t.contacts[k]).filter(Boolean):[])},getActivePersona:()=>clone(persona()),getContinuitySnapshot:()=>clone(continuitySnapshot()),getPromptSummary:()=>phonePromptSummary(),seedContacts:()=>clone(seedContacts(true)),removeContact}}
+function expose(){globalThis.GreyhavenPhone={version:GHP_VERSION,open:openPhone,close:closePhone,refresh:refreshPhone,getProfile:()=>clone(profile()),getTimeline:()=>clone(timeline(false)),getContacts:()=>{const t=timeline(false);return clone(t?t.contactOrder.map(k=>t.contacts[k]).filter(Boolean):[])},getActivePersona:()=>clone(persona()),getContinuitySnapshot:()=>clone(continuitySnapshot()),getPromptSummary:()=>phonePromptSummary(),getIdentityPromptSummary:()=>identityPromptSummary(),listIdentities:()=>clone(Object.values(ensureAllIdentities())),getIdentityById:key=>clone(identityById(key)),getIdentityByName:name=>clone(identityForName(name,{create:true})),getIdentityByNumber:number=>clone(identityByNumber(number)),getCurrentIdentity:()=>clone(currentIdentity()),setIdentityPhoneNumber:(identityId,number)=>clone(updateIdentityNumber(identityId,number)),saveContactForOwner:(owner,target,options)=>saveContactForOwner(owner,target,options),seedContacts:()=>clone(seedContacts(true)),removeContact,actionBus:{dispatch:(action,options)=>globalThis.GreyhavenLife?.dispatchWorldAction?.(action,options)||false},apps:{sendMessage:mirrorAppMessage,followInstagram:setInstagramFollowing,requestSnapchat:setSnapchatFriendRequest,requestFacebook:setFacebookFriendRequest}}}
 async function waitReady(ms=15000){const s=Date.now();while(Date.now()-s<ms){if(ctx()?.extensionSettings&&document.body)return true;await new Promise(r=>setTimeout(r,120))}return false}
-async function init(){if(initialized)return;if(!await waitReady())return;try{buildOverlay();buildMenu();observeMenu();bind();expose();onChat();updatePrompt();subscribeLife();startClock();initialized=true;console.info(`[${GHP_MODULE}] v${GHP_VERSION} loaded`)}catch(e){console.error(`[${GHP_MODULE}] init`,e)}}
+async function init(){if(initialized)return;if(!await waitReady())return;try{buildOverlay();buildMenu();observeMenu();installCharacterPhoneEditor();bind();expose();onChat();updatePrompt();subscribeLife();startClock();for(const delay of [250,900,2200])setTimeout(installCharacterPhoneEditor,delay);initialized=true;console.info(`[${GHP_MODULE}] v${GHP_VERSION} loaded`)}catch(e){console.error(`[${GHP_MODULE}] init`,e)}}
 void init().catch(e=>console.error(`[${GHP_MODULE}] boot`,e));
