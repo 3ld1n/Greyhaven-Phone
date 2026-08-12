@@ -1,15 +1,15 @@
 import './index.js';
 
 /*
- * Greyhaven Phone v1.3.0 bridge layer
+ * Greyhaven Phone v1.3.1 bridge layer
  * Keeps the tested v1.2.2 Phone core intact and adds:
  * - shared Greyhaven World/Event Ledger materialization
- * - RP -> Phone message/call/block mirroring
+ * - RP -> Phone message/media/call/block mirroring
  * - optional one-hop background replies (never recursive)
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '1.3.0';
+const BRIDGE_VERSION = '1.3.1';
 const CORE_VERSION = '1.2.2';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
@@ -95,7 +95,30 @@ function activePersonaDescriptionFor(name) {
     const c = ctx();
     if (lc(c?.name1) !== lc(name)) return '';
     const p = c?.powerUserSettings || {};
-    return String(p.persona_description || '').trim().slice(0,7000);
+    const descs = p.persona_descriptions || p.personaDescriptions || {};
+    const personas = p.personas || {};
+    const candidates = [p.persona_description];
+
+    // Match the same persona stores Greyhaven Phone core already understands.
+    for (const [avatarId, personaName] of Object.entries(personas)) {
+        if (lc(personaName) !== lc(name)) continue;
+        candidates.push(descs?.[avatarId], descs?.[String(avatarId).split('/').pop()]);
+    }
+    for (const [key,value] of Object.entries(descs || {})) {
+        if (lc(key) === lc(name)) candidates.push(value);
+        if (value && typeof value === 'object' && lc(value.name) === lc(name)) {
+            candidates.push(value.description,value.prompt,value.text);
+        }
+    }
+    for (const value of candidates.flat()) {
+        if (typeof value === 'string' && value.trim()) return value.trim().slice(0,9000);
+        if (value && typeof value === 'object') {
+            for (const key of ['description','prompt','text']) {
+                if (typeof value[key] === 'string' && value[key].trim()) return value[key].trim().slice(0,9000);
+            }
+        }
+    }
+    return '';
 }
 function speakerData(name) {
     return cardData(name) || {
@@ -285,12 +308,17 @@ function pushNotification(t, peer, thread, message) {
         timeMs:message.timeMs, read:false, targetId:thread.id,
     });
 }
-function makeMessage({sender,text,timeMs,mirrorId,read=true,deliveryState='sent'}) {
+function makeMessage({
+    sender,text,timeMs,mirrorId,read=true,deliveryState='sent',
+    type='text',mediaDescription='',
+}) {
+    const safeType = ['photo','video'].includes(lc(type)) ? lc(type) : 'text';
     return {
         id:uid(), sender:norm(sender), senderId:'',
         text:String(text || ''), timeMs:Number(timeMs || rpNowMs()),
-        realMs:Date.now(), read:read !== false, type:'text',
-        mediaDescription:'', mediaKey:'', mediaWidth:0, mediaHeight:0,
+        realMs:Date.now(), read:read !== false, type:safeType,
+        mediaDescription:safeType === 'text' ? '' : String(mediaDescription || ''),
+        mediaKey:'', mediaWidth:0, mediaHeight:0,
         requestMedia:'', mirrorId:String(mirrorId || uid()),
         editedAt:0, deliveryState,
     };
@@ -406,6 +434,43 @@ function mirrorText(from,to,text,timeMs,mirrorId,continuityKind='message') {
     saveRoot(sender.root);
     return {delivered:!blockedByRecipient, mirrorId, sender, recipient};
 }
+function mirrorMedia(from,to,mediaType,description,caption,timeMs,mirrorId) {
+    const sender = phoneForOwner(from,charAvatar(from),true);
+    const recipient = phoneForOwner(to,charAvatar(to),true);
+    if (!sender || !recipient) return {delivered:false};
+
+    const safeType = ['photo','video'].includes(lc(mediaType)) ? lc(mediaType) : '';
+    const mediaDescription = norm(description);
+    const mediaCaption = norm(caption);
+    if (!safeType || !mediaDescription) return {delivered:false};
+
+    const senderPeer = ensureContact(sender.timeline,to);
+    const recipientPeer = ensureContact(recipient.timeline,from);
+    const blockedByRecipient = !!senderPeer?.blockedByContact || !!recipientPeer?.blocked;
+    const message = makeMessage({
+        sender:from,text:mediaCaption,timeMs,mirrorId,read:true,
+        deliveryState:blockedByRecipient ? 'not-delivered' : 'sent',
+        type:safeType,mediaDescription,
+    });
+
+    appendMessageToPhone(sender,to,message,{incoming:false});
+    if (!blockedByRecipient) appendMessageToPhone(recipient,from,message,{incoming:true});
+
+    sender.timeline.updatedAt = Date.now();
+    recipient.timeline.updatedAt = Date.now();
+    sender.root.phones[sender.key] = sender.timeline;
+    sender.root.phones[recipient.key] = recipient.timeline;
+
+    const label = safeType === 'video' ? 'video' : 'photo';
+    appendContinuity(sender.root,{
+        kind:'media', participants:[from,to], sender:from,
+        summary:`${from} sent ${to} a ${label}: ${mediaDescription}${mediaCaption ? ` | Caption: ${mediaCaption}` : ''}`,
+        threadTitle:to, mirrorId, roleplayMs:timeMs, transient:false,
+    });
+    saveRoot(sender.root);
+    return {delivered:!blockedByRecipient, mirrorId, sender, recipient, message};
+}
+
 function mirrorCall(from,to,timeMs,eventId) {
     const a = phoneForOwner(from,charAvatar(from),true);
     const b = phoneForOwner(to,charAvatar(to),true);
@@ -461,6 +526,19 @@ async function materializeWorldEvent(event,{allowRelay=true}={}) {
             const result = mirrorText(from,to,text,Number(event.roleplayMs||rpNowMs()),mirrorId);
             relayCandidate = !!result.delivered;
         }
+    } else if (type === 'media.send') {
+        const mediaType = ['photo','video'].includes(lc(event.data?.mediaType))
+            ? lc(event.data.mediaType) : '';
+        const description = norm(event.data?.mediaDescription || event.data?.description || '');
+        const caption = norm(event.data?.caption || event.text || '');
+        if (mediaType && description) {
+            const mirrorId = `world-media:${event.id || uid()}`;
+            const result = mirrorMedia(
+                from,to,mediaType,description,caption,
+                Number(event.roleplayMs||rpNowMs()),mirrorId,
+            );
+            relayCandidate = !!result.delivered;
+        }
     } else if (type === 'call.place') {
         mirrorCall(from,to,Number(event.roleplayMs||rpNowMs()),event.id);
     } else if (type === 'contact.block') {
@@ -507,7 +585,7 @@ function exactThreadTail(ownerName,peerName,limit=12) {
     if (!info) return [];
     return info.thread.messages.slice(-limit).map(m => {
         const kind = m.type && m.type !== 'text'
-            ? `${m.type.toUpperCase()} ${m.mediaDescription || ''}` : m.text;
+            ? `${m.type.toUpperCase()} ${m.mediaDescription || ''}${m.text ? ` | Caption: ${m.text}` : ''}` : m.text;
         return {
             sender:m.sender, text:String(kind || '').slice(0,800),
             timeMs:Number(m.timeMs||0),
@@ -562,9 +640,21 @@ async function maybeGenerateOneHopReply(event) {
     if (!settings.enabled || settings.mode === 'economy') return;
 
     const from = norm(event.actor), to = norm(event.target);
-    const text = norm(event.text);
+    const eventType = norm(event.type);
+    const isMedia = eventType === 'media.send';
+    const mediaType = isMedia && ['photo','video'].includes(lc(event.data?.mediaType))
+        ? lc(event.data.mediaType) : '';
+    const mediaDescription = isMedia
+        ? norm(event.data?.mediaDescription || event.data?.description || '') : '';
+    const mediaCaption = isMedia ? norm(event.data?.caption || event.text || '') : '';
+    const text = isMedia
+        ? `[${mediaType ? mediaType.toUpperCase() : 'MEDIA'}: ${mediaDescription || 'media'}]${mediaCaption ? ` Caption: ${mediaCaption}` : ''}`
+        : norm(event.text);
     if (!from || !to || !text) return;
-    if (settings.mode === 'smart' && !(event.data?.expectsReply === true || looksReplyWorthy(text))) return;
+    const replyWorthy = isMedia
+        ? (event.data?.expectsReply === true || looksReplyWorthy(mediaCaption))
+        : (event.data?.expectsReply === true || looksReplyWorthy(text));
+    if (settings.mode === 'smart' && !replyWorthy) return;
 
     // A hidden relay must target an actual character card. This prevents inventing
     // autonomous responses for a persona-only or unknown person.
@@ -629,8 +719,8 @@ ${life.recentRoleplay || '(none)'}
 PRIVATE ${to} ↔ ${from} THREAD, OLDEST TO NEWEST:
 ${thread.length ? thread.map(x=>`[${roleplayTimeText(x.timeMs)}] ${x.sender}: ${x.text}`).join('\n') : '(no earlier thread messages)'}
 
-NEWEST MESSAGE FROM ${from}:
-${text}
+NEWEST PRIVATE PHONE ACTION FROM ${from}:
+${isMedia ? `${from} sent a ${mediaType || 'media item'} showing: ${mediaDescription || '(description unavailable)'}${mediaCaption ? `\nCaption: ${mediaCaption}` : ''}` : text}
 
 Decide whether ${to} naturally texts once, leaves it unanswered, or blocks.`;
 
@@ -755,7 +845,7 @@ function reconcileExistingWorldEvents() {
         events = globalThis.GreyhavenLife?.getWorldEvents?.({limit:80}) || [];
     } catch {}
     for (const e of events) {
-        if (!['message.send','call.place','contact.block','contact.unblock'].includes(norm(e?.type))) continue;
+        if (!['message.send','media.send','call.place','contact.block','contact.unblock'].includes(norm(e?.type))) continue;
         if (e.id && wasProcessed(e.id)) continue;
         // Reconciliation should materialize old RP actions but never spend tokens
         // merely because the extension/page was reloaded.

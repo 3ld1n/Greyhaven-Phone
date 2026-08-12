@@ -92,3 +92,12 @@ You no longer need extreme test messages just to see whether the feature works.
 1. Get left on read.
 2. Send a believable apology.
 3. The extension should allow the model to decide whether the character keeps ignoring you or re-engages.
+
+
+## v1.3.1 — Rich world bridge
+
+- RP `contact.block` / `contact.unblock` events now reconcile into both characters' Phone state.
+- RP `media.send` events create real Photo/Video bubbles in both mirrored message threads.
+- Media keeps an AI-visible description and optional caption, with normal blocking/delivery behavior.
+- Smart/Live one-hop relay can react once to a newly materialized photo/video when a reply is actually warranted.
+- Reload reconciliation now includes media sends without spending tokens.
