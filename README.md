@@ -1,4 +1,23 @@
-# Greyhaven Phone v2.1.1
+# Greyhaven Phone v2.1.2
+
+Version 2.1.2 adds explicit Snapchat unfriend and Instagram remove-follower
+controls without coupling either relationship to Contacts or another app.
+Removed Contacts now stays at the bottom of the Contacts list.
+
+Facebook Marketplace is now one shared, chat-wide inventory visible from every
+persona phone. Existing per-phone listings migrate into it once, dedicated
+refreshes append from any persona, and the oldest listings are pruned only
+after the 60-active-listing cap is reached. A persona can mark their listing
+sold or remove it; either action immediately removes it from active inventory
+and from future buyer-message refresh context.
+
+Instagram DMs, Snapchat Chats, and Facebook Messenger now share iMessage's
+long-press edit, unsend-for-everyone, and delete-local interaction model while
+retaining their independent app histories. Snap preview replacement now has an
+explicit mobile file picker, and uploaded app media renders at its true aspect
+ratio instead of leaving letterboxed space around the attachment card.
+
+## Previous v2.1.1 contact and input fixes
 
 Version 2.1.1 restores safe automatic contact seeding from each active
 identity's explicit `Relationships:` character-card section. It does not expose

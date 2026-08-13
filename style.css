@@ -198,3 +198,31 @@ body.ghp-open{overflow:hidden!important}
 .ghp-market-owner-note{display:flex;gap:9px;align-items:center;margin:12px 0;padding:11px 12px;border:1px solid rgba(76,139,239,.18);border-radius:13px;background:rgba(45,93,174,.1);color:#bfd4ff;font-size:11px;line-height:1.35}
 .ghp-facebook .ghp-app-header{grid-template-columns:42px minmax(0,1fr) 108px}
 @media(max-width:370px){.ghp-market-tools{grid-template-columns:1fr}.ghp-facebook .ghp-app-header{grid-template-columns:42px minmax(0,1fr) 101px}}
+
+/* v2.1.2 — social controls, shared Marketplace and app-message parity */
+.ghp-removed-row{margin-top:14px;margin-bottom:0}
+.ghp-row.static>button.ghp-social-remove{border:1px solid rgba(255,99,95,.2);background:rgba(183,47,49,.1);color:#ff8581}
+.ghp-social-thread .ghp-msg.has-media>.ghp-social-media{
+  display:block;
+  width:100%;
+  height:auto;
+  min-height:0;
+  max-height:none;
+  aspect-ratio:auto;
+  object-fit:contain;
+  background:transparent;
+  border-radius:18px;
+  overflow:hidden;
+  box-sizing:border-box;
+}
+.ghp-social-thread .ghp-msg.has-media>.ghp-fake-photo{width:100%;min-height:170px;border-radius:18px;overflow:hidden;box-sizing:border-box}
+.ghp-local-file-picker{position:relative;display:block!important;min-height:70px;border:1px solid rgba(79,131,255,.25);border-radius:14px;background:rgba(55,91,170,.11);overflow:hidden;cursor:pointer}
+.ghp-local-file-picker>input[type=file]{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.ghp-local-file-picker>span{min-height:70px;padding:10px 13px;display:grid!important;grid-template-columns:38px minmax(0,1fr);grid-template-rows:auto auto;column-gap:10px;align-content:center;pointer-events:none}
+.ghp-local-file-picker>span>i{grid-row:1/3;width:38px;height:38px;border-radius:11px;background:rgba(79,131,255,.16);color:#9dbaff;display:grid;place-items:center}
+.ghp-local-file-picker>span>b{align-self:end}.ghp-local-file-picker>span>small{align-self:start;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ghp-market-owner-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
+.ghp-market-owner-actions button{min-height:43px;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:#191b22;color:#fff}
+.ghp-market-owner-actions button:first-child{border-color:rgba(72,194,110,.22);background:rgba(50,143,79,.1);color:#8ee7aa}
+.ghp-market-owner-actions button:last-child{border-color:rgba(255,83,80,.22);background:rgba(182,46,48,.1);color:#ff8581}
+@media(max-width:370px){.ghp-market-owner-actions{grid-template-columns:1fr}}
