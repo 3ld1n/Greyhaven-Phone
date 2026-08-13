@@ -1,4 +1,37 @@
-# Greyhaven Phone v2.1.2
+# Greyhaven Phone v2.2.0
+
+Version 2.2 adds four opt-in apps. Domino's, Uber, OnlyFans, and Dark Web are
+disabled on existing and new phones until enabled in that persona's Phone
+Settings, so they consume no space or unified-refresh context while disabled.
+
+Domino's has a fixed menu, per-phone cart, location-aware checkout, shared
+order tracking, and one globally assigned delivery worker. Uber supports
+multiple globally assigned drivers, explicit driver selection, Life-aware
+pickup locations, destinations, and shared ride state. Arrivals are committed
+once: a worker already present in the current RP is handed to the scene, while
+an off-screen worker sends one mirrored iMessage. Completed or cancelled
+orders and rides cannot replay.
+
+OnlyFans has globally assigned adult creator accounts, established subscriber,
+post, activity, and earnings history, configurable subscription prices,
+subscriber-only posts, private messages, local media previews, and mirrored
+private video-call state. Viewer subscriptions remain separate from every
+other social relationship and never force a creator to comply.
+
+Dark Web is a fictional Greyhaven story-hook app with Drug Market, adult
+Escorts, Crime for Hire, Intel, and independent private messages. Existing
+characters appear only through explicit global role assignments; provisional
+accounts use first names only. Its dedicated manual refresh is deliberately
+excluded from Unified Phone Refresh and is constrained to high-level fictional
+listings rather than real sourcing, manufacturing, evasion, or operational
+instructions.
+
+All app-role assignments persist globally across chats. OnlyFans creator
+history is preserved when creator mode is disabled and restored when it is
+enabled again. The bridge and timeline schema remain backward-compatible with
+existing phone histories, contacts, social state, media, and GH_ACTION events.
+
+## Previous v2.1.2 messaging and shared-Marketplace update
 
 Version 2.1.2 adds explicit Snapchat unfriend and Instagram remove-follower
 controls without coupling either relationship to Contacts or another app.

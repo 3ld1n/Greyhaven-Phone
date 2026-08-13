@@ -1,7 +1,7 @@
 import './index.js';
 
 /*
- * Greyhaven Phone v2.1.2 bridge layer
+ * Greyhaven Phone v2.2.0 bridge layer
  * Extends the tested Phone core with:
  * - shared Greyhaven World/Event Ledger materialization
  * - RP -> Phone message/media/call/block mirroring
@@ -9,8 +9,8 @@ import './index.js';
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '2.1.2';
-const CORE_VERSION = '2.1.2';
+const BRIDGE_VERSION = '2.2.0';
+const CORE_VERSION = '2.2.0';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
 const DEFAULT_RELAY_TOKENS = 420;
@@ -172,7 +172,7 @@ function defaultContinuity() {
 }
 function defaultTimeline(ownerName='',ownerAvatar='') {
     return {
-        version:4, ownerName:norm(ownerName), ownerAvatar:ownerAvatar || '', identityId:'',
+        version:5, ownerName:norm(ownerName), ownerAvatar:ownerAvatar || '', identityId:'',
         createdAt:Date.now(), updatedAt:Date.now(),
         contacts:{}, contactOrder:[], suppressedContacts:[],
         relationships:{},
@@ -180,6 +180,10 @@ function defaultTimeline(ownerName='',ownerAvatar='') {
         instagram:{posts:[],stories:[],notifications:[],threads:{},threadOrder:[]},
         snapchat:{stories:[],memories:[],eyesOnly:[],notifications:[],threads:{},threadOrder:[]},
         facebook:{posts:[],notifications:[],friendRequests:[],marketplace:{listings:[]},threads:{},threadOrder:[]},
+        dominos:{cart:[],notifications:[]},
+        uber:{savedDestination:'',notifications:[]},
+        onlyfans:{posts:[],notifications:[],threads:{},threadOrder:[]},
+        darkweb:{notifications:[],threads:{},threadOrder:[]},
         notifications:[], photos:[], notes:[], mail:[],
         refresh:{lastAt:null,chatLength:0,eventKeys:[],summary:''},
     };
@@ -189,11 +193,11 @@ function phoneRoot(create=true) {
     if (!c?.chatMetadata || !hasChat()) return null;
     let root = c.chatMetadata[PHONE_META_KEY];
     if ((!root || typeof root !== 'object') && create) {
-        root = {version:4, phones:{}, continuity:defaultContinuity(), worldBridge:{processed:[]}};
+        root = {version:5, phones:{}, continuity:defaultContinuity(), worldBridge:{processed:[]}, services:{}, onlyFans:{}, darkWeb:{}};
         c.chatMetadata[PHONE_META_KEY] = root;
     }
     if (!root || typeof root !== 'object') return null;
-    root.version = Math.max(4, Number(root.version || 4));
+    root.version = Math.max(5, Number(root.version || 5));
     if (!root.phones || typeof root.phones !== 'object') root.phones = {};
     if (!root.continuity || typeof root.continuity !== 'object') root.continuity = defaultContinuity();
     if (!Array.isArray(root.continuity.events)) root.continuity.events = [];
@@ -204,6 +208,9 @@ function phoneRoot(create=true) {
     );
     if (!root.worldBridge || typeof root.worldBridge !== 'object') root.worldBridge = {};
     if (!Array.isArray(root.worldBridge.processed)) root.worldBridge.processed = [];
+    if (!root.services || typeof root.services !== 'object') root.services = {};
+    if (!root.onlyFans || typeof root.onlyFans !== 'object') root.onlyFans = {};
+    if (!root.darkWeb || typeof root.darkWeb !== 'object') root.darkWeb = {};
     return root;
 }
 function saveRoot(root) {
@@ -223,7 +230,7 @@ function saveRoot(root) {
 }
 function normalizeTimelineLite(t, ownerName='') {
     if (!t || typeof t !== 'object') t = defaultTimeline(ownerName);
-    t.version = Math.max(4, Number(t.version || 4));
+    t.version = Math.max(5, Number(t.version || 5));
     t.ownerName = norm(t.ownerName || ownerName);
     t.ownerAvatar ||= '';
     t.identityId ||= globalThis.GreyhavenPhone?.getIdentityByName?.(t.ownerName)?.id || '';
@@ -236,6 +243,10 @@ function normalizeTimelineLite(t, ownerName='') {
     t.instagram ||= {posts:t.posts,stories:t.stories,notifications:[],threads:{},threadOrder:[]};
     t.snapchat ||= {stories:[],memories:[],eyesOnly:[],notifications:[],threads:{},threadOrder:[]};
     t.facebook ||= {posts:[],notifications:[],friendRequests:[],marketplace:{listings:[]},threads:{},threadOrder:[]};
+    t.dominos ||= {cart:[],notifications:[]};
+    t.uber ||= {savedDestination:'',notifications:[]};
+    t.onlyfans ||= {posts:[],notifications:[],threads:{},threadOrder:[]};
+    t.darkweb ||= {notifications:[],threads:{},threadOrder:[]};
     return t;
 }
 function phoneForOwner(ownerName, ownerAvatar='', create=true) {
