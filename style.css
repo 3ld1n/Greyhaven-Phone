@@ -16,6 +16,7 @@ body.ghp-open{overflow:hidden!important}
 .ghp-indicator{position:absolute;z-index:60;width:124px;height:5px;border-radius:4px;left:50%;bottom:7px;transform:translateX(-50%);background:rgba(255,255,255,.88)}
 .ghp-avatar{width:48px;height:48px;border-radius:50%;overflow:hidden;flex:0 0 auto;display:grid;place-items:center;background:linear-gradient(145deg,#555b6e,#262936);color:#fff;font-size:18px;font-weight:700;border:1px solid rgba(255,255,255,.12)}
 .ghp-avatar img{width:100%;height:100%;object-fit:cover}.ghp-avatar.small{width:34px;height:34px;font-size:13px}.ghp-avatar.large{width:68px;height:68px}.ghp-avatar.hero{width:92px;height:92px;font-size:32px}.ghp-avatar.huge{width:96px;height:96px;font-size:34px}
+.ghp-avatar.call-avatar img{object-position:center 18%}
 .ghp-avatar-group{display:grid;grid-template-columns:repeat(2,1fr);grid-template-rows:repeat(2,1fr);gap:1px;background:#15161c}.ghp-avatar-group img,.ghp-avatar-group span{width:100%;height:100%;object-fit:cover;display:grid;place-items:center;font-size:10px}
 .ghp-lock,.ghp-home{color:#fff}.ghp-lock:after,.ghp-home:after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at 20% 0%,rgba(255,255,255,.12),transparent 25%),linear-gradient(to bottom,rgba(0,0,0,.12),rgba(0,0,0,.12) 58%,rgba(0,0,0,.28))}
 .ghp-lock main{position:absolute;z-index:2;inset:75px 20px 105px;display:flex;flex-direction:column;align-items:center}.ghp-lock main>i{font-size:14px;margin-bottom:8px}.ghp-lock h1{font-size:clamp(62px,17vw,78px);font-weight:250;line-height:.96;letter-spacing:-4px;margin:0;font-variant-numeric:tabular-nums}.ghp-lock h2{margin:10px 0 0;font-size:16px}.ghp-lock main>section{width:100%;margin-top:auto;display:flex;flex-direction:column;gap:8px}
@@ -227,7 +228,7 @@ body.ghp-open{overflow:hidden!important}
 .ghp-market-owner-actions button:last-child{border-color:rgba(255,83,80,.22);background:rgba(182,46,48,.1);color:#ff8581}
 @media(max-width:370px){.ghp-market-owner-actions{grid-template-columns:1fr}}
 
-/* v2.2.0 — optional service, creator and fictional-network apps */
+/* v2.3.0 — optional service, creator and fictional-network apps */
 .ghp-dominos .ghp-social-tabs button.active{color:#ff5263}.ghp-uber .ghp-social-tabs button.active{color:#fff}.ghp-onlyfans .ghp-social-tabs button.active{color:#29c3f1}.ghp-darkweb .ghp-social-tabs button.active{color:#bd82ff}
 .ghp-darkweb .ghp-app-header{grid-template-columns:42px minmax(0,1fr) 74px}.ghp-cart-button{position:relative}.ghp-cart-button>b{position:absolute;right:-3px;top:-3px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#d51f35;color:#fff;display:grid;place-items:center;font-size:9px}
 .ghp-category-pills{display:flex;gap:7px;overflow-x:auto;margin:-2px 0 10px;padding:2px 1px 5px;scrollbar-width:none}.ghp-category-pills::-webkit-scrollbar{display:none}.ghp-category-pills button{flex:0 0 auto;min-height:34px;padding:0 14px;border:1px solid var(--ghp-line);border-radius:18px;background:#181a20;color:var(--ghp-muted)}.ghp-category-pills button.active{border-color:rgba(213,31,53,.45);background:rgba(213,31,53,.16);color:#ff8b98}

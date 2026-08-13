@@ -1,4 +1,12 @@
-# Greyhaven Phone v2.2.0
+# Greyhaven Phone v2.3.0
+
+Version 2.3 makes creator popularity and earnings character-card-aware, caps
+OnlyFans income at plausible fictional levels, adds a dedicated fresh-post
+refresh, and keeps private video-call transcripts out of ordinary DMs. Photo
+and video requests now work in Instagram, Snapchat, Facebook, and OnlyFans.
+Dark Web provider assignments are authoritative in direct chats, assigned
+characters can publish/remove their own listings, and manual refresh can create
+interested client messages for those listings.
 
 Version 2.2 adds four opt-in apps. Domino's, Uber, OnlyFans, and Dark Web are
 disabled on existing and new phones until enabled in that persona's Phone
