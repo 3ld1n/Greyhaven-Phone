@@ -450,3 +450,235 @@
   .ghla-folder-icon{width:52px;height:52px}
   .ghla-tabs button{min-width:76px}
 }
+
+
+/* =========================================================
+   v2.4.1 — iPhone-style Life folder + manager cleanup
+   ========================================================= */
+
+/* Cover the native phone close button while the Life folder/app is open.
+   Garage/Property have their own back navigation. */
+#ghla-layer{
+  z-index:95;
+  background:transparent;
+}
+
+/* Home-screen folder preview: 3×3 miniature app grid, like iOS folders. */
+.ghla-life-folder-icon .ghp-app-square.ghla-folder-preview{
+  width:58px;
+  height:58px;
+  padding:8px;
+  border-radius:14px;
+  display:grid!important;
+  grid-template-columns:repeat(3,1fr)!important;
+  grid-template-rows:repeat(3,1fr)!important;
+  gap:3px!important;
+  place-items:stretch!important;
+  background:rgba(218,222,232,.24)!important;
+  border:1px solid rgba(255,255,255,.16);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,.04),
+    0 3px 10px rgba(0,0,0,.18);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+}
+.ghla-folder-preview>i{
+  width:100%;
+  height:100%;
+  min-width:0;
+  min-height:0;
+  border-radius:4px;
+  display:grid;
+  place-items:center;
+  font-size:7px;
+  color:#fff;
+  background:transparent;
+}
+.ghla-folder-preview>i:nth-child(1){
+  background:linear-gradient(145deg,#607f95,#314655);
+}
+.ghla-folder-preview>i:nth-child(2){
+  background:linear-gradient(145deg,#8d775e,#554638);
+}
+.ghla-folder-preview>i:nth-child(n+3){
+  opacity:0;
+}
+
+/* Open folder: blurred home screen remains visible underneath. */
+.ghla-folder-overlay{
+  position:absolute;
+  inset:0;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  padding:88px 18px 30px;
+  background:rgba(9,10,14,.28);
+  backdrop-filter:blur(22px) saturate(1.08);
+  -webkit-backdrop-filter:blur(22px) saturate(1.08);
+  color:#fff;
+}
+.ghla-folder-overlay>h1{
+  margin:0 0 28px;
+  font-size:29px;
+  line-height:1;
+  font-weight:700;
+  letter-spacing:-.5px;
+  text-shadow:0 1px 6px rgba(0,0,0,.25);
+}
+.ghla-ios-folder{
+  width:min(310px,82%);
+  aspect-ratio:1/1;
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-auto-rows:98px;
+  align-content:start;
+  gap:18px 8px;
+  padding:22px 16px;
+  border:1px solid rgba(255,255,255,.34);
+  border-radius:38px;
+  background:rgba(225,228,236,.20);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,.04),
+    0 18px 55px rgba(0,0,0,.18);
+  backdrop-filter:blur(28px) saturate(1.12);
+  -webkit-backdrop-filter:blur(28px) saturate(1.12);
+}
+.ghla-ios-folder-app{
+  min-width:0;
+  border:0;
+  padding:0;
+  background:transparent;
+  color:#fff;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:5px;
+}
+.ghla-ios-app-icon{
+  width:64px;
+  height:64px;
+  border-radius:15px;
+  display:grid;
+  place-items:center;
+  font-size:26px;
+  color:#fff;
+  border:1px solid rgba(255,255,255,.15);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,.04),
+    0 3px 11px rgba(0,0,0,.18);
+}
+.ghla-ios-app-icon.vehicle{
+  background:linear-gradient(145deg,#607f95,#314655);
+}
+.ghla-ios-app-icon.property{
+  background:linear-gradient(145deg,#8d775e,#554638);
+}
+.ghla-ios-folder-app>b{
+  max-width:88px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:11px;
+  font-weight:500;
+  text-shadow:0 1px 5px rgba(0,0,0,.35);
+}
+.ghla-ios-folder-app>small{
+  display:none;
+}
+
+/* Greyhaven Phone Manager now lives in native Extensions settings. */
+#ghla-manager-settings-button{
+  flex:0 0 auto;
+}
+#ghla-manager-settings-button i{
+  margin-right:3px;
+}
+
+/* Global duplicate identity cleanup UI. */
+.ghla-manager-actions .warning{
+  color:#ffe2a5;
+  border-color:rgba(221,169,75,.28);
+  background:rgba(130,88,24,.20);
+}
+.ghla-manager-caption,
+.ghla-manager-empty{
+  display:block;
+  color:var(--ghla-muted);
+  font-size:10px;
+  line-height:1.4;
+  margin:0 0 7px;
+}
+.ghla-identity-group{
+  overflow:hidden;
+  margin-bottom:9px;
+  border:1px solid var(--ghla-line);
+  border-radius:14px;
+  background:#15171d;
+}
+.ghla-identity-keep,
+.ghla-identity-duplicate{
+  min-height:55px;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:9px;
+  align-items:center;
+  padding:9px 10px;
+}
+.ghla-identity-keep{
+  background:rgba(84,117,91,.10);
+  border-bottom:1px solid rgba(255,255,255,.06);
+}
+.ghla-identity-duplicate + .ghla-identity-duplicate{
+  border-top:1px solid rgba(255,255,255,.055);
+}
+.ghla-identity-keep>span,
+.ghla-identity-duplicate>span{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+.ghla-identity-keep b,
+.ghla-identity-duplicate b{
+  font-size:13px;
+}
+.ghla-identity-keep small,
+.ghla-identity-duplicate small{
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--ghla-muted);
+  font-size:9px;
+}
+.ghla-identity-keep>em,
+.ghla-identity-duplicate>em{
+  color:#a9c7b0;
+  font-size:9px;
+  font-style:normal;
+  text-align:right;
+}
+.ghla-identity-duplicate>em{
+  color:#e2ba73;
+  max-width:130px;
+}
+.ghla-identity-duplicate>button{
+  min-height:34px;
+  border:1px solid rgba(255,126,126,.18);
+  border-radius:10px;
+  padding:0 10px;
+  background:rgba(135,48,48,.16);
+  color:#ffaaaa;
+}
+
+@media(max-width:380px){
+  .ghla-ios-folder{
+    width:min(292px,86%);
+    padding:20px 13px;
+    gap:16px 5px;
+  }
+  .ghla-ios-app-icon{
+    width:58px;
+    height:58px;
+  }
+}

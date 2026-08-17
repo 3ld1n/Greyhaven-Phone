@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.4.0';
+const GHLA_VERSION = '2.4.1';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -1438,11 +1438,50 @@ function repairPhoneBindings() {
   if (!root?.phones) return 0;
 
   let changed = 0;
+
+  /*
+   * First repair the exact situation visible in the manager:
+   * a phone record is attached to an old same-name identity while the current
+   * SillyTavern character has a newer canonical identity.
+   */
+  const duplicateMap = new Map();
+  for (const group of identityDuplicateGroups()) {
+    for (const duplicate of group.duplicates) {
+      duplicateMap.set(duplicate.id, group.canonical.id);
+    }
+  }
+
+  for (const { key, timeline } of phoneRecords()) {
+    const replacementId = duplicateMap.get(String(timeline?.identityId || ''));
+    if (!replacementId) continue;
+
+    const alreadyClaimed = Object.entries(root.phones).some(([otherKey, other]) =>
+      otherKey !== key && String(other?.identityId || '') === String(replacementId)
+    );
+    if (alreadyClaimed) continue;
+
+    try {
+      reassignPhoneRecord(key, replacementId);
+      changed++;
+    } catch (error) {
+      console.warn(`[${GHLA_MODULE}] duplicate phone binding repair`, error);
+    }
+  }
+
+  const refreshedRoot = phoneMetadataRoot();
+  if (!refreshedRoot?.phones) return changed;
+
   const claimed = new Set(
-    Object.values(root.phones).map(t => String(t?.identityId || '')).filter(Boolean)
+    Object.values(refreshedRoot.phones).map(t => String(t?.identityId || '')).filter(Boolean)
   );
 
-  for (const timeline of Object.values(root.phones)) {
+  /*
+   * Then repair true orphan records whose identity ID no longer exists,
+   * but only when one exact-name candidate is available and unclaimed.
+   */
+  const candidates = managerIdentityCandidates();
+
+  for (const timeline of Object.values(refreshedRoot.phones)) {
     const current = identityById(timeline?.identityId);
     if (current) {
       timeline.ownerName = current.name;
@@ -1450,7 +1489,9 @@ function repairPhoneBindings() {
       continue;
     }
 
-    const exact = identities().find(x => lc(x.name) === lc(timeline?.ownerName));
+    const matches = candidates.filter(x => lc(x.name) === lc(timeline?.ownerName));
+    const exact = matches.length === 1 ? matches[0] : null;
+
     if (exact && !claimed.has(exact.id)) {
       timeline.identityId = exact.id;
       timeline.ownerName = exact.name;
@@ -1460,8 +1501,255 @@ function repairPhoneBindings() {
     }
   }
 
-  if (changed) savePhoneMetadata(root);
+  if (changed) savePhoneMetadata(refreshedRoot);
   return changed;
+}
+
+
+function phoneSettingsRoot(create = true) {
+  const c = ctx();
+  if (!c?.extensionSettings) return null;
+
+  let root = c.extensionSettings[PHONE_SETTINGS_KEY];
+  if ((!root || typeof root !== 'object') && create) {
+    root = { profiles: {}, identities: {}, socialProfiles: {}, appRoles: {}, onlyFansAccounts: {} };
+    c.extensionSettings[PHONE_SETTINGS_KEY] = root;
+  }
+  if (!root) return null;
+
+  if (!root.identities || typeof root.identities !== 'object' || Array.isArray(root.identities)) root.identities = {};
+  if (!root.socialProfiles || typeof root.socialProfiles !== 'object' || Array.isArray(root.socialProfiles)) root.socialProfiles = {};
+  if (!root.appRoles || typeof root.appRoles !== 'object' || Array.isArray(root.appRoles)) root.appRoles = {};
+  if (!root.onlyFansAccounts || typeof root.onlyFansAccounts !== 'object' || Array.isArray(root.onlyFansAccounts)) root.onlyFansAccounts = {};
+  return root;
+}
+
+function activeCharacterIdentityIds() {
+  const ids = new Set();
+  const c = ctx();
+
+  for (let index = 0; index < (c?.characters || []).length; index++) {
+    const ch = c.characters[index];
+    const stable = String(ch?.avatar || ch?.data?.avatar || '').trim();
+    const name = norm(ch?.name || `character-${index}`);
+    const identityId = stable
+      ? `character:${encodeURIComponent(stable)}`
+      : `character-name:${encodeURIComponent(name)}`;
+    ids.add(identityId);
+  }
+
+  return ids;
+}
+
+function identityRegistryRows() {
+  const root = phoneSettingsRoot(false);
+  if (!root) return [];
+  return Object.entries(root.identities || {})
+    .map(([key, raw]) => ({
+      key,
+      id: String(raw?.id || key),
+      kind: String(raw?.kind || 'character'),
+      name: norm(raw?.name || 'Unknown'),
+      avatar: String(raw?.avatar || ''),
+      phoneNumber: String(raw?.phoneNumber || '').replace(/\D/g, '').slice(0, 9),
+      createdAt: Number(raw?.createdAt || 0),
+      updatedAt: Number(raw?.updatedAt || 0),
+      raw,
+    }))
+    .filter(x => x.id && x.kind !== 'provisional');
+}
+
+function identityManagerScore(row, activeIds, assignedIds, currentId) {
+  let score = 0;
+  if (activeIds.has(row.id)) score += 1000;
+  if (assignedIds.has(row.id)) score += 500;
+  if (row.id === currentId) score += 300;
+  if (row.kind === 'character') score += 40;
+  if (/^\d{9}$/.test(row.phoneNumber)) score += 10;
+  score += Math.min(9, Math.floor(Math.max(0, row.updatedAt) / 1e12));
+  return score;
+}
+
+function identityDuplicateGroups() {
+  // Ensure the current character cards have canonical identities before grouping.
+  try { phoneApi()?.listIdentities?.(); } catch {}
+
+  const rows = identityRegistryRows();
+  const activeIds = activeCharacterIdentityIds();
+  const phoneRows = phoneRecords();
+  const assignedIds = new Set(phoneRows.map(x => String(x.timeline?.identityId || '')).filter(Boolean));
+  const currentId = currentIdentity()?.id || '';
+  const byName = new Map();
+
+  for (const row of rows) {
+    const key = lc(row.name);
+    if (!key) continue;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(row);
+  }
+
+  const groups = [];
+  for (const rowsForName of byName.values()) {
+    if (rowsForName.length < 2) continue;
+
+    const ranked = [...rowsForName].sort((a, b) => {
+      const diff = identityManagerScore(b, activeIds, assignedIds, currentId) -
+        identityManagerScore(a, activeIds, assignedIds, currentId);
+      return diff || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id);
+    });
+
+    const canonical = ranked[0];
+    const duplicates = ranked.slice(1).map(row => ({
+      ...row,
+      activeCharacter: activeIds.has(row.id),
+      hasPhoneRecord: assignedIds.has(row.id),
+      deletable: !activeIds.has(row.id) && !assignedIds.has(row.id),
+    }));
+
+    groups.push({
+      name: canonical.name,
+      canonical: {
+        ...canonical,
+        activeCharacter: activeIds.has(canonical.id),
+        hasPhoneRecord: assignedIds.has(canonical.id),
+      },
+      duplicates,
+    });
+  }
+
+  return groups.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function managerIdentityCandidates() {
+  try { phoneApi()?.listIdentities?.(); } catch {}
+
+  const rows = identityRegistryRows();
+  const activeIds = activeCharacterIdentityIds();
+  const currentId = currentIdentity()?.id || '';
+  const phoneIds = new Set(phoneRecords().map(x => String(x.timeline?.identityId || '')).filter(Boolean));
+  const byName = new Map();
+
+  for (const row of rows) {
+    const key = lc(row.name);
+    if (!key) continue;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(row);
+  }
+
+  const result = [];
+  for (const group of byName.values()) {
+    const active = group.filter(x => activeIds.has(x.id));
+    if (active.length) {
+      // If the user truly has two current cards with the same display name,
+      // keep both. We only collapse old/orphan identity records.
+      result.push(...active);
+      continue;
+    }
+
+    const ranked = [...group].sort((a, b) => {
+      const diff = identityManagerScore(b, activeIds, phoneIds, currentId) -
+        identityManagerScore(a, activeIds, phoneIds, currentId);
+      return diff || b.updatedAt - a.updatedAt;
+    });
+    if (ranked[0]) result.push(ranked[0]);
+  }
+
+  return result.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function replaceExactIdentityReferences(value, oldId, newId, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] === oldId) value[i] = newId;
+      else replaceExactIdentityReferences(value[i], oldId, newId, seen);
+    }
+    return;
+  }
+
+  // Some Greyhaven Phone stores (notably relationships/app roles) use an
+  // identity ID as an object KEY rather than a value. Re-key that too.
+  if (Object.prototype.hasOwnProperty.call(value, oldId)) {
+    if (!Object.prototype.hasOwnProperty.call(value, newId)) {
+      value[newId] = value[oldId];
+    } else if (
+      value[newId] && typeof value[newId] === 'object' &&
+      value[oldId] && typeof value[oldId] === 'object' &&
+      !Array.isArray(value[newId]) && !Array.isArray(value[oldId])
+    ) {
+      Object.assign(value[newId], value[oldId]);
+    }
+    delete value[oldId];
+  }
+
+  for (const key of Object.keys(value)) {
+    const current = value[key];
+    if (current === oldId) value[key] = newId;
+    else replaceExactIdentityReferences(current, oldId, newId, seen);
+  }
+}
+
+function deleteDuplicateIdentity(identityId) {
+  const root = phoneSettingsRoot(false);
+  if (!root?.identities?.[identityId]) throw new Error('That identity no longer exists.');
+
+  const groups = identityDuplicateGroups();
+  const group = groups.find(g => g.duplicates.some(x => x.id === identityId));
+  const duplicate = group?.duplicates.find(x => x.id === identityId);
+
+  if (!group || !duplicate) throw new Error('This identity is not currently classified as a duplicate.');
+  if (!duplicate.deletable) {
+    if (duplicate.activeCharacter) throw new Error('This identity belongs to a current SillyTavern character card. Delete or rename the duplicate card instead.');
+    if (duplicate.hasPhoneRecord) throw new Error('This identity still owns a phone record. Delete or reassign that phone first.');
+    throw new Error('This duplicate cannot be safely removed yet.');
+  }
+
+  const replacementId = group.canonical.id;
+
+  // Preserve references in the current chat and in Life world state by moving
+  // them to the canonical same-name identity before deleting the orphan ID.
+  const phoneRoot = phoneMetadataRoot(false);
+  if (phoneRoot) {
+    replaceExactIdentityReferences(phoneRoot, identityId, replacementId);
+    savePhoneMetadata(phoneRoot);
+  }
+
+  const life = state();
+  if (life) replaceExactIdentityReferences(life, identityId, replacementId);
+
+  replaceExactIdentityReferences(root.appRoles, identityId, replacementId);
+
+  if (root.onlyFansAccounts?.[identityId]) {
+    if (!root.onlyFansAccounts[replacementId]) {
+      root.onlyFansAccounts[replacementId] = root.onlyFansAccounts[identityId];
+      root.onlyFansAccounts[replacementId].identityId = replacementId;
+    }
+    delete root.onlyFansAccounts[identityId];
+  }
+
+  // Duplicate social counters are not merged: the canonical card has its own
+  // deterministic profile. Removing the stale profile avoids double accounts.
+  delete root.socialProfiles?.[identityId];
+  delete root.identities[identityId];
+
+  saveSettings();
+  return { deleted: identityId, kept: replacementId, name: group.name };
+}
+
+function deleteAllSafeDuplicateIdentities() {
+  let count = 0;
+  while (true) {
+    const next = identityDuplicateGroups()
+      .flatMap(g => g.duplicates)
+      .find(x => x.deletable);
+    if (!next) break;
+    deleteDuplicateIdentity(next.id);
+    count++;
+  }
+  return count;
 }
 
 function duplicatePhoneKeys() {
@@ -1494,35 +1782,59 @@ function ensureCss() {
 }
 
 function lifeIconMarkup() {
-  return `<button class="ghp-app-icon ghla-life-icon" data-ghla-open-life>
-    <span class="ghp-app-square" style="--t:#4b6f79"><i class="fa-solid fa-layer-group"></i></span>
+  return `<button class="ghp-app-icon ghla-life-folder-icon" data-ghla-open-life aria-label="Open Life folder">
+    <span class="ghp-app-square ghla-folder-preview">
+      <i class="fa-solid fa-car-side"></i>
+      <i class="fa-solid fa-house"></i>
+      <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+    </span>
     <small>Life</small>
   </button>`;
 }
 
 function injectLifeIcon() {
   const grid = qs('#ghp-overlay:not([hidden]) .ghp-home .ghp-grid');
-  if (!grid || qs('[data-ghla-open-life]', grid)) return;
-  grid.insertAdjacentHTML('beforeend', lifeIconMarkup());
+  if (!grid) return;
+
+  const existing = qs('[data-ghla-open-life]', grid);
+  if (existing) return;
+
+  const html = lifeIconMarkup();
+
+  // Keep Life high on the first home-screen page: directly after Uber when
+  // Uber exists, otherwise before Settings, otherwise at the start.
+  const uber = qs('[data-open-app="uber"]', grid);
+  if (uber) return uber.insertAdjacentHTML('afterend', html);
+
+  const settings = qs('[data-open-app="settings"]', grid);
+  if (settings) return settings.insertAdjacentHTML('beforebegin', html);
+
+  grid.insertAdjacentHTML('afterbegin', html);
 }
 
-function injectManagerMenu() {
-  const menu = qs('#extensionsMenu');
-  if (!menu || qs('#ghla-manager-entry', menu)) return;
+function injectManagerSettings() {
+  // v2.4.0 placed this in the quick Extensions menu. Remove that old entry.
+  qs('#ghla-manager-entry')?.remove();
 
-  const row = document.createElement('div');
-  row.id = 'ghla-manager-entry';
-  row.className = 'list-group-item flex-container flexGap5 interactable';
-  row.tabIndex = 0;
-  row.innerHTML = '<i class="fa-solid fa-screwdriver-wrench"></i><span>Greyhaven Phone Manager</span>';
-  row.addEventListener('click', openPhoneManager);
-  row.addEventListener('keydown', event => {
+  const installButton = qs('#third_party_extension_button');
+  const block = installButton?.closest?.('.extensions_block');
+  if (!installButton || !block || qs('#ghla-manager-settings-button', block)) return;
+
+  const button = document.createElement('div');
+  button.id = 'ghla-manager-settings-button';
+  button.className = 'menu_button menu_button_icon ghla-manager-settings-button';
+  button.tabIndex = 0;
+  button.title = 'Open Greyhaven Phone Manager';
+  button.innerHTML = '<i class="fa-solid fa-screwdriver-wrench"></i><span>Greyhaven Phone Manager</span>';
+  button.addEventListener('click', openPhoneManager);
+  button.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       openPhoneManager();
     }
   });
-  menu.appendChild(row);
+
+  installButton.insertAdjacentElement('afterend', button);
 }
 
 function ensureLifeLayer() {
@@ -1602,28 +1914,20 @@ function renderLifeHome() {
     isOwner(x, me?.id) || x.tenants.some(t => t.identityId === me?.id) || x.occupants.some(t => t.identityId === me?.id)
   ).length;
 
-  return `<div class="ghla-screen">
-    ${lifeHeader('Life', 'Persistent assets & places')}
-    <main class="ghla-folder-home">
-      <div class="ghla-folder-hero">
-        <i class="fa-solid fa-city"></i>
-        <div><b>Greyhaven Life</b><span>What characters own, rent, drive and live in.</span></div>
-      </div>
-      <div class="ghla-folder-grid">
-        <button type="button" data-ghla-app="garage">
-          <span class="ghla-folder-icon vehicle"><i class="fa-solid fa-car-side"></i></span>
-          <b>Garage</b><small>${mineVehicles} mine</small>
-        </button>
-        <button type="button" data-ghla-app="property">
-          <span class="ghla-folder-icon property"><i class="fa-solid fa-house"></i></span>
-          <b>Property</b><small>${mineProperties} linked</small>
-        </button>
-      </div>
-      <section class="ghla-note">
-        <i class="fa-solid fa-database"></i>
-        <span><b>Universal world state</b><small>Assets persist across chats. Ownership changes only after an explicit action.</small></span>
-      </section>
-    </main>
+  return `<div class="ghla-folder-overlay" data-ghla-folder-backdrop>
+    <h1>Life</h1>
+    <section class="ghla-ios-folder" aria-label="Life folder">
+      <button type="button" class="ghla-ios-folder-app" data-ghla-app="garage">
+        <span class="ghla-ios-app-icon vehicle"><i class="fa-solid fa-car-side"></i></span>
+        <b>Garage</b>
+        <small>${mineVehicles ? `${mineVehicles} mine` : ''}</small>
+      </button>
+      <button type="button" class="ghla-ios-folder-app" data-ghla-app="property">
+        <span class="ghla-ios-app-icon property"><i class="fa-solid fa-house"></i></span>
+        <b>Property</b>
+        <small>${mineProperties ? `${mineProperties} linked` : ''}</small>
+      </button>
+    </section>
   </div>`;
 }
 
@@ -2118,30 +2422,58 @@ function completeSaleDialog(kind, listingId) {
 function phoneManagerHtml() {
   const rows = phoneRecords();
   const duplicateKeys = duplicatePhoneKeys();
-  const ids = identities();
-  const assigned = new Set(rows.map(x => x.timeline?.identityId).filter(Boolean));
-  const missing = ids.filter(x => !assigned.has(x.id));
+  const identityGroups = identityDuplicateGroups();
+  const assigned = new Set(rows.map(x => String(x.timeline?.identityId || '')).filter(Boolean));
+  const missing = managerIdentityCandidates().filter(x => !assigned.has(x.id));
+
+  const duplicateCount = identityGroups.reduce((sum, group) =>
+    sum + group.duplicates.filter(x => x.deletable).length, 0);
+  const duplicateIdentityIds = new Set(
+    identityGroups.flatMap(group => group.duplicates.map(x => x.id))
+  );
 
   return `<div class="ghla-manager-panel">
-    <header><div><b>Greyhaven Phone Manager</b><small>Current chat phone records · global identity numbers</small></div><button type="button" data-ghla-manager-close><i class="fa-solid fa-xmark"></i></button></header>
+    <header><div><b>Greyhaven Phone Manager</b><small>Phone records + global identity cleanup</small></div><button type="button" data-ghla-manager-close><i class="fa-solid fa-xmark"></i></button></header>
     <main>
       <div class="ghla-manager-actions">
-        <button type="button" data-ghla-repair-bindings><i class="fa-solid fa-wand-magic-sparkles"></i> Repair obvious bindings</button>
+        <button type="button" data-ghla-repair-bindings><i class="fa-solid fa-wand-magic-sparkles"></i> Repair bindings</button>
         <button type="button" data-ghla-create-phone><i class="fa-solid fa-plus"></i> Add missing phone</button>
+        ${duplicateCount ? `<button type="button" data-ghla-delete-safe-identities class="warning"><i class="fa-solid fa-broom"></i> Delete ${duplicateCount} safe duplicate${duplicateCount === 1 ? '' : 's'}</button>` : ''}
       </div>
-      <section class="ghla-manager-note"><i class="fa-solid fa-circle-info"></i><span>Reassigning moves the phone history to another identity. If the old identity had a valid number, that number moves with the phone and the old identity receives a fresh unique number.</span></section>
+
+      <section class="ghla-manager-note"><i class="fa-solid fa-circle-info"></i><span>Current character-card identities are protected. Old same-name identity records with no phone assignment can be deleted here so they stop appearing as duplicate numbers in searches.</span></section>
+
       <h3>Phone records</h3>
       ${rows.length ? rows.map(({key,timeline}) => {
         const who = identityById(timeline.identityId);
         const number = who?.phoneNumber || 'no number';
-        return `<article class="ghla-phone-record ${duplicateKeys.has(key) ? 'duplicate' : ''}">
-          <div><b>${esc(timeline.ownerName || who?.name || 'Orphan phone')}</b><small>${esc(number)} · ${esc(timeline.identityId || 'unassigned')}</small>${duplicateKeys.has(key) ? '<em>Possible duplicate</em>' : ''}</div>
+        const identityIsDuplicate = duplicateIdentityIds.has(String(timeline.identityId || ''));
+        return `<article class="ghla-phone-record ${duplicateKeys.has(key) || identityIsDuplicate ? 'duplicate' : ''}">
+          <div><b>${esc(timeline.ownerName || who?.name || 'Orphan phone')}</b><small>${esc(number)} · ${esc(timeline.identityId || 'unassigned')}</small>${duplicateKeys.has(key) ? '<em>Possible duplicate phone</em>' : identityIsDuplicate ? '<em>Attached to an old duplicate identity — reassign this phone</em>' : ''}</div>
           <button type="button" data-ghla-reassign-phone="${esc(key)}">Assign</button>
           <button type="button" data-ghla-delete-phone="${esc(key)}"><i class="fa-solid fa-trash"></i></button>
         </article>`;
       }).join('') : '<small>No phone records in this chat yet.</small>'}
+
+      <h3>Duplicate identity numbers</h3>
+      ${identityGroups.length ? identityGroups.map(group => `
+        <section class="ghla-identity-group">
+          <div class="ghla-identity-keep">
+            <span><b>${esc(group.name)}</b><small>Keep · ${esc(group.canonical.phoneNumber || 'no number')}</small></span>
+            <em>${group.canonical.activeCharacter ? 'Current character' : group.canonical.hasPhoneRecord ? 'Has phone' : 'Canonical'}</em>
+          </div>
+          ${group.duplicates.map(row => `<div class="ghla-identity-duplicate">
+            <span><b>${esc(row.phoneNumber || 'no number')}</b><small>${esc(row.id)}</small></span>
+            ${row.deletable
+              ? `<button type="button" data-ghla-delete-identity="${esc(row.id)}"><i class="fa-solid fa-trash"></i> Delete duplicate</button>`
+              : `<em>${row.activeCharacter ? 'Current character card — protected' : 'Has phone record — reassign/delete phone first'}</em>`}
+          </div>`).join('')}
+        </section>
+      `).join('') : '<small class="ghla-manager-empty">No duplicate global identities detected.</small>'}
+
       <h3>Missing phones</h3>
-      ${missing.length ? missing.slice(0,80).map(x => `<div class="ghla-mini-row"><span>${esc(x.name)} · ${esc(x.phoneNumber || 'number will be created by Phone')}</span><button type="button" data-ghla-create-phone-for="${esc(x.id)}">Create</button></div>`).join('') : '<small>Every known identity already has a phone record in this chat.</small>'}
+      <small class="ghla-manager-caption">One canonical entry per character. Old duplicate identity numbers are shown above instead of repeating here.</small>
+      ${missing.length ? missing.slice(0,100).map(x => `<div class="ghla-mini-row"><span>${esc(x.name)} · ${esc(x.phoneNumber || 'number will be created by Phone')}</span><button type="button" data-ghla-create-phone-for="${esc(x.id)}">Create</button></div>`).join('') : '<small>Every current/canonical identity already has a phone record in this chat.</small>'}
     </main>
   </div>`;
 }
@@ -2196,6 +2528,12 @@ function managerCreateDialog() {
 /* ---------------- UI actions ---------------- */
 
 function handleLifeClick(event) {
+  if (event.target?.matches?.('[data-ghla-folder-backdrop]')) {
+    event.preventDefault();
+    event.stopPropagation();
+    return closeLife();
+  }
+
   const button = event.target.closest('button');
   if (!button) return;
 
@@ -2548,6 +2886,30 @@ function handleManagerClick(event) {
     rerenderManager();
     return globalThis.toastr?.success?.(count ? `Repaired ${count} binding${count === 1 ? '' : 's'}.` : 'No safe automatic repairs were needed.');
   }
+  if (button.matches('[data-ghla-delete-safe-identities]')) {
+    if (!confirm('Delete every safe orphan duplicate identity number? Current character cards and identities with phone records are protected.')) return;
+    try {
+      const count = deleteAllSafeDuplicateIdentities();
+      rerenderManager();
+      globalThis.toastr?.success?.(`Deleted ${count} safe duplicate identit${count === 1 ? 'y' : 'ies'}.`);
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message || String(error));
+    }
+    return;
+  }
+  if (button.dataset.ghlaDeleteIdentity) {
+    const row = identityRegistryRows().find(x => x.id === button.dataset.ghlaDeleteIdentity);
+    if (!row) return;
+    if (!confirm(`Delete the old ${row.name} identity number ${row.phoneNumber || '(no number)'}?`)) return;
+    try {
+      const result = deleteDuplicateIdentity(row.id);
+      rerenderManager();
+      globalThis.toastr?.success?.(`Deleted duplicate ${result.name} identity.`);
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message || String(error));
+    }
+    return;
+  }
   if (button.matches('[data-ghla-create-phone]')) return managerCreateDialog();
   if (button.dataset.ghlaCreatePhoneFor) {
     try {
@@ -2583,7 +2945,7 @@ function documentSubmit(event) {
 
 function syncUi() {
   enableRequiredCoreApps();
-  injectManagerMenu();
+  injectManagerSettings();
 
   const overlay = qs('#ghp-overlay');
   if (!overlay || overlay.hidden) {
@@ -2595,7 +2957,12 @@ function syncUi() {
   }
 
   injectLifeIcon();
-  if (lifeOpen) renderLife();
+
+  // Important: never re-render the Life layer just because our own DOM changed.
+  // v2.4.0 did that from the global MutationObserver, creating a render ->
+  // mutation -> render loop on iPhone and making the folder appear frozen.
+  // Rebuild only if SillyTavern itself removed the layer while Life is open.
+  if (lifeOpen && !qs('#ghla-layer')) renderLife();
 }
 
 
