@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.4.1';
+const GHLA_VERSION = '2.5.0';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -91,7 +91,8 @@ function state() {
   if (!Array.isArray(s.agencies)) s.agencies = [];
   if (!Array.isArray(s.transactions)) s.transactions = [];
   if (!s.market || typeof s.market !== 'object') s.market = {};
-  if (!s.market.vehicleRefresh || typeof s.market.vehicleRefresh !== 'object') s.market.vehicleRefresh = { lastAt: 0, city: 'Greyhaven', type: 'all' };
+  if (!s.market.vehicleRefresh || typeof s.market.vehicleRefresh !== 'object') s.market.vehicleRefresh = { lastAt: 0, city: 'Greyhaven', type: 'all', mode: 'all' };
+  if (!['all', 'sale', 'rent'].includes(s.market.vehicleRefresh.mode)) s.market.vehicleRefresh.mode = 'all';
   if (!s.market.propertyRefresh || typeof s.market.propertyRefresh !== 'object') s.market.propertyRefresh = { lastAt: 0, city: 'Greyhaven', type: 'all', mode: 'all' };
 
   return s;
@@ -460,6 +461,7 @@ async function refreshVehicleMarket() {
   try {
     const city = norm(s.market.vehicleRefresh.city || 'Greyhaven');
     const filterType = s.market.vehicleRefresh.type || 'all';
+    const filterMode = s.market.vehicleRefresh.mode || 'all';
     const candidates = existingCharacterCandidates();
 
     const systemPrompt = `You generate realistic vehicle marketplace listings for a fictional life simulator.
@@ -481,10 +483,11 @@ JSON:
 
     const prompt = `LOCATION: ${city}
 TYPE FILTER: ${filterType}
+LISTING MODE FILTER: ${filterMode}
 ALLOWED EXISTING CHARACTERS:
 ${JSON.stringify(candidates)}
 
-Create fresh top choices.`;
+Create fresh top choices. Respect LISTING MODE FILTER exactly unless it is "all".`;
 
     const result = await generateJson(systemPrompt, prompt, 1800);
     const rows = Array.isArray(result?.listings) ? result.listings.slice(0, 6) : [];
@@ -511,6 +514,7 @@ Create fresh top choices.`;
       };
 
       if (filterType !== 'all' && row.type !== filterType) continue;
+      if (filterMode !== 'all' && row.mode !== filterMode) continue;
 
       const asset = createVehicleAssetFromDiscovery(row);
       row.assetId = asset.id;
@@ -1853,6 +1857,13 @@ function ensureLifeLayer() {
   return layer;
 }
 
+
+function syncLifeFolderBlur() {
+  const overlay = qs('#ghp-overlay');
+  if (!overlay) return;
+  overlay.classList.toggle('ghla-folder-open', lifeOpen && lifeView.app === 'home');
+}
+
 function openLife(appName = 'home') {
   lifeOpen = true;
   lifeView = {
@@ -1860,12 +1871,14 @@ function openLife(appName = 'home') {
     tab: appName === 'garage' ? 'owned' : appName === 'property' ? 'owned' : '',
     detailId: '',
   };
+  syncLifeFolderBlur();
   renderLife();
 }
 
 function closeLife() {
   lifeOpen = false;
   lifeView = { app: 'home', tab: '', detailId: '' };
+  syncLifeFolderBlur();
   qs('#ghla-layer')?.remove();
 }
 
@@ -1876,6 +1889,7 @@ function lifeBack() {
   }
   if (lifeView.app !== 'home') {
     lifeView = { app: 'home', tab: '', detailId: '' };
+    syncLifeFolderBlur();
     return renderLife();
   }
   closeLife();
@@ -1987,15 +2001,28 @@ function renderGarage() {
       </button>`).join('') : emptyState('fa-solid fa-car', 'No vehicles yet', 'Add cars, motorcycles, boats or aircraft manually.')}
     </main>`;
   } else if (tab === 'market') {
+    const vehicleCity = lc(s.market.vehicleRefresh.city || 'Greyhaven');
+    const vehicleType = s.market.vehicleRefresh.type || 'all';
+    const vehicleMode = s.market.vehicleRefresh.mode || 'all';
     const listings = Object.values(s.vehicleListings)
-      .filter(x => x.status === 'available')
+      .filter(x =>
+        x.status === 'available' &&
+        (!vehicleCity || lc(x.city) === vehicleCity) &&
+        (vehicleType === 'all' || x.type === vehicleType) &&
+        (vehicleMode === 'all' || x.mode === vehicleMode)
+      )
       .sort((a, b) => b.createdAt - a.createdAt);
 
     body = `<main>
-      <form class="ghla-market-search" data-ghla-vehicle-search>
+      <form class="ghla-market-search vehicle" data-ghla-vehicle-search>
         <input name="city" value="${esc(s.market.vehicleRefresh.city || 'Greyhaven')}" placeholder="City">
         <select name="type">
           ${['all', 'car', 'motorcycle', 'boat', 'airplane'].map(x => `<option value="${x}"${s.market.vehicleRefresh.type === x ? ' selected' : ''}>${x === 'all' ? 'All vehicles' : x}</option>`).join('')}
+        </select>
+        <select name="mode">
+          <option value="all"${s.market.vehicleRefresh.mode === 'all' ? ' selected' : ''}>Sale or rental</option>
+          <option value="sale"${s.market.vehicleRefresh.mode === 'sale' ? ' selected' : ''}>For sale</option>
+          <option value="rent"${s.market.vehicleRefresh.mode === 'rent' ? ' selected' : ''}>Rental only</option>
         </select>
         <button type="submit" class="primary">${vehicleRefreshBusy ? 'Refreshing…' : '<i class="fa-solid fa-arrows-rotate"></i> Refresh'}</button>
       </form>
@@ -2542,6 +2569,7 @@ function handleLifeClick(event) {
 
   if (button.dataset.ghlaApp) {
     lifeView = { app: button.dataset.ghlaApp, tab: 'owned', detailId: '' };
+    syncLifeFolderBlur();
     return renderLife();
   }
 
@@ -2663,6 +2691,7 @@ async function handleLifeSubmit(event) {
     const s = normalizeAll();
     s.market.vehicleRefresh.city = norm(fd.get('city') || 'Greyhaven');
     s.market.vehicleRefresh.type = String(fd.get('type') || 'all');
+    s.market.vehicleRefresh.mode = String(fd.get('mode') || 'all');
     saveSettings();
     return refreshVehicleMarket();
   }
@@ -2951,6 +2980,7 @@ function syncUi() {
   if (!overlay || overlay.hidden) {
     if (lifeOpen) {
       lifeOpen = false;
+      syncLifeFolderBlur();
       qs('#ghla-layer')?.remove();
     }
     return;

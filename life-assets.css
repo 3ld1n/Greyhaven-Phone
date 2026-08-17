@@ -682,3 +682,38 @@
     height:58px;
   }
 }
+
+
+/* =========================================================
+   v2.5.0 — folder background blur + vehicle market modes
+   ========================================================= */
+
+/* Backdrop-filter alone was too subtle on iOS/PWA. Blur the actual phone home
+   underneath the folder while keeping the folder layer itself sharp. */
+#ghp-overlay.ghla-folder-open .ghp-home{
+  filter:blur(5px) brightness(.82);
+  transform:scale(1.015);
+  transform-origin:center center;
+  transition:filter .16s ease, transform .16s ease;
+  pointer-events:none;
+}
+#ghp-overlay:not(.ghla-folder-open) .ghp-home{
+  transition:filter .16s ease, transform .16s ease;
+}
+
+/* Three filters: city, vehicle type, sale/rental mode. */
+.ghla-market-search.vehicle{
+  grid-template-columns:minmax(0,1fr) 120px 120px;
+}
+.ghla-market-search.vehicle button{
+  grid-column:1/-1;
+}
+
+@media(max-width:520px){
+  .ghla-market-search.vehicle{
+    grid-template-columns:1fr 1fr;
+  }
+  .ghla-market-search.vehicle input{
+    grid-column:1/-1;
+  }
+}
