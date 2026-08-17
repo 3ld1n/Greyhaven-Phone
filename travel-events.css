@@ -408,3 +408,431 @@
   color:#fff;
   font-size:10px;
 }
+
+
+/* =========================================================
+   v2.6.0 — Airbnb refinement
+   ========================================================= */
+
+.ghte-stay-open,
+.ghte-share-open{
+  width:100%;
+  border:0;
+  padding:0;
+  background:transparent;
+  color:inherit;
+  text-align:left;
+}
+
+.ghte-favorite{
+  width:40px;
+  height:40px;
+  border:1px solid rgba(255,255,255,.10);
+  border-radius:50%;
+  display:grid;
+  place-items:center;
+  background:rgba(15,16,20,.72);
+  color:#fff;
+  font-size:17px;
+}
+.ghte-favorite.saved{
+  color:#ff385c;
+}
+.ghte-favorite.compact{
+  width:36px;
+  height:36px;
+  flex:0 0 36px;
+}
+
+.ghte-stay-detail,
+.ghte-booking-detail{
+  display:flex;
+  flex-direction:column;
+  gap:13px;
+}
+
+.ghte-stay-detail-hero{
+  position:relative;
+  height:180px;
+  border-radius:22px;
+  display:grid;
+  place-items:center;
+  background:linear-gradient(145deg,#5d6d78,#34404a);
+}
+.ghte-stay-detail-hero.hotel{background:linear-gradient(145deg,#795e66,#453b42)}
+.ghte-stay-detail-hero.villa{background:linear-gradient(145deg,#80715e,#4f463b)}
+.ghte-stay-detail-hero>i{
+  font-size:52px;
+  opacity:.86;
+}
+.ghte-stay-detail-hero>.ghte-favorite{
+  position:absolute;
+  top:12px;
+  right:12px;
+}
+.ghte-detail-kicker{
+  color:var(--ghte-muted);
+  font-size:10px;
+  text-transform:capitalize;
+}
+.ghte-stay-detail h2,
+.ghte-transport-detail-head h2{
+  margin:0;
+  font-size:23px;
+  line-height:1.15;
+}
+.ghte-rating-row{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.ghte-rating-row>span{color:#ffb648;letter-spacing:1px}
+.ghte-rating-row>small{color:var(--ghte-muted);font-size:10px}
+.ghte-detail-fact{
+  display:grid;
+  grid-template-columns:28px minmax(0,1fr);
+  gap:8px;
+  align-items:center;
+  min-height:38px;
+  border-bottom:1px solid rgba(255,255,255,.055);
+}
+.ghte-detail-fact>i{color:#ff6d87}
+.ghte-detail-fact>span{font-size:11px}
+.ghte-stay-detail>p{
+  margin:0;
+  color:rgba(255,255,255,.80);
+  font-size:12px;
+  line-height:1.5;
+}
+.ghte-price-box{
+  padding:12px;
+  border:1px solid rgba(255,56,92,.15);
+  border-radius:14px;
+  background:rgba(255,56,92,.055);
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+.ghte-price-box>b{font-size:14px}
+.ghte-price-box>span{font-size:10px;color:var(--ghte-muted)}
+.ghte-detail-actions{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+.ghte-detail-actions button{
+  min-height:42px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:12px;
+  background:#25272e;
+  color:#fff;
+}
+.ghte-detail-actions button:first-child{border:0}
+.ghte-detail-actions button:last-child{grid-column:1/-1}
+
+.ghte-booking-stay-link{
+  width:100%;
+  min-height:70px;
+  border:1px solid var(--ghte-line);
+  border-radius:16px;
+  padding:10px;
+  display:grid;
+  grid-template-columns:48px minmax(0,1fr) 16px;
+  gap:10px;
+  align-items:center;
+  background:#16181e;
+  color:#fff;
+  text-align:left;
+}
+.ghte-booking-stay-link>span:nth-child(2){
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  min-width:0;
+}
+.ghte-booking-stay-link small{font-size:9px;color:var(--ghte-muted)}
+.ghte-booking-stay-link b{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:14px;
+}
+.ghte-booking-stay-link>i{font-size:10px;color:rgba(255,255,255,.34)}
+
+.ghte-mini-stay-icon{
+  width:46px;
+  height:46px;
+  border-radius:13px;
+  display:grid;
+  place-items:center;
+  background:#34404a;
+  color:#fff;
+}
+.ghte-mini-stay-icon.hotel{background:#514249}
+.ghte-mini-stay-icon.villa{background:#5c5041}
+
+.ghte-status-line{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  font-size:11px;
+  color:#a9d4b4;
+}
+.ghte-status-line>i{font-size:7px}
+.ghte-status-line.checkin-soon,
+.ghte-status-line.checkout-soon{color:#f2c66f}
+.ghte-status-line.cancelled{color:#ff8f8f}
+.ghte-status-line.completed{color:var(--ghte-muted)}
+
+.ghte-booking-facts{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+.ghte-booking-facts>div{
+  min-height:62px;
+  padding:10px;
+  border:1px solid var(--ghte-line);
+  border-radius:13px;
+  background:#16181e;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+.ghte-booking-facts small{font-size:9px;color:var(--ghte-muted)}
+.ghte-booking-facts b{font-size:11px}
+
+.ghte-booking-section{
+  padding:12px;
+  border:1px solid var(--ghte-line);
+  border-radius:16px;
+  background:#16181e;
+}
+.ghte-section-row{
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  align-items:center;
+  margin-bottom:9px;
+}
+.ghte-section-row>b{font-size:13px}
+.ghte-section-row>small{font-size:9px;color:var(--ghte-muted)}
+.ghte-participants{
+  display:flex;
+  flex-direction:column;
+}
+.ghte-participant-row{
+  min-height:46px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  border-top:1px solid rgba(255,255,255,.055);
+}
+.ghte-participant-row:first-child{border-top:0}
+.ghte-person{
+  display:grid;
+  grid-template-columns:30px auto auto;
+  gap:8px;
+  align-items:center;
+  min-width:0;
+}
+.ghte-person>b{font-size:11px}
+.ghte-person>small{font-size:8px;color:#ff8ba1}
+.ghte-participant-row>button{
+  width:34px;
+  height:34px;
+  border:1px solid rgba(255,125,125,.15);
+  border-radius:10px;
+  background:rgba(135,48,48,.12);
+  color:#ff9e9e;
+}
+
+.ghte-shared-controls{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.ghte-shared-controls>button,
+.ghte-wide-secondary{
+  min-height:40px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:11px;
+  background:#25272e;
+  color:#fff;
+}
+.ghte-autofill-toggle{
+  min-height:58px;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:12px;
+  align-items:center;
+}
+.ghte-autofill-toggle>span{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+.ghte-autofill-toggle b{font-size:11px}
+.ghte-autofill-toggle small{font-size:9px;line-height:1.35;color:var(--ghte-muted)}
+.ghte-autofill-toggle input{width:20px;height:20px}
+
+.ghte-danger-zone{
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  padding-top:3px;
+}
+.ghte-danger-zone>button{
+  min-height:40px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:11px;
+  background:#25272e;
+  color:#fff;
+}
+.ghte-danger-zone>button.danger{
+  border-color:rgba(255,105,105,.16);
+  background:rgba(138,48,48,.13);
+  color:#ff9c9c;
+}
+.ghte-danger-zone>button.ghte-join-detail{
+  border:0;
+  background:var(--ghte-airbnb);
+}
+
+.ghte-check-activity{
+  width:100%;
+  min-height:40px;
+  margin-bottom:12px;
+  border:1px solid rgba(255,56,92,.16);
+  border-radius:12px;
+  background:rgba(255,56,92,.08);
+  color:#ff95a8;
+}
+
+.ghte-itinerary-card{
+  width:100%;
+  min-height:76px;
+  display:grid;
+  grid-template-columns:44px minmax(0,1fr) 18px;
+  gap:10px;
+  align-items:center;
+  margin-bottom:9px;
+  padding:10px;
+  border:1px solid rgba(255,56,92,.14);
+  border-radius:16px;
+  background:linear-gradient(145deg,rgba(255,56,92,.07),rgba(255,255,255,.025));
+  color:#fff;
+  text-align:left;
+}
+.ghte-itinerary-icon{
+  width:42px;
+  height:42px;
+  border-radius:13px;
+  display:grid;
+  place-items:center;
+  background:rgba(255,56,92,.12);
+  color:#ff7d95;
+}
+.ghte-itinerary-card>span:nth-child(2){
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+.ghte-itinerary-card small{font-size:8px;color:var(--ghte-muted)}
+.ghte-itinerary-card b{font-size:14px}
+.ghte-itinerary-card em{
+  font-size:9px;
+  color:rgba(255,255,255,.68);
+  font-style:normal;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.ghte-itinerary-card>i{font-size:10px;color:rgba(255,255,255,.34)}
+
+.ghte-trip-card.clickable{
+  width:100%;
+  grid-template-columns:minmax(0,1fr) auto 14px;
+  border:1px solid var(--ghte-line);
+  color:#fff;
+  text-align:left;
+}
+.ghte-trip-card.clickable>.ghte-avatar-stack{
+  justify-self:end;
+}
+.ghte-trip-card.clickable>strong{
+  grid-column:1/3;
+}
+.ghte-trip-card.clickable>i{
+  grid-column:3;
+  grid-row:1/3;
+  align-self:center;
+  color:rgba(255,255,255,.28);
+  font-size:10px;
+}
+
+.ghte-history{
+  margin-top:18px;
+  border-top:1px solid rgba(255,255,255,.07);
+  padding-top:10px;
+}
+.ghte-history>summary{
+  color:var(--ghte-muted);
+  font-size:11px;
+  cursor:pointer;
+  margin-bottom:9px;
+}
+
+.ghte-saved-row{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 38px;
+  gap:8px;
+  align-items:center;
+  margin-bottom:9px;
+  padding:8px;
+  border:1px solid var(--ghte-line);
+  border-radius:15px;
+  background:#16181e;
+}
+.ghte-saved-row>button:first-child{
+  border:0;
+  padding:0;
+  background:transparent;
+  color:#fff;
+  display:grid;
+  grid-template-columns:48px minmax(0,1fr);
+  gap:10px;
+  align-items:center;
+  text-align:left;
+}
+.ghte-saved-row>button:first-child>span:nth-child(2){
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+.ghte-saved-row small{font-size:8px;color:var(--ghte-muted)}
+.ghte-saved-row b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ghte-saved-row em{font-size:9px;color:rgba(255,255,255,.7);font-style:normal}
+
+.ghte-transport-detail-head{
+  display:grid;
+  grid-template-columns:48px minmax(0,1fr);
+  gap:10px;
+  align-items:center;
+}
+.ghte-transport-detail-head>div{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+}
+.ghte-transport-detail-head small{font-size:9px;color:var(--ghte-muted);text-transform:capitalize}
+
+@media(max-width:390px){
+  .ghte-detail-actions{grid-template-columns:1fr}
+  .ghte-detail-actions button:last-child{grid-column:auto}
+  .ghte-booking-facts{grid-template-columns:1fr 1fr}
+}

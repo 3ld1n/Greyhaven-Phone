@@ -14,7 +14,7 @@
  */
 
 const GHTE_MODULE = 'greyhaven-phone-travel-events';
-const GHTE_VERSION = '2.5.0';
+const GHTE_VERSION = '2.6.0';
 const GHTE_STATE_KEY = 'greyhavenPhoneTravelEvents';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 
@@ -114,6 +114,33 @@ function state() {
     };
   }
 
+  if (!s.localNpcs || typeof s.localNpcs !== 'object' || Array.isArray(s.localNpcs)) s.localNpcs = {};
+  if (!s.favorites || typeof s.favorites !== 'object' || Array.isArray(s.favorites)) s.favorites = {};
+  if (!s.favorites.accommodations || typeof s.favorites.accommodations !== 'object' || Array.isArray(s.favorites.accommodations)) s.favorites.accommodations = {};
+  if (!s.reminderFlags || typeof s.reminderFlags !== 'object' || Array.isArray(s.reminderFlags)) s.reminderFlags = {};
+
+  for (const reservation of Object.values(s.reservations)) {
+    if (!reservation || typeof reservation !== 'object') continue;
+    reservation.participants = Array.isArray(reservation.participants) ? reservation.participants : [];
+    reservation.maxGuests = Math.max(reservation.participants.length || 1, Number(reservation.maxGuests || reservation.participants.length || 1));
+    reservation.locked = reservation.locked === true;
+    reservation.autoFill = reservation.autoFill === true;
+    reservation.source ||= 'user-booking';
+    reservation.updatedAt = Number(reservation.updatedAt || reservation.createdAt || Date.now());
+
+    if (reservation.mode === 'shared' && reservation.status !== 'cancelled') {
+      if (reservation.locked || reservation.participants.length >= reservation.maxGuests) reservation.status = 'confirmed';
+      else reservation.status = 'shared-open';
+    }
+  }
+
+  for (const booking of Object.values(s.transportBookings)) {
+    if (!booking || typeof booking !== 'object') continue;
+    booking.travelers = Array.isArray(booking.travelers) ? booking.travelers : [];
+    booking.status ||= 'confirmed';
+    booking.updatedAt = Number(booking.updatedAt || booking.createdAt || Date.now());
+  }
+
   return s;
 }
 
@@ -200,8 +227,30 @@ function setEventsInstalled(value) {
 function identities() {
   const rows = phoneApi()?.listIdentities?.();
   if (!Array.isArray(rows)) return [];
+
+  /*
+   * Use current SillyTavern character-card identities for world discovery.
+   * This prevents old deleted/re-added identity records (the duplicate-number
+   * problem fixed by Phone Manager) from appearing as separate strangers.
+   */
+  const activeIds = new Set();
+  for (let index = 0; index < (ctx()?.characters || []).length; index++) {
+    const ch = ctx().characters[index];
+    const stable = String(ch?.avatar || ch?.data?.avatar || '').trim();
+    const name = norm(ch?.name || `character-${index}`);
+    activeIds.add(stable
+      ? `character:${encodeURIComponent(stable)}`
+      : `character-name:${encodeURIComponent(name)}`);
+  }
+
+  const currentId = phoneApi()?.getCurrentIdentity?.()?.id || '';
+
   return rows
-    .filter(x => x?.id && x.kind !== 'provisional')
+    .filter(x =>
+      x?.id &&
+      x.kind !== 'provisional' &&
+      (activeIds.size === 0 || activeIds.has(x.id) || x.id === currentId)
+    )
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
@@ -504,7 +553,7 @@ function openSharedReservations(search = null) {
 
   return Object.values(s.reservations)
     .filter(r => {
-      if (r.mode !== 'shared' || r.status !== 'shared-open') return false;
+      if (r.mode !== 'shared' || r.status !== 'shared-open' || r.locked) return false;
       if (participantExists(r.participants, me?.id)) return false;
       if ((r.participants || []).length >= r.maxGuests) return false;
       const accommodation = s.accommodations[r.accommodationId];
@@ -562,6 +611,9 @@ function createReservation({
     total,
     perPerson: Math.ceil(total / participants.length),
     bookedByIdentityId: me.id,
+    locked: false,
+    autoFill: false,
+    source: 'user-booking',
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -576,7 +628,7 @@ function joinSharedReservation(reservationId) {
   const reservation = s.reservations[reservationId];
   const me = currentIdentity();
 
-  if (!reservation || reservation.status !== 'shared-open') throw new Error('This shared stay is no longer open.');
+  if (!reservation || reservation.status !== 'shared-open' || reservation.locked) throw new Error('This shared stay is no longer open.');
   if (!me) throw new Error('No current phone identity.');
   if (participantExists(reservation.participants, me.id)) throw new Error('This character is already in the booking.');
   if (reservation.participants.length >= reservation.maxGuests) throw new Error('No open spots remain.');
@@ -604,7 +656,7 @@ function leaveSharedReservation(reservationId) {
   if (!reservation.participants.length) {
     reservation.status = 'cancelled';
   } else {
-    reservation.status = 'shared-open';
+    reservation.status = reservation.locked || reservation.participants.length >= reservation.maxGuests ? 'confirmed' : 'shared-open';
     reservation.perPerson = Math.ceil(reservation.total / reservation.participants.length);
   }
 
@@ -616,6 +668,366 @@ function leaveSharedReservation(reservationId) {
 function bookingOwnedByCurrent(reservation) {
   const me = currentIdentity();
   return participantExists(reservation?.participants || [], me?.id);
+}
+
+function bookingCreatedByCurrent(reservation) {
+  return Boolean(reservation && currentIdentity()?.id && reservation.bookedByIdentityId === currentIdentity().id);
+}
+
+function favoriteAccommodationIds(identityId = currentIdentity()?.id) {
+  const s = state();
+  if (!identityId) return [];
+  if (!Array.isArray(s.favorites.accommodations[identityId])) s.favorites.accommodations[identityId] = [];
+  return s.favorites.accommodations[identityId];
+}
+
+function isAccommodationFavorite(accommodationId) {
+  return favoriteAccommodationIds().includes(accommodationId);
+}
+
+function toggleAccommodationFavorite(accommodationId) {
+  const s = state();
+  const me = currentIdentity();
+  if (!me || !s.accommodations[accommodationId]) return false;
+  const list = favoriteAccommodationIds(me.id);
+  const index = list.indexOf(accommodationId);
+  if (index >= 0) list.splice(index, 1);
+  else list.unshift(accommodationId);
+  saveSettings();
+  return index < 0;
+}
+
+function savedAccommodations() {
+  const s = state();
+  return favoriteAccommodationIds()
+    .map(idValue => s.accommodations[idValue])
+    .filter(Boolean);
+}
+
+function reservationCheckInMs(reservation) {
+  return new Date(`${reservation.checkIn}T15:00:00`).getTime();
+}
+
+function reservationCheckOutMs(reservation) {
+  return new Date(`${reservation.checkOut}T11:00:00`).getTime();
+}
+
+function reservationLifecycle(reservation, nowMs = rpNow().getTime()) {
+  if (!reservation) return 'unknown';
+  if (reservation.status === 'cancelled') return 'cancelled';
+
+  const checkIn = reservationCheckInMs(reservation);
+  const checkOut = reservationCheckOutMs(reservation);
+
+  if (nowMs >= checkOut) return 'completed';
+  if (nowMs >= checkOut - 3 * 3600000 && nowMs < checkOut) return 'checkout-soon';
+  if (nowMs >= checkIn) return 'staying';
+  if (nowMs >= checkIn - 3 * 3600000) return 'checkin-soon';
+  return 'upcoming';
+}
+
+function lifecycleLabel(value) {
+  return {
+    upcoming: 'Upcoming',
+    'checkin-soon': 'Check-in soon',
+    staying: 'Currently staying',
+    'checkout-soon': 'Checkout soon',
+    completed: 'Completed',
+    cancelled: 'Cancelled',
+  }[value] || 'Booking';
+}
+
+function lockSharedReservation(reservationId, locked) {
+  const s = state();
+  const reservation = s.reservations[reservationId];
+  if (!reservation || reservation.mode !== 'shared') throw new Error('Shared booking not found.');
+  if (!bookingCreatedByCurrent(reservation)) throw new Error('Only the booking creator can lock it.');
+  if (reservation.status === 'cancelled') throw new Error('This booking is cancelled.');
+
+  reservation.locked = Boolean(locked);
+  reservation.status = reservation.locked || reservation.participants.length >= reservation.maxGuests
+    ? 'confirmed'
+    : 'shared-open';
+  reservation.updatedAt = Date.now();
+  saveSettings();
+  return reservation;
+}
+
+function setSharedAutoFill(reservationId, enabled) {
+  const s = state();
+  const reservation = s.reservations[reservationId];
+  if (!reservation || reservation.mode !== 'shared') throw new Error('Shared booking not found.');
+  if (!bookingCreatedByCurrent(reservation)) throw new Error('Only the booking creator can change auto-fill.');
+  if (reservation.locked) throw new Error('Unlock the booking before enabling auto-fill.');
+
+  reservation.autoFill = Boolean(enabled);
+  reservation.updatedAt = Date.now();
+  saveSettings();
+  return reservation;
+}
+
+function removeSharedParticipant(reservationId, identityId) {
+  const s = state();
+  const reservation = s.reservations[reservationId];
+  if (!reservation || reservation.mode !== 'shared') throw new Error('Shared booking not found.');
+  if (!bookingCreatedByCurrent(reservation)) throw new Error('Only the booking creator can remove participants.');
+  if (identityId === reservation.bookedByIdentityId) throw new Error('The booking creator cannot remove themselves.');
+
+  const before = reservation.participants.length;
+  reservation.participants = reservation.participants.filter(ref =>
+    !(ref.kind === 'identity' && ref.identityId === identityId)
+  );
+  if (reservation.participants.length === before) return reservation;
+
+  reservation.perPerson = Math.ceil(reservation.total / Math.max(1, reservation.participants.length));
+  reservation.status = reservation.locked || reservation.participants.length >= reservation.maxGuests
+    ? 'confirmed'
+    : 'shared-open';
+  reservation.updatedAt = Date.now();
+  saveSettings();
+  return reservation;
+}
+
+function cancelReservation(reservationId) {
+  const s = state();
+  const reservation = s.reservations[reservationId];
+  if (!reservation) throw new Error('Booking not found.');
+  if (!bookingCreatedByCurrent(reservation)) throw new Error('Only the booking creator can cancel the entire reservation.');
+
+  reservation.status = 'cancelled';
+  reservation.locked = true;
+  reservation.autoFill = false;
+  reservation.cancelledAt = Date.now();
+  reservation.updatedAt = Date.now();
+  saveSettings();
+  return reservation;
+}
+
+function deleteReservationRecord(reservationId) {
+  const s = state();
+  const reservation = s.reservations[reservationId];
+  if (!reservation) return false;
+  if (!bookingCreatedByCurrent(reservation)) throw new Error('Only the booking creator can delete the reservation record.');
+
+  const lifecycle = reservationLifecycle(reservation);
+  if (!['cancelled', 'completed'].includes(lifecycle)) throw new Error('Cancel or complete the trip before deleting it.');
+
+  delete s.reservations[reservationId];
+  saveSettings();
+  return true;
+}
+
+function cancelTransportBooking(bookingId) {
+  const s = state();
+  const booking = s.transportBookings[bookingId];
+  if (!booking) throw new Error('Ticket booking not found.');
+  if (booking.bookedByIdentityId !== currentIdentity()?.id) throw new Error('Only the ticket buyer can cancel it.');
+
+  booking.status = 'cancelled';
+  booking.cancelledAt = Date.now();
+  booking.updatedAt = Date.now();
+  saveSettings();
+  return booking;
+}
+
+function deleteTransportBooking(bookingId) {
+  const s = state();
+  const booking = s.transportBookings[bookingId];
+  if (!booking) return false;
+  if (booking.bookedByIdentityId !== currentIdentity()?.id) throw new Error('Only the ticket buyer can delete it.');
+  if (booking.status !== 'cancelled' && booking.arrivalAt > rpNow().getTime()) throw new Error('Cancel or complete this trip before deleting it.');
+
+  delete s.transportBookings[bookingId];
+  saveSettings();
+  return true;
+}
+
+function autoFillCandidates(reservation) {
+  const used = new Set((reservation.participants || []).filter(x => x.kind === 'identity').map(x => x.identityId));
+  return identities().filter(identity =>
+    !used.has(identity.id) &&
+    identity.id !== reservation.bookedByIdentityId
+  );
+}
+
+function processAutoFillReservation(reservationId, { forceOne = false } = {}) {
+  const s = state();
+  const reservation = s.reservations[reservationId];
+  if (!reservation || reservation.mode !== 'shared' || reservation.locked || !reservation.autoFill || reservation.status === 'cancelled') return 0;
+
+  const slots = Math.max(0, reservation.maxGuests - reservation.participants.length);
+  if (!slots) return 0;
+
+  const pool = autoFillCandidates(reservation);
+  if (!pool.length) return 0;
+
+  const wanted = forceOne ? 1 : seededInt(`${reservation.id}:${Date.now() >> 13}`, 0, Math.min(2, slots, pool.length));
+  let added = 0;
+
+  for (let index = 0; index < wanted; index++) {
+    if (!pool.length || reservation.participants.length >= reservation.maxGuests) break;
+    const pick = seededInt(`${reservation.id}:${Date.now()}:${index}`, 0, pool.length - 1);
+    const who = pool.splice(pick, 1)[0];
+    if (!who) continue;
+    reservation.participants.push(refForIdentity(who));
+    added++;
+  }
+
+  if (added) {
+    reservation.perPerson = Math.ceil(reservation.total / reservation.participants.length);
+    reservation.status = reservation.participants.length >= reservation.maxGuests ? 'confirmed' : 'shared-open';
+    reservation.updatedAt = Date.now();
+    saveSettings();
+  }
+
+  return added;
+}
+
+function checkOwnedSharedActivity() {
+  const s = state();
+  const me = currentIdentity();
+  let added = 0;
+
+  for (const reservation of Object.values(s.reservations)) {
+    if (
+      reservation.mode === 'shared' &&
+      reservation.bookedByIdentityId === me?.id &&
+      reservation.autoFill &&
+      !reservation.locked &&
+      reservation.status !== 'cancelled'
+    ) {
+      added += processAutoFillReservation(reservation.id);
+    }
+  }
+  return added;
+}
+
+function localNpcNamePool(city) {
+  const value = lc(city);
+  if (/paris|france/.test(value)) return ['Camille', 'Julien', 'Manon', 'Théo', 'Léa', 'Hugo', 'Inès', 'Lucas'];
+  if (/santorini|athens|greece|mykonos/.test(value)) return ['Nikos', 'Elena', 'Yannis', 'Sofia', 'Dimitris', 'Maria', 'Kostas', 'Irene'];
+  if (/tokyo|japan/.test(value)) return ['Haru', 'Yuki', 'Ren', 'Aoi', 'Sora', 'Mio', 'Kaito', 'Rin'];
+  if (/rome|italy|milan/.test(value)) return ['Luca', 'Giulia', 'Marco', 'Sofia', 'Matteo', 'Elena', 'Andrea', 'Chiara'];
+  if (/barcelona|madrid|spain/.test(value)) return ['Lucía', 'Mateo', 'Sofía', 'Hugo', 'Paula', 'Álvaro', 'Marta', 'Diego'];
+  return ['Maya', 'Leo', 'Nora', 'Eli', 'Sami', 'Lina', 'Alex', 'Mila'];
+}
+
+function localNpcRef(city, indexSeed = 0) {
+  const s = state();
+  const pool = localNpcNamePool(city);
+  const index = seededInt(`${city}:${indexSeed}`, 0, pool.length - 1);
+  const name = pool[index];
+  const cityKey = lc(city).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'local';
+  const idValue = `local:${cityKey}:${lc(name)}`;
+
+  if (!s.localNpcs[idValue]) {
+    s.localNpcs[idValue] = {
+      id: idValue,
+      kind: 'npc',
+      name,
+      city: norm(city || 'Unknown'),
+      avatar: '',
+      createdAt: Date.now(),
+    };
+  }
+
+  return {
+    kind: 'npc',
+    npcId: idValue,
+    name: s.localNpcs[idValue].name,
+    avatar: s.localNpcs[idValue].avatar || '',
+    city: s.localNpcs[idValue].city,
+  };
+}
+
+function dispatchHostMessage(accommodation, text) {
+  const me = currentIdentity();
+  const to = participantName(accommodation?.host);
+  const clean = String(text || '').trim();
+  if (!me || !to || !clean) return false;
+
+  const action = {
+    type: 'message.send',
+    from: me.name,
+    to,
+    text: clean,
+    expectsReply: true,
+  };
+
+  try {
+    if (typeof phoneApi()?.actionBus?.dispatch === 'function') {
+      return Boolean(phoneApi().actionBus.dispatch(action, {
+        source: GHTE_MODULE,
+        sourceKey: uid('booking-host-message'),
+        roleplayMs: rpNow().getTime(),
+      }));
+    }
+    if (typeof globalThis.GreyhavenLife?.dispatchWorldAction === 'function') {
+      return Boolean(globalThis.GreyhavenLife.dispatchWorldAction(action, {
+        source: GHTE_MODULE,
+        sourceKey: uid('booking-host-message'),
+        roleplayMs: rpNow().getTime(),
+      }));
+    }
+  } catch (error) {
+    console.warn(`[${GHTE_MODULE}] host message`, error);
+  }
+
+  return false;
+}
+
+function itineraryBundlesForCurrent() {
+  const s = state();
+  const me = currentIdentity();
+  const stays = Object.values(s.reservations)
+    .filter(r => participantExists(r.participants, me?.id) && !['cancelled'].includes(r.status))
+    .filter(r => reservationLifecycle(r) !== 'completed')
+    .sort((a, b) => reservationCheckInMs(a) - reservationCheckInMs(b));
+
+  const transport = Object.values(s.transportBookings)
+    .filter(t => participantExists(t.travelers, me?.id) && t.status !== 'cancelled');
+
+  return stays.map(reservation => {
+    const stay = s.accommodations[reservation.accommodationId];
+    const city = stay?.city || '';
+    const checkIn = reservationCheckInMs(reservation);
+    const checkOut = reservationCheckOutMs(reservation);
+
+    const tickets = transport.filter(ticket => {
+      const destinationMatch = lc(ticket.to) === lc(city) && ticket.departureAt >= checkIn - 2 * 86400000 && ticket.departureAt <= checkIn + 86400000;
+      const returnMatch = lc(ticket.from) === lc(city) && ticket.departureAt >= checkOut - 86400000 && ticket.departureAt <= checkOut + 2 * 86400000;
+      return destinationMatch || returnMatch;
+    });
+
+    return { reservation, stay, tickets };
+  });
+}
+
+function processLifecycleReminders() {
+  const s = state();
+  const me = currentIdentity();
+  if (!me) return;
+  const nowMs = rpNow().getTime();
+
+  for (const reservation of Object.values(s.reservations)) {
+    if (!participantExists(reservation.participants, me.id) || reservation.status === 'cancelled') continue;
+
+    const lifecycle = reservationLifecycle(reservation, nowMs);
+    const stay = s.accommodations[reservation.accommodationId];
+    const prefix = `${me.id}:${reservation.id}`;
+
+    if (lifecycle === 'checkin-soon' && !s.reminderFlags[`${prefix}:checkin`]) {
+      s.reminderFlags[`${prefix}:checkin`] = Date.now();
+      globalThis.toastr?.info?.(`Airbnb · Check-in for ${stay?.name || 'your stay'} is within 3 hours.`);
+      saveSettings();
+    }
+
+    if (lifecycle === 'checkout-soon' && !s.reminderFlags[`${prefix}:checkout`]) {
+      s.reminderFlags[`${prefix}:checkout`] = Date.now();
+      globalThis.toastr?.info?.(`Airbnb · Checkout from ${stay?.name || 'your stay'} is within 3 hours.`);
+      saveSettings();
+    }
+  }
 }
 
 /* ---------------- AI discovery ---------------- */
@@ -738,7 +1150,7 @@ function seedCommunityShares() {
   const s = state();
   const search = s.search.stays;
   const me = currentIdentity();
-  const candidates = identities().filter(x => x.id !== me?.id);
+  const existingCandidates = identities().filter(x => x.id !== me?.id);
 
   const stays = availableAccommodations({
     ...search,
@@ -754,22 +1166,28 @@ function seedCommunityShares() {
       r.status === 'shared-open'
     )) continue;
 
-    if (!candidates.length) break;
-
     const maxGuests = Math.min(stay.maxGuests, seededInt(`${stay.id}:capacity`, 2, Math.min(5, stay.maxGuests)));
-    const maxExistingParty = Math.max(1, Math.min(3, maxGuests - 1, candidates.length));
-    const partySize = seededInt(`${Date.now()}:${stay.id}:party`, 1, maxExistingParty);
-    const availablePeople = [...candidates];
     const party = [];
 
-    for (let personIndex = 0; personIndex < partySize; personIndex++) {
-      const pickIndex = seededInt(`${Date.now()}:${stay.id}:${personIndex}`, 0, availablePeople.length - 1);
-      const who = availablePeople.splice(pickIndex, 1)[0];
+    // Destination-local NPCs are allowed in THEIR OWN community bookings.
+    // They are never used by auto-fill for a booking created by the player.
+    party.push(localNpcRef(stay.city, `${stay.id}:${Date.now()}`));
+
+    const remainingBeforeOpenSlot = Math.max(0, maxGuests - party.length - 1);
+    const existingCount = Math.min(
+      remainingBeforeOpenSlot,
+      existingCandidates.length,
+      seededInt(`${stay.id}:existing-party:${Date.now() >> 12}`, 0, Math.min(2, remainingBeforeOpenSlot, existingCandidates.length))
+    );
+    const pool = [...existingCandidates];
+
+    for (let personIndex = 0; personIndex < existingCount; personIndex++) {
+      const pickIndex = seededInt(`${Date.now()}:${stay.id}:${personIndex}`, 0, pool.length - 1);
+      const who = pool.splice(pickIndex, 1)[0];
       if (who) party.push(refForIdentity(who));
     }
-    if (!party.length) break;
 
-    const total = reservationTotal(stay, search.checkIn, search.checkOut, party.length);
+    const total = reservationTotal(stay, search.checkIn, search.checkOut, Math.max(1, party.length));
     const reservationId = uid('community-share');
 
     s.reservations[reservationId] = {
@@ -783,10 +1201,12 @@ function seedCommunityShares() {
       maxGuests,
       total,
       perPerson: Math.ceil(total / party.length),
-      bookedByIdentityId: party[0].identityId,
+      bookedByIdentityId: '',
+      locked: false,
+      autoFill: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      source: 'community-refresh',
+      source: 'community-local',
     };
     created++;
   }
@@ -811,6 +1231,40 @@ async function refreshShared() {
     sharedRefreshBusy = false;
     render();
   }
+}
+
+
+function matchingUserCreatedEvents(city, category = 'all') {
+  const s = state();
+  const nowMs = rpNow().getTime();
+  return Object.values(s.events)
+    .filter(event =>
+      event.source === 'user-created' &&
+      event.startAt >= nowMs &&
+      lc(event.city) === lc(city) &&
+      (category === 'all' || event.category === category)
+    )
+    .sort((a, b) => a.startAt - b.startAt);
+}
+
+function markEventViewed(eventId) {
+  const s = state();
+  const event = s.events[eventId];
+  const me = currentIdentity();
+
+  if (!event || !me || event.ownerIdentityId === me.id || event.source !== 'user-created') return false;
+
+  event.viewers ||= [];
+  if (event.viewers.some(x => x.identityId === me.id)) return false;
+
+  event.viewers.push({
+    identityId: me.id,
+    name: me.name,
+    viewedAt: Date.now(),
+  });
+  event.updatedAt = Date.now();
+  saveSettings();
+  return true;
 }
 
 async function refreshEvents() {
@@ -887,9 +1341,11 @@ Generate the current top event discoveries.`;
       ids.push(event.id);
     }
 
-    s.search.events.lastResultIds = ids;
+    const communityIds = matchingUserCreatedEvents(search.city, search.category)
+      .map(event => event.id);
+
+    s.search.events.lastResultIds = [...new Set([...communityIds, ...ids])].slice(0, 10);
     saveSettings();
-    addViewsToOwnedEvents();
   } catch (error) {
     console.error(`[${GHTE_MODULE}] events refresh`, error);
     globalThis.toastr?.error?.(error.message || 'Event refresh failed.');
@@ -899,31 +1355,6 @@ Generate the current top event discoveries.`;
   }
 }
 
-function addViewsToOwnedEvents() {
-  const s = state();
-  const pool = identities();
-  const me = currentIdentity();
-  let changed = false;
-
-  for (const event of Object.values(s.events)) {
-    if (!me || event.ownerIdentityId !== me.id || event.startAt < rpNow().getTime()) continue;
-    event.viewers ||= [];
-
-    const existingIds = new Set(event.viewers.map(x => x.identityId).filter(Boolean));
-    const candidates = pool.filter(x => x.id !== me.id && !existingIds.has(x.id));
-    const count = Math.min(candidates.length, seededInt(`${event.id}:${Date.now() >> 16}`, 0, 3));
-
-    for (let i = 0; i < count; i++) {
-      const index = seededInt(`${event.id}:${i}:${Date.now()}`, 0, candidates.length - 1);
-      const who = candidates.splice(index, 1)[0];
-      if (who) event.viewers.push({ identityId: who.id, name: who.name, viewedAt: Date.now() });
-    }
-
-    if (count) changed = true;
-  }
-
-  if (changed) saveSettings();
-}
 
 /* ---------------- transport ---------------- */
 
@@ -1145,6 +1576,7 @@ function openApp(name) {
   view = {
     tab: name === 'booking' ? 'stays' : 'discover',
     detailId: '',
+    detailKind: '',
     transportMode: 'flight',
     transportResults: [],
   };
@@ -1153,13 +1585,14 @@ function openApp(name) {
 
 function closeApp() {
   appOpen = '';
-  view = { tab: '', detailId: '' };
+  view = { tab: '', detailId: '', detailKind: '' };
   qs('#ghte-layer')?.remove();
 }
 
 function back() {
   if (view.detailId) {
     view.detailId = '';
+    view.detailKind = '';
     return render();
   }
   closeApp();
@@ -1214,6 +1647,151 @@ function staySearchResults() {
   return availableAccommodations(search).slice(0, 7);
 }
 
+
+function favoriteButton(accommodationId, compact = false) {
+  const saved = isAccommodationFavorite(accommodationId);
+  return `<button type="button" class="ghte-favorite ${saved ? 'saved' : ''} ${compact ? 'compact' : ''}" data-ghte-favorite-stay="${esc(accommodationId)}" aria-label="${saved ? 'Remove from saved' : 'Save stay'}"><i class="${saved ? 'fa-solid' : 'fa-regular'} fa-heart"></i></button>`;
+}
+
+function renderAccommodationDetail(stay) {
+  const s = state();
+  const search = s.search.stays;
+  const total = reservationTotal(stay, search.checkIn, search.checkOut, Number(search.guests || 1));
+  const hostName = participantName(stay.host);
+
+  return `<main class="ghte-main airbnb">
+    <article class="ghte-stay-detail">
+      <div class="ghte-stay-detail-hero ${esc(stay.type)}">
+        <i class="${stayIcon(stay.type)}"></i>
+        ${favoriteButton(stay.id)}
+      </div>
+      <div class="ghte-detail-kicker">${esc(stay.area || stay.city)} · ${esc(stay.type)}${stay.source === 'life-property' ? ' · Greyhaven property' : ''}</div>
+      <h2>${esc(stay.name)}</h2>
+      <div class="ghte-rating-row"><span>${'★'.repeat(Math.max(1, Math.round(stay.quality)))}</span><small>${stay.maxGuests} guests${stay.bedrooms ? ` · ${stay.bedrooms} bedrooms` : ''}${stay.bathrooms ? ` · ${stay.bathrooms} bathrooms` : ''}</small></div>
+      ${stay.address ? `<div class="ghte-detail-fact"><i class="fa-solid fa-location-dot"></i><span>${esc(stay.address)}</span></div>` : ''}
+      <div class="ghte-detail-fact"><i class="fa-solid fa-user"></i><span>Hosted by ${esc(hostName)}</span></div>
+      <p>${esc(stay.description || 'Short-stay accommodation.')}</p>
+      <section class="ghte-price-box"><b>${money(stay.nightlyPrice)} / night</b><span>${money(total)} for ${nightsBetween(search.checkIn, search.checkOut)} night(s) with current search dates</span></section>
+      <div class="ghte-detail-actions">
+        <button type="button" class="ghte-primary airbnb" data-ghte-book-private="${esc(stay.id)}">Reserve</button>
+        ${stay.maxGuests >= 2 ? `<button type="button" data-ghte-book-shared="${esc(stay.id)}">Create shared stay</button>` : ''}
+        <button type="button" data-ghte-message-host="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
+      </div>
+    </article>
+  </main>`;
+}
+
+function sharedParticipantRows(reservation) {
+  const creator = bookingCreatedByCurrent(reservation);
+  return (reservation.participants || []).map(ref => {
+    const name = participantName(ref);
+    const identityId = ref.kind === 'identity' ? ref.identityId : '';
+    const canRemove = creator && reservation.mode === 'shared' && identityId && identityId !== reservation.bookedByIdentityId;
+    return `<div class="ghte-participant-row">
+      <span class="ghte-person">${avatar(ref, 'small')}<b>${esc(name)}</b>${identityId === reservation.bookedByIdentityId ? '<small>Creator</small>' : ''}</span>
+      ${canRemove ? `<button type="button" data-ghte-remove-participant="${esc(identityId)}" data-reservation-id="${esc(reservation.id)}"><i class="fa-solid fa-user-minus"></i></button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderReservationDetail(reservation) {
+  const s = state();
+  const stay = s.accommodations[reservation.accommodationId];
+  if (!stay) return empty('fa-solid fa-triangle-exclamation', 'Stay missing', 'The accommodation record is unavailable.');
+
+  const creator = bookingCreatedByCurrent(reservation);
+  const lifecycle = reservationLifecycle(reservation);
+  const spots = Math.max(0, reservation.maxGuests - reservation.participants.length);
+  const canDelete = ['cancelled', 'completed'].includes(lifecycle) && creator;
+
+  return `<main class="ghte-main airbnb">
+    <article class="ghte-booking-detail">
+      <button type="button" class="ghte-booking-stay-link" data-ghte-stay-detail="${esc(stay.id)}">
+        <span class="ghte-mini-stay-icon ${esc(stay.type)}"><i class="${stayIcon(stay.type)}"></i></span>
+        <span><small>${esc(stay.city)} · ${esc(stay.type)}</small><b>${esc(stay.name)}</b></span>
+        <i class="fa-solid fa-chevron-right"></i>
+      </button>
+
+      <div class="ghte-status-line ${esc(lifecycle)}"><i class="fa-solid fa-circle"></i><b>${esc(lifecycleLabel(lifecycle))}</b></div>
+
+      <section class="ghte-booking-facts">
+        <div><small>Check in</small><b>${esc(reservation.checkIn)} · 15:00</b></div>
+        <div><small>Check out</small><b>${esc(reservation.checkOut)} · 11:00</b></div>
+        <div><small>Booking</small><b>${esc(reservation.mode === 'shared' ? 'Shared stay' : 'Private stay')}</b></div>
+        <div><small>Price</small><b>${reservation.mode === 'shared' ? `${money(reservation.perPerson)} each` : money(reservation.total)}</b></div>
+      </section>
+
+      <section class="ghte-booking-section">
+        <div class="ghte-section-row"><b>Guests</b>${reservation.mode === 'shared' ? `<small>${spots} open spot${spots === 1 ? '' : 's'}</small>` : ''}</div>
+        <div class="ghte-participants">${sharedParticipantRows(reservation)}</div>
+      </section>
+
+      ${reservation.mode === 'shared' && creator && reservation.status !== 'cancelled' ? `
+        <section class="ghte-booking-section">
+          <div class="ghte-section-row"><b>Shared booking controls</b><small>${reservation.locked ? 'Locked' : 'Open'}</small></div>
+          <div class="ghte-shared-controls">
+            <button type="button" data-ghte-toggle-lock="${esc(reservation.id)}"><i class="fa-solid ${reservation.locked ? 'fa-lock' : 'fa-lock-open'}"></i> ${reservation.locked ? 'Unlock booking' : 'Lock booking'}</button>
+            <label class="ghte-autofill-toggle"><span><b>Auto-fill open spots</b><small>Only existing Greyhaven characters can join automatically. Local NPCs never auto-join your booking.</small></span><input type="checkbox" data-ghte-auto-fill="${esc(reservation.id)}" ${reservation.autoFill ? 'checked' : ''} ${reservation.locked ? 'disabled' : ''}></label>
+            ${reservation.autoFill && !reservation.locked && spots > 0 ? `<button type="button" data-ghte-check-one-share="${esc(reservation.id)}"><i class="fa-solid fa-arrows-rotate"></i> Check for a new join</button>` : ''}
+          </div>
+        </section>` : ''}
+
+      <section class="ghte-booking-section">
+        <div class="ghte-section-row"><b>Host</b><small>${esc(participantName(stay.host))}</small></div>
+        <button type="button" class="ghte-wide-secondary" data-ghte-message-host="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
+      </section>
+
+      <div class="ghte-danger-zone">
+        ${reservation.mode === 'shared' && !bookingOwnedByCurrent(reservation) && reservation.status === 'shared-open' && !reservation.locked ? `<button type="button" class="ghte-join-detail" data-ghte-join-share="${esc(reservation.id)}">Join this shared booking</button>` : ''}
+        ${reservation.mode === 'shared' && bookingOwnedByCurrent(reservation) && !creator && lifecycle !== 'cancelled' ? `<button type="button" data-ghte-leave-share="${esc(reservation.id)}">Leave shared booking</button>` : ''}
+        ${creator && lifecycle !== 'cancelled' && lifecycle !== 'completed' ? `<button type="button" data-ghte-cancel-reservation="${esc(reservation.id)}">Cancel reservation</button>` : ''}
+        ${canDelete ? `<button type="button" class="danger" data-ghte-delete-reservation="${esc(reservation.id)}">Delete booking record</button>` : ''}
+      </div>
+    </article>
+  </main>`;
+}
+
+function renderTransportDetail(booking) {
+  const lifecycle = booking.status === 'cancelled' ? 'Cancelled' : booking.arrivalAt <= rpNow().getTime() ? 'Completed' : 'Upcoming';
+  const creator = booking.bookedByIdentityId === currentIdentity()?.id;
+  const canDelete = creator && (booking.status === 'cancelled' || booking.arrivalAt <= rpNow().getTime());
+
+  return `<main class="ghte-main airbnb">
+    <article class="ghte-booking-detail">
+      <div class="ghte-transport-detail-head">
+        <span class="ghte-transport-icon"><i class="${booking.mode === 'flight' ? 'fa-solid fa-plane' : booking.mode === 'ferry' ? 'fa-solid fa-ship' : 'fa-solid fa-bus'}"></i></span>
+        <div><small>${esc(booking.mode)}</small><h2>${esc(booking.operator)}</h2></div>
+      </div>
+      <div class="ghte-status-line"><i class="fa-solid fa-circle"></i><b>${lifecycle}</b></div>
+      <section class="ghte-booking-facts">
+        <div><small>From</small><b>${esc(booking.from)}</b></div>
+        <div><small>To</small><b>${esc(booking.to)}</b></div>
+        <div><small>Departure</small><b>${new Date(booking.departureAt).toLocaleString()}</b></div>
+        <div><small>Arrival</small><b>${new Date(booking.arrivalAt).toLocaleString()}</b></div>
+      </section>
+      <section class="ghte-booking-section"><div class="ghte-section-row"><b>Travelers</b><small>${money(booking.total)}</small></div>${sharedParticipantRows({participants:booking.travelers,bookedByIdentityId:booking.bookedByIdentityId,id:booking.id})}</section>
+      <div class="ghte-danger-zone">
+        ${creator && booking.status !== 'cancelled' && booking.arrivalAt > rpNow().getTime() ? `<button type="button" data-ghte-cancel-transport="${esc(booking.id)}">Cancel tickets</button>` : ''}
+        ${canDelete ? `<button type="button" class="danger" data-ghte-delete-transport="${esc(booking.id)}">Delete ticket record</button>` : ''}
+      </div>
+    </article>
+  </main>`;
+}
+
+function renderSavedStays() {
+  const rows = savedAccommodations();
+  return `<main class="ghte-main airbnb">
+    <div class="ghte-section-heading"><div><b>Saved stays</b><small>Favorites stay here even after you refresh search results.</small></div></div>
+    ${rows.length ? rows.map(stay => `<article class="ghte-saved-row">
+      <button type="button" data-ghte-stay-detail="${esc(stay.id)}">
+        <span class="ghte-mini-stay-icon ${esc(stay.type)}"><i class="${stayIcon(stay.type)}"></i></span>
+        <span><small>${esc(stay.city)} · ${esc(stay.type)}</small><b>${esc(stay.name)}</b><em>${money(stay.nightlyPrice)} / night</em></span>
+      </button>
+      ${favoriteButton(stay.id, true)}
+    </article>`).join('') : empty('fa-regular fa-heart', 'Nothing saved yet', 'Tap the heart on a stay you want to keep.')}
+  </main>`;
+}
+
 function renderStays() {
   const s = state();
   const search = s.search.stays;
@@ -1248,15 +1826,18 @@ function renderStays() {
     ${results.length ? results.map(stay => {
       const total = reservationTotal(stay, search.checkIn, search.checkOut, Number(search.guests || 1));
       return `<article class="ghte-stay-card">
-        <div class="ghte-stay-photo ${esc(stay.type)}"><i class="${stayIcon(stay.type)}"></i><span>${stay.source === 'life-property' ? 'Greyhaven property' : `${stay.quality}★`}</span></div>
-        <div class="ghte-stay-info">
-          <small>${esc(stay.area || stay.city)} · ${esc(stay.type)}</small>
-          <b>${esc(stay.name)}</b>
-          <p>${esc(stay.description || '')}</p>
-          <span>${stay.maxGuests} guests${stay.bedrooms ? ` · ${stay.bedrooms} bedrooms` : ''}</span>
-          <strong>${money(stay.nightlyPrice)} night · ${money(total)} total</strong>
-        </div>
+        <button type="button" class="ghte-stay-open" data-ghte-stay-detail="${esc(stay.id)}">
+          <div class="ghte-stay-photo ${esc(stay.type)}"><i class="${stayIcon(stay.type)}"></i><span>${stay.source === 'life-property' ? 'Greyhaven property' : `${stay.quality}★`}</span></div>
+          <div class="ghte-stay-info">
+            <small>${esc(stay.area || stay.city)} · ${esc(stay.type)}</small>
+            <b>${esc(stay.name)}</b>
+            <p>${esc(stay.description || '')}</p>
+            <span>${stay.maxGuests} guests${stay.bedrooms ? ` · ${stay.bedrooms} bedrooms` : ''}</span>
+            <strong>${money(stay.nightlyPrice)} night · ${money(total)} total</strong>
+          </div>
+        </button>
         <div class="ghte-card-actions">
+          ${favoriteButton(stay.id, true)}
           <button type="button" data-ghte-book-private="${esc(stay.id)}">Reserve</button>
           ${stay.maxGuests >= 2 ? `<button type="button" data-ghte-book-shared="${esc(stay.id)}" class="outline">Share</button>` : ''}
         </div>
@@ -1273,23 +1854,25 @@ function renderShared() {
   return `<main class="ghte-main airbnb">
     <section class="ghte-shared-intro">
       <i class="fa-solid fa-people-group"></i>
-      <div><b>Shared stays</b><span>Real open bookings from other Greyhaven phones. Nobody joins automatically.</span></div>
+      <div><b>Shared stays</b><span>Open bookings from Greyhaven characters and destination locals.</span></div>
       <button type="button" data-ghte-refresh-shared>${sharedRefreshBusy ? 'Checking…' : 'Refresh community'}</button>
     </section>
 
-    <p class="ghte-explainer">If Jack opens a shared booking and leaves empty slots, Aurora can switch to her own phone, open Airbnb and see Jack here. Joining is always an explicit tap.</p>
+    <p class="ghte-explainer">Manual cross-phone joining still works exactly as before. Local NPCs can host their own shared stays, but they never auto-join a booking you created.</p>
 
     ${rows.length ? rows.map(r => {
       const stay = s.accommodations[r.accommodationId];
       if (!stay) return '';
       const slots = Math.max(0, r.maxGuests - r.participants.length);
       return `<article class="ghte-share-card">
-        <div class="ghte-share-top">
-          <div><small>${esc(stay.city)} · ${esc(stay.type)}</small><b>${esc(stay.name)}</b></div>
-          <strong>${slots} open</strong>
-        </div>
-        <div class="ghte-share-people">${participantStack(r.participants)}<span>${r.participants.map(participantName).join(', ')}</span></div>
-        <small>${esc(r.checkIn)} → ${esc(r.checkOut)} · ${money(r.perPerson)} each right now</small>
+        <button type="button" class="ghte-share-open" data-ghte-reservation-detail="${esc(r.id)}">
+          <div class="ghte-share-top">
+            <div><small>${esc(stay.city)} · ${esc(stay.type)}</small><b>${esc(stay.name)}</b></div>
+            <strong>${slots} open</strong>
+          </div>
+          <div class="ghte-share-people">${participantStack(r.participants)}<span>${r.participants.map(participantName).join(', ')}</span></div>
+          <small>${esc(r.checkIn)} → ${esc(r.checkOut)} · ${money(r.perPerson)} each right now</small>
+        </button>
         <button type="button" data-ghte-join-share="${esc(r.id)}" class="ghte-primary airbnb">Join this booking</button>
       </article>`;
     }).join('') : empty('fa-solid fa-people-arrows', 'No open shared stays', 'Create one from a stay, switch phones, or deliberately refresh the community pool.')}
@@ -1326,49 +1909,93 @@ function renderTrips() {
   const s = state();
   const me = currentIdentity();
 
-  const stays = Object.values(s.reservations)
-    .filter(r => participantExists(r.participants, me?.id) && r.status !== 'cancelled')
+  const allStays = Object.values(s.reservations)
+    .filter(r => participantExists(r.participants, me?.id))
     .sort((a, b) => b.createdAt - a.createdAt);
 
-  const transport = Object.values(s.transportBookings)
-    .filter(r => participantExists(r.travelers, me?.id) && r.status !== 'cancelled')
+  const activeStays = allStays.filter(r => !['cancelled', 'completed'].includes(reservationLifecycle(r)));
+  const historyStays = allStays.filter(r => ['cancelled', 'completed'].includes(reservationLifecycle(r)));
+
+  const allTransport = Object.values(s.transportBookings)
+    .filter(r => participantExists(r.travelers, me?.id))
     .sort((a, b) => b.createdAt - a.createdAt);
+
+  const activeTransport = allTransport.filter(r => r.status !== 'cancelled' && r.arrivalAt > rpNow().getTime());
+  const historyTransport = allTransport.filter(r => r.status === 'cancelled' || r.arrivalAt <= rpNow().getTime());
+  const itineraries = itineraryBundlesForCurrent();
+  const ownsAutofill = activeStays.some(r => bookingCreatedByCurrent(r) && r.mode === 'shared' && r.autoFill && !r.locked && r.status !== 'cancelled');
+
+  const stayCard = r => {
+    const stay = s.accommodations[r.accommodationId];
+    const lifecycle = reservationLifecycle(r);
+    return `<button type="button" class="ghte-trip-card clickable" data-ghte-reservation-detail="${esc(r.id)}">
+      <div><b>${esc(stay?.name || 'Stay')}</b><small>${esc(r.checkIn)} → ${esc(r.checkOut)} · ${esc(r.mode)} · ${esc(lifecycleLabel(lifecycle))}</small></div>
+      ${participantStack(r.participants)}
+      <strong>${r.mode === 'shared' ? `${money(r.perPerson)} each` : money(r.total)}</strong>
+      <i class="fa-solid fa-chevron-right"></i>
+    </button>`;
+  };
+
+  const transportCard = r => `<button type="button" class="ghte-trip-card clickable" data-ghte-transport-detail="${esc(r.id)}">
+    <div><b>${esc(r.operator)} · ${esc(r.mode)}</b><small>${esc(r.from)} → ${esc(r.to)} · ${new Date(r.departureAt).toLocaleString()}</small></div>
+    ${participantStack(r.travelers)}
+    <strong>${money(r.total)}</strong>
+    <i class="fa-solid fa-chevron-right"></i>
+  </button>`;
 
   return `<main class="ghte-main airbnb">
+    ${ownsAutofill ? `<button type="button" class="ghte-check-activity" data-ghte-check-shared-activity><i class="fa-solid fa-arrows-rotate"></i> Check shared activity</button>` : ''}
+
+    ${itineraries.length ? `<h3 class="ghte-title">Trip plans</h3>${itineraries.map(bundle => `<button type="button" class="ghte-itinerary-card" data-ghte-reservation-detail="${esc(bundle.reservation.id)}">
+      <span class="ghte-itinerary-icon"><i class="fa-solid fa-route"></i></span>
+      <span><small>${esc(bundle.reservation.checkIn)} → ${esc(bundle.reservation.checkOut)}</small><b>${esc(bundle.stay?.city || bundle.stay?.name || 'Trip')}</b><em>${esc(bundle.stay?.name || '')}${bundle.tickets.length ? ` · ${bundle.tickets.length} linked ticket${bundle.tickets.length === 1 ? '' : 's'}` : ''}</em></span>
+      <i class="fa-solid fa-chevron-right"></i>
+    </button>`).join('')}` : ''}
+
     <h3 class="ghte-title">Stays</h3>
-    ${stays.length ? stays.map(r => {
-      const stay = s.accommodations[r.accommodationId];
-      return `<article class="ghte-trip-card">
-        <div><b>${esc(stay?.name || 'Stay')}</b><small>${esc(r.checkIn)} → ${esc(r.checkOut)} · ${esc(r.mode)}</small></div>
-        ${participantStack(r.participants)}
-        <strong>${r.mode === 'shared' ? `${money(r.perPerson)} each` : money(r.total)}</strong>
-        ${r.mode === 'shared' ? `<button type="button" data-ghte-leave-share="${esc(r.id)}">Leave shared stay</button>` : ''}
-      </article>`;
-    }).join('') : '<small class="ghte-muted">No booked stays.</small>'}
+    ${activeStays.length ? activeStays.map(stayCard).join('') : '<small class="ghte-muted">No active stays.</small>'}
 
     <h3 class="ghte-title">Travel tickets</h3>
-    ${transport.length ? transport.map(r => `<article class="ghte-trip-card">
-      <div><b>${esc(r.operator)} · ${esc(r.mode)}</b><small>${esc(r.from)} → ${esc(r.to)} · ${new Date(r.departureAt).toLocaleString()}</small></div>
-      ${participantStack(r.travelers)}
-      <strong>${money(r.total)}</strong>
-    </article>`).join('') : '<small class="ghte-muted">No booked transport.</small>'}
+    ${activeTransport.length ? activeTransport.map(transportCard).join('') : '<small class="ghte-muted">No active transport.</small>'}
+
+    ${(historyStays.length || historyTransport.length) ? `<details class="ghte-history">
+      <summary>Past & cancelled</summary>
+      <div>${historyStays.map(stayCard).join('')}${historyTransport.map(transportCard).join('')}</div>
+    </details>` : ''}
   </main>`;
 }
 
 function renderBooking() {
+  if (view.detailId) {
+    if (view.detailKind === 'stay') {
+      const stay = state().accommodations[view.detailId];
+      return `<div class="ghte-screen">${appHeader('Airbnb', 'Stay details', 'airbnb')}${stay ? renderAccommodationDetail(stay) : empty('fa-solid fa-house', 'Stay unavailable', 'This accommodation no longer exists.')}</div>`;
+    }
+    if (view.detailKind === 'reservation') {
+      const reservation = state().reservations[view.detailId];
+      return `<div class="ghte-screen">${appHeader('Airbnb', 'Trip details', 'airbnb')}${reservation ? renderReservationDetail(reservation) : empty('fa-solid fa-suitcase', 'Booking unavailable', 'This reservation no longer exists.')}</div>`;
+    }
+    if (view.detailKind === 'transport') {
+      const booking = state().transportBookings[view.detailId];
+      return `<div class="ghte-screen">${appHeader('Airbnb', 'Ticket details', 'airbnb')}${booking ? renderTransportDetail(booking) : empty('fa-solid fa-ticket', 'Ticket unavailable', 'This booking no longer exists.')}</div>`;
+    }
+  }
+
   const tab = view.tab || 'stays';
   let body = '';
   if (tab === 'shared') body = renderShared();
   else if (tab === 'transport') body = renderTransport();
   else if (tab === 'trips') body = renderTrips();
+  else if (tab === 'saved') body = renderSavedStays();
   else body = renderStays();
 
   return `<div class="ghte-screen">
     ${appHeader('Airbnb', 'Greyhaven Booking', 'airbnb')}
-    ${tabs([['stays','Stays'], ['shared','Shared'], ['transport','Travel'], ['trips','Trips']], tab)}
+    ${tabs([['stays','Stays'], ['shared','Shared'], ['transport','Travel'], ['trips','Trips'], ['saved','Saved']], tab)}
     ${body}
   </div>`;
 }
+
 
 function categoryLabel(category) {
   return {
@@ -1400,7 +2027,7 @@ function renderEventDetail(event) {
       <div class="ghte-event-fact"><i class="fa-solid fa-user"></i><span>${esc(participantName(event.organizer))}</span></div>
       <div class="ghte-event-fact"><i class="fa-solid fa-ticket"></i><span>${event.price ? money(event.price) : 'Free'}</span></div>
       <p>${esc(event.description)}</p>
-      ${owner ? `<section class="ghte-viewers"><b>Viewed your event</b>${viewers.length ? `<div>${participantStack(viewers, 8)}<span>${viewers.map(participantName).join(', ')}</span></div>` : '<small>No tracked viewers yet. Refresh Eventbrite later to simulate discovery.</small>'}</section>` : ''}
+      ${owner ? `<section class="ghte-viewers"><b>Viewed your event</b>${viewers.length ? `<div>${participantStack(viewers, 8)}<span>${viewers.map(participantName).join(', ')}</span></div>` : '<small>No tracked viewers yet. They appear when another Greyhaven phone discovers and opens this event.</small>'}</section>` : ''}
       <p class="ghte-explainer">Viewing this page does not automatically give other characters knowledge of this event. Tell them in RP if you want them to know.</p>
     </article>
   </main>`;
@@ -1525,6 +2152,19 @@ function identityCheckboxes(excludeCurrent = true) {
     .join('');
 }
 
+
+function hostMessageDialog(accommodationId) {
+  const stay = state().accommodations[accommodationId];
+  if (!stay) return;
+
+  openDialog(`<form method="dialog" data-ghte-host-message-form data-id="${esc(stay.id)}">
+    <header><b>Message ${esc(participantName(stay.host))}</b><button type="button" data-ghte-dialog-close><i class="fa-solid fa-xmark"></i></button></header>
+    <p><small>About ${esc(stay.name)} · ${esc(stay.city)}</small></p>
+    <label>Message<textarea name="text" required placeholder="Hi! I had a question about the stay…"></textarea></label>
+    <button class="ghte-primary airbnb" type="submit">Send message</button>
+  </form>`);
+}
+
 function reservationDialog(accommodationId, shared = false) {
   const s = state();
   const stay = s.accommodations[accommodationId];
@@ -1608,6 +2248,31 @@ function handleClick(event) {
 
   if (button.matches('[data-ghte-refresh-stays]')) return refreshStays();
 
+  if (button.dataset.ghteStayDetail) {
+    view.detailId = button.dataset.ghteStayDetail;
+    view.detailKind = 'stay';
+    return render();
+  }
+
+  if (button.dataset.ghteReservationDetail) {
+    view.detailId = button.dataset.ghteReservationDetail;
+    view.detailKind = 'reservation';
+    return render();
+  }
+
+  if (button.dataset.ghteTransportDetail) {
+    view.detailId = button.dataset.ghteTransportDetail;
+    view.detailKind = 'transport';
+    return render();
+  }
+
+  if (button.dataset.ghteFavoriteStay) {
+    toggleAccommodationFavorite(button.dataset.ghteFavoriteStay);
+    return render();
+  }
+
+  if (button.dataset.ghteMessageHost) return hostMessageDialog(button.dataset.ghteMessageHost);
+
   if (button.dataset.ghteBookPrivate) return reservationDialog(button.dataset.ghteBookPrivate, false);
   if (button.dataset.ghteBookShared) return reservationDialog(button.dataset.ghteBookShared, true);
 
@@ -1631,6 +2296,97 @@ function handleClick(event) {
     return;
   }
 
+  if (button.dataset.ghteToggleLock) {
+    try {
+      const reservation = state().reservations[button.dataset.ghteToggleLock];
+      lockSharedReservation(reservation.id, !reservation.locked);
+      render();
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
+  if (button.dataset.ghteCheckOneShare) {
+    try {
+      const added = processAutoFillReservation(button.dataset.ghteCheckOneShare, { forceOne: true });
+      globalThis.toastr?.info?.(added ? 'A Greyhaven character joined the shared stay.' : 'No new join this time.');
+      render();
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
+  if (button.matches('[data-ghte-check-shared-activity]')) {
+    const added = checkOwnedSharedActivity();
+    globalThis.toastr?.info?.(added ? `${added} new shared-stay join${added === 1 ? '' : 's'}.` : 'No new shared-stay joins this time.');
+    return render();
+  }
+
+  if (button.dataset.ghteRemoveParticipant) {
+    if (!confirm('Remove this person from the shared booking?')) return;
+    try {
+      removeSharedParticipant(button.dataset.reservationId, button.dataset.ghteRemoveParticipant);
+      render();
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
+  if (button.dataset.ghteCancelReservation) {
+    if (!confirm('Cancel this entire reservation for everyone in it?')) return;
+    try {
+      cancelReservation(button.dataset.ghteCancelReservation);
+      globalThis.toastr?.success?.('Reservation cancelled.');
+      render();
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
+  if (button.dataset.ghteDeleteReservation) {
+    if (!confirm('Permanently delete this cancelled/completed booking record?')) return;
+    try {
+      deleteReservationRecord(button.dataset.ghteDeleteReservation);
+      view.detailId = '';
+      view.detailKind = '';
+      view.tab = 'trips';
+      render();
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
+  if (button.dataset.ghteCancelTransport) {
+    if (!confirm('Cancel these travel tickets?')) return;
+    try {
+      cancelTransportBooking(button.dataset.ghteCancelTransport);
+      globalThis.toastr?.success?.('Tickets cancelled.');
+      render();
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
+  if (button.dataset.ghteDeleteTransport) {
+    if (!confirm('Permanently delete this cancelled/completed ticket record?')) return;
+    try {
+      deleteTransportBooking(button.dataset.ghteDeleteTransport);
+      view.detailId = '';
+      view.detailKind = '';
+      view.tab = 'trips';
+      render();
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
   if (button.matches('[data-ghte-refresh-shared]')) return refreshShared();
 
   if (button.dataset.ghteTransportMode) {
@@ -1644,6 +2400,7 @@ function handleClick(event) {
   }
 
   if (button.dataset.ghteEvent) {
+    markEventViewed(button.dataset.ghteEvent);
     view.detailId = button.dataset.ghteEvent;
     return render();
   }
@@ -1710,6 +2467,20 @@ function handleDialogSubmit(event) {
   const fd = new FormData(form);
 
   try {
+    if (form.matches('[data-ghte-host-message-form]')) {
+      const stay = state().accommodations[form.dataset.id];
+      if (!stay) throw new Error('Stay is unavailable.');
+      const text = String(fd.get('text') || '').trim();
+      if (!text) throw new Error('Write a message first.');
+
+      const sent = dispatchHostMessage(stay, text);
+      if (!sent) throw new Error('Could not open the host conversation through Greyhaven Phone.');
+
+      form.closest('dialog')?.close();
+      globalThis.toastr?.success?.(`Message sent to ${participantName(stay.host)}.`);
+      return;
+    }
+
     if (form.matches('[data-ghte-reservation-form]')) {
       const shared = form.dataset.mode === 'shared';
       const participantIds = shared ? [] : fd.getAll('identityId').map(String);
@@ -1770,6 +2541,17 @@ function handleDialogSubmit(event) {
 }
 
 function handleChange(event) {
+  if (event.target.matches?.('[data-ghte-auto-fill]')) {
+    try {
+      setSharedAutoFill(event.target.dataset.ghteAutoFill, event.target.checked);
+      render();
+    } catch (error) {
+      event.target.checked = !event.target.checked;
+      globalThis.toastr?.error?.(error.message);
+    }
+    return;
+  }
+
   if (event.target.matches?.('[data-ghte-events-toggle]')) {
     setEventsInstalled(event.target.checked);
     injectHomeIcons();
@@ -1792,6 +2574,7 @@ function syncUi() {
   syncAppDefaults();
   injectHomeIcons();
   injectSettingsToggle();
+  processLifecycleReminders();
 
   const overlay = qs('#ghp-overlay');
   if (!overlay || overlay.hidden) {

@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.5.0';
+const GHLA_VERSION = '2.6.0';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -94,6 +94,9 @@ function state() {
   if (!s.market.vehicleRefresh || typeof s.market.vehicleRefresh !== 'object') s.market.vehicleRefresh = { lastAt: 0, city: 'Greyhaven', type: 'all', mode: 'all' };
   if (!['all', 'sale', 'rent'].includes(s.market.vehicleRefresh.mode)) s.market.vehicleRefresh.mode = 'all';
   if (!s.market.propertyRefresh || typeof s.market.propertyRefresh !== 'object') s.market.propertyRefresh = { lastAt: 0, city: 'Greyhaven', type: 'all', mode: 'all' };
+  if (!s.favorites || typeof s.favorites !== 'object' || Array.isArray(s.favorites)) s.favorites = {};
+  if (!s.favorites.vehicles || typeof s.favorites.vehicles !== 'object' || Array.isArray(s.favorites.vehicles)) s.favorites.vehicles = {};
+  if (!s.favorites.properties || typeof s.favorites.properties !== 'object' || Array.isArray(s.favorites.properties)) s.favorites.properties = {};
 
   return s;
 }
@@ -334,6 +337,37 @@ function normalizeAll() {
   for (const [key, value] of Object.entries(s.properties)) s.properties[key] = normalizeProperty({ ...value, id: key });
 
   return s;
+}
+
+
+function favoriteAssetIds(kind, identityId = currentIdentity()?.id) {
+  const s = state();
+  if (!s || !identityId || !['vehicles', 'properties'].includes(kind)) return [];
+  if (!Array.isArray(s.favorites[kind][identityId])) s.favorites[kind][identityId] = [];
+  return s.favorites[kind][identityId];
+}
+
+function isAssetFavorite(kind, assetId) {
+  return favoriteAssetIds(kind).includes(assetId);
+}
+
+function toggleAssetFavorite(kind, assetId) {
+  const s = normalizeAll();
+  const me = currentIdentity();
+  const store = kind === 'vehicles' ? s.vehicles : kind === 'properties' ? s.properties : null;
+  if (!me || !store?.[assetId]) return false;
+
+  const list = favoriteAssetIds(kind, me.id);
+  const index = list.indexOf(assetId);
+  if (index >= 0) list.splice(index, 1);
+  else list.unshift(assetId);
+  saveSettings();
+  return index < 0;
+}
+
+function lifeFavoriteButton(kind, assetId) {
+  const saved = isAssetFavorite(kind, assetId);
+  return `<button type="button" class="ghla-favorite ${saved ? 'saved' : ''}" data-ghla-favorite-kind="${esc(kind)}" data-ghla-favorite-id="${esc(assetId)}" title="${saved ? 'Remove from saved' : 'Save'}"><i class="${saved ? 'fa-solid' : 'fa-regular'} fa-heart"></i></button>`;
 }
 
 function putVehicle(v) {
@@ -1971,6 +2005,7 @@ function renderGarage() {
       <section class="ghla-hero-card">
         <i class="${v.type === 'motorcycle' ? 'fa-solid fa-motorcycle' : v.type === 'boat' ? 'fa-solid fa-sailboat' : v.type === 'airplane' ? 'fa-solid fa-plane' : 'fa-solid fa-car-side'}"></i>
         <div><h2>${esc(vehicleTitle(v))}</h2><span>${esc(v.color || v.type)} · ${esc(v.condition)}</span></div>
+        ${lifeFavoriteButton('vehicles', v.id)}
       </section>
       <div class="ghla-facts">
         <div><small>Owner</small>${personChip(v.owner)}</div>
@@ -2035,12 +2070,30 @@ function renderGarage() {
           <div class="ghla-market-main"><b>${esc(vehicleTitle(v))}</b><small>${esc(l.city)} · ${esc(ownerName(v.owner))}</small><p>${esc(l.description || v.notes || '')}</p></div>
           <strong>${l.mode === 'rent' ? `${money(l.dailyRate)}/day` : money(l.price)}</strong>
           <div class="ghla-market-actions">
+            ${lifeFavoriteButton('vehicles', v.id)}
             <button type="button" data-ghla-message-vehicle="${esc(l.id)}">Message</button>
             ${l.mode === 'sale' ? `<button type="button" data-ghla-buy-vehicle="${esc(l.id)}">Buy</button>` : `<button type="button" data-ghla-rent-vehicle="${esc(l.id)}">Rent</button>`}
             ${l.sellerIdentityId === me?.id ? `<button type="button" data-ghla-complete-vehicle-sale="${esc(l.id)}">${l.mode === 'sale' ? 'Complete sale' : 'Manage'}</button>` : ''}
           </div>
         </article>`;
       }).join('') : emptyState('fa-solid fa-store', 'No market listings', 'Refresh to discover realistic vehicles from the wider world.')}
+    </main>`;
+  } else if (tab === 'saved') {
+    const rows = favoriteAssetIds('vehicles')
+      .map(idValue => s.vehicles[idValue])
+      .filter(Boolean)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+
+    body = `<main>
+      <h3 class="ghla-section-title">Saved vehicles</h3>
+      ${rows.length ? rows.map(v => `<div class="ghla-saved-asset">
+        <button type="button" class="ghla-row" data-ghla-vehicle="${esc(v.id)}">
+          <i class="${v.type === 'motorcycle' ? 'fa-solid fa-motorcycle' : v.type === 'boat' ? 'fa-solid fa-sailboat' : v.type === 'airplane' ? 'fa-solid fa-plane' : 'fa-solid fa-car-side'}"></i>
+          <span><b>${esc(vehicleTitle(v))}</b><small>${esc(ownerName(v.owner))} · ${esc(v.condition)}</small></span>
+          <i class="fa-solid fa-chevron-right"></i>
+        </button>
+        ${lifeFavoriteButton('vehicles', v.id)}
+      </div>`).join('') : emptyState('fa-regular fa-heart', 'No saved vehicles', 'Heart a vehicle in Market or its detail page to keep it here.')}
     </main>`;
   } else if (tab === 'rentals') {
     const rows = Object.values(s.vehicleRentals)
@@ -2077,7 +2130,7 @@ function renderGarage() {
 
   return `<div class="ghla-screen">
     ${lifeHeader('Garage', 'Vehicles & mobility')}
-    ${tabs([['owned', 'My vehicles'], ['market', 'Market'], ['rentals', 'Rentals'], ['service', 'Service']], tab)}
+    ${tabs([['owned', 'My vehicles'], ['market', 'Market'], ['saved', 'Saved'], ['rentals', 'Rentals'], ['service', 'Service']], tab)}
     ${body}
   </div>`;
 }
@@ -2101,6 +2154,7 @@ function renderProperty() {
       <section class="ghla-hero-card property">
         <i class="${p.type === 'land' ? 'fa-solid fa-map' : p.type === 'business' ? 'fa-solid fa-building' : p.type === 'villa' ? 'fa-solid fa-house-chimney-window' : 'fa-solid fa-house'}"></i>
         <div><h2>${esc(p.name)}</h2><span>${esc(propertySubtitle(p))}</span></div>
+        ${lifeFavoriteButton('properties', p.id)}
       </section>
       <div class="ghla-facts">
         <div><small>Owner</small>${personChip(p.owner)}</div>
@@ -2159,12 +2213,30 @@ function renderProperty() {
           <div class="ghla-market-main"><b>${esc(p.name)}</b><small>${esc(propertySubtitle(p))} · ${esc(ownerName(p.owner))}</small><p>${esc(l.description || p.description || '')}</p>${l.agencyName ? `<small>Listed by ${esc(l.agencyName)}</small>` : ''}</div>
           <strong>${l.mode === 'rent' ? `${money(l.monthlyRent)}/mo` : money(l.price)}</strong>
           <div class="ghla-market-actions">
+            ${lifeFavoriteButton('properties', p.id)}
             <button type="button" data-ghla-message-property="${esc(l.id)}">Message</button>
             ${l.mode === 'sale' ? `<button type="button" data-ghla-buy-property="${esc(l.id)}">Buy</button>` : `<button type="button" data-ghla-rent-property="${esc(l.id)}">Rent</button>`}
             ${l.sellerIdentityId === me?.id && l.mode === 'sale' ? `<button type="button" data-ghla-complete-property-sale="${esc(l.id)}">Complete sale</button>` : ''}
           </div>
         </article>`;
       }).join('') : emptyState('fa-solid fa-building-circle-check', 'No property listings', 'Search Greyhaven or another city to discover persistent places.')}
+    </main>`;
+  } else if (tab === 'saved') {
+    const rows = favoriteAssetIds('properties')
+      .map(idValue => s.properties[idValue])
+      .filter(Boolean)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+
+    body = `<main>
+      <h3 class="ghla-section-title">Saved properties</h3>
+      ${rows.length ? rows.map(p => `<div class="ghla-saved-asset">
+        <button type="button" class="ghla-row" data-ghla-property="${esc(p.id)}">
+          <i class="${p.type === 'land' ? 'fa-solid fa-map' : p.type === 'business' ? 'fa-solid fa-building' : 'fa-solid fa-house'}"></i>
+          <span><b>${esc(p.name)}</b><small>${esc(propertySubtitle(p))} · ${esc(ownerName(p.owner))}</small></span>
+          <i class="fa-solid fa-chevron-right"></i>
+        </button>
+        ${lifeFavoriteButton('properties', p.id)}
+      </div>`).join('') : emptyState('fa-regular fa-heart', 'No saved properties', 'Heart a property in Market or its detail page to keep it here.')}
     </main>`;
   } else if (tab === 'tenancies') {
     const tenantRows = Object.values(s.properties).filter(p => p.tenants.some(t => t.identityId === me?.id));
@@ -2189,7 +2261,7 @@ function renderProperty() {
 
   return `<div class="ghla-screen">
     ${lifeHeader('Property', 'Homes, ownership & tenants')}
-    ${tabs([['owned', 'My places'], ['market', 'Market'], ['tenancies', 'Tenancy'], ['agencies', 'Agencies']], tab)}
+    ${tabs([['owned', 'My places'], ['market', 'Market'], ['saved', 'Saved'], ['tenancies', 'Tenancy'], ['agencies', 'Agencies']], tab)}
     ${body}
   </div>`;
 }
@@ -2563,6 +2635,11 @@ function handleLifeClick(event) {
 
   const button = event.target.closest('button');
   if (!button) return;
+
+  if (button.dataset.ghlaFavoriteKind && button.dataset.ghlaFavoriteId) {
+    toggleAssetFavorite(button.dataset.ghlaFavoriteKind, button.dataset.ghlaFavoriteId);
+    return renderLife();
+  }
 
   if (button.matches('[data-ghla-dialog-close]')) return button.closest('dialog')?.close();
   if (button.matches('[data-ghla-back]')) return lifeBack();
