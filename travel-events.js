@@ -14,7 +14,7 @@
  */
 
 const GHTE_MODULE = 'greyhaven-phone-travel-events';
-const GHTE_VERSION = '2.7.0';
+const GHTE_VERSION = '2.7.1';
 const GHTE_STATE_KEY = 'greyhavenPhoneTravelEvents';
 const GHTE_MIGRATION_KEY = 'greyhavenPhoneTravelEventsV27Migration';
 const GHTE_LEGACY_BACKUP_KEY = 'greyhavenPhoneTravelEventsV26Backup';
@@ -27,6 +27,7 @@ let view = { tab: '', detailId: '' };
 let stayRefreshBusy = false;
 let sharedRefreshBusy = false;
 let eventRefreshBusy = false;
+let hostReplyBusy = '';
 
 const qs = (sel, root = document) => root?.querySelector?.(sel) || null;
 const qsa = (sel, root = document) => [...(root?.querySelectorAll?.(sel) || [])];
@@ -155,7 +156,7 @@ function state() {
 
   s.version = 2;
 
-  for (const key of ['accommodations', 'reservations', 'transportBookings', 'events']) {
+  for (const key of ['accommodations', 'reservations', 'transportBookings', 'events', 'hostThreads']) {
     if (!s[key] || typeof s[key] !== 'object' || Array.isArray(s[key])) s[key] = {};
   }
 
@@ -185,6 +186,15 @@ function state() {
   if (!s.favorites || typeof s.favorites !== 'object' || Array.isArray(s.favorites)) s.favorites = {};
   if (!s.favorites.accommodations || typeof s.favorites.accommodations !== 'object' || Array.isArray(s.favorites.accommodations)) s.favorites.accommodations = {};
   if (!s.reminderFlags || typeof s.reminderFlags !== 'object' || Array.isArray(s.reminderFlags)) s.reminderFlags = {};
+
+  for (const thread of Object.values(s.hostThreads)) {
+    if (!thread || typeof thread !== 'object') continue;
+    thread.messages = Array.isArray(thread.messages) ? thread.messages.filter(Boolean) : [];
+    thread.stayIds = Array.isArray(thread.stayIds) ? [...new Set(thread.stayIds.filter(Boolean).map(String))] : [];
+    thread.ownerIdentityId = String(thread.ownerIdentityId || '');
+    thread.hostName = norm(thread.hostName || participantName(thread.host) || 'Host');
+    thread.updatedAt = Number(thread.updatedAt || thread.createdAt || Date.now());
+  }
 
   for (const reservation of Object.values(s.reservations)) {
     if (!reservation || typeof reservation !== 'object') continue;
@@ -1012,43 +1022,155 @@ function hasCharacterCard(name) {
   return (ctx()?.characters || []).some(ch => lc(ch?.name) === lc(name));
 }
 
-async function generateNpcHostReply(accommodation, userText) {
+function characterCardData(name) {
+  const ch = (ctx()?.characters || []).find(row => lc(row?.name) === lc(name));
+  if (!ch) return null;
+  const read = key => {
+    const value = ch?.[key] ?? ch?.data?.[key];
+    return typeof value === 'string' ? value.trim() : '';
+  };
+  return {
+    name: norm(ch.name || name),
+    description: read('description').slice(0, 6500),
+    personality: read('personality').slice(0, 3500),
+    scenario: read('scenario').slice(0, 2500),
+    examples: read('mes_example').slice(0, 3500),
+  };
+}
+
+function hostRefKey(ref) {
+  if (ref?.kind === 'identity' && ref.identityId) return `identity:${ref.identityId}`;
+  return `npc:${lc(participantName(ref)) || 'host'}`;
+}
+
+function hostThreadKey(stay, ownerIdentityId = currentIdentity()?.id || '') {
+  return `${ownerIdentityId}::${hostRefKey(stay?.host)}`;
+}
+
+function ensureHostThread(stay) {
+  const s = state();
+  const me = currentIdentity();
+  if (!s || !stay || !me) return null;
+
+  const key = hostThreadKey(stay, me.id);
+  let thread = s.hostThreads[key];
+  if (!thread || typeof thread !== 'object') {
+    thread = {
+      id: uid('host-thread'),
+      key,
+      ownerIdentityId: me.id,
+      ownerName: me.name,
+      host: clone(stay.host),
+      hostName: participantName(stay.host),
+      stayIds: [String(stay.id)],
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    s.hostThreads[key] = thread;
+  }
+
+  if (!thread.stayIds.includes(String(stay.id))) thread.stayIds.push(String(stay.id));
+  thread.host = clone(stay.host);
+  thread.hostName = participantName(stay.host);
+  thread.ownerName = me.name;
+  thread.updatedAt = Math.max(Number(thread.updatedAt || 0), Number(thread.createdAt || Date.now()));
+  saveSettings();
+  return thread;
+}
+
+function hostThreadsForCurrent() {
+  const s = state();
+  const me = currentIdentity();
+  if (!s || !me) return [];
+  return Object.values(s.hostThreads)
+    .filter(thread => String(thread?.ownerIdentityId || '') === String(me.id))
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+}
+
+function hostThreadForStay(stay) {
+  const me = currentIdentity();
+  if (!stay || !me) return null;
+  return state()?.hostThreads?.[hostThreadKey(stay, me.id)] || null;
+}
+
+function openHostChat(accommodationId) {
+  const stay = state()?.accommodations?.[accommodationId];
+  if (!stay) return;
+  ensureHostThread(stay);
+  view.tab = 'chats';
+  view.detailKind = 'host-chat';
+  view.detailId = String(stay.id);
+  render();
+}
+
+function hostFallbackReply(userText = '') {
+  const text = lc(userText);
+  if (/\b(check.?in|early|arrive)\b/.test(text)) return `Hi! I’ll check the arrival timing and let you know what we can do.`;
+  if (/\b(check.?out|late)\b/.test(text)) return `Hi! I’ll check the checkout timing for you and confirm what’s possible.`;
+  if (/\b(parking|car)\b/.test(text)) return `Hi! I’ll confirm the parking details for the property and get back to you.`;
+  if (/\b(address|location|where)\b/.test(text)) return `Hi! The exact arrival details are tied to the booking, but I can clarify anything you need about the location.`;
+  return `Hi! Thanks for the message. I’ll check that for you and get back to you shortly.`;
+}
+
+async function generateHostChatReply(stay, thread, userText) {
   const c = ctx();
   const me = currentIdentity();
-  const hostName = participantName(accommodation?.host);
-  if (!me || !hostName || hasCharacterCard(hostName) || typeof c?.generateRaw !== 'function') return false;
+  const hostName = participantName(stay?.host);
+  if (!c || !me || !hostName) return '';
 
-  try {
-    const systemPrompt = `You are ${hostName}, the host/contact for one fictional short-stay property in a realistic life simulator.
+  const card = characterCardData(hostName);
+  const recent = (thread?.messages || []).slice(-10)
+    .map(message => `${message.senderName}: ${message.text}`)
+    .join('\n');
 
-Write ONE private phone text reply to ${me.name}.
-- Reply only as ${hostName}.
-- Be concise and natural: usually 1-4 short sentences.
-- Answer only what the guest actually asked.
-- You know the booking property details below.
-- Do not invent dramatic problems, relationships, surnames, or extra events.
-- Do not narrate the guest's actions.
-- Do not output labels such as "${hostName}:" or "TEXT:".
-- This is a normal private message, not prose narration.`;
+  const systemPrompt = card
+    ? `You are ${hostName}, a full Greyhaven character, replying in Airbnb's private host chat to ${me.name}.
 
-    const prompt = `PROPERTY:
-Name: ${accommodation.name}
-Type: ${accommodation.type}
-City: ${accommodation.city}
-Area: ${accommodation.area || 'unspecified'}
-Address: ${accommodation.address || 'provided at booking'}
-Nightly price: ${money(accommodation.nightlyPrice)}
-Description: ${accommodation.description || 'Short-stay accommodation'}
+CHARACTER:
+${JSON.stringify(card)}
 
-GUEST MESSAGE FROM ${me.name}:
+Rules:
+- Write ONE natural private app message only.
+- Preserve ${hostName}'s established personality, relationship style and vocabulary.
+- This is a text chat, not prose roleplay: no action narration, no asterisks, no speaker label.
+- Answer the guest's latest message directly.
+- Stay consistent with the property facts below.
+- Do not invent dramatic new events or control ${me.name}'s actions.
+- Usually 1-4 short sentences.`
+    : `You are ${hostName}, the host/contact for a fictional Airbnb-style short-stay property.
+
+Rules:
+- Write ONE natural private host-chat message only.
+- No prose narration, no asterisks, no speaker label.
+- Be helpful and concise, usually 1-4 short sentences.
+- Answer only what the guest asked.
+- Stay consistent with the property facts.
+- Do not invent dramatic problems, relationships or extra events.`;
+
+  const prompt = `PROPERTY
+Name: ${stay.name}
+Type: ${stay.type}
+City: ${stay.city}
+Area: ${stay.area || 'unspecified'}
+Address: ${stay.address || 'provided with booking'}
+Nightly price: ${money(stay.nightlyPrice)}
+Description: ${stay.description || 'Short-stay accommodation'}
+
+RECENT AIRBNB CHAT
+${recent || '(new conversation)'}
+
+LATEST MESSAGE FROM ${me.name}
 ${String(userText || '').trim()}
 
 Reply as ${hostName}.`;
 
+  try {
+    if (typeof c.generateRaw !== 'function') return hostFallbackReply(userText);
     const raw = await c.generateRaw({
       prompt,
       systemPrompt,
-      responseLength: 280,
+      responseLength: 320,
       trimNames: false,
     });
 
@@ -1058,156 +1180,62 @@ Reply as ${hostName}.`;
       .replace(/\s*```$/i, '')
       .replace(new RegExp(`^${hostName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*`, 'i'), '')
       .trim()
-      .slice(0, 900);
+      .slice(0, 1000);
 
-    if (!reply) return false;
-
-    const action = {
-      type: 'message.send',
-      from: hostName,
-      to: me.name,
-      text: reply,
-      expectsReply: false,
-    };
-
-    if (typeof phoneApi()?.actionBus?.dispatch === 'function') {
-      return Boolean(phoneApi().actionBus.dispatch(action, {
-        source: GHTE_MODULE,
-        sourceKey: uid('booking-npc-host-reply'),
-        roleplayMs: rpNow().getTime(),
-      }));
-    }
-    if (typeof globalThis.GreyhavenLife?.dispatchWorldAction === 'function') {
-      return Boolean(globalThis.GreyhavenLife.dispatchWorldAction(action, {
-        source: GHTE_MODULE,
-        sourceKey: uid('booking-npc-host-reply'),
-        roleplayMs: rpNow().getTime(),
-      }));
-    }
+    return reply || hostFallbackReply(userText);
   } catch (error) {
-    console.warn(`[${GHTE_MODULE}] NPC host reply`, error);
+    console.warn(`[${GHTE_MODULE}] Airbnb host reply`, error);
+    return hostFallbackReply(userText);
   }
-
-  return false;
 }
 
-function dispatchHostMessage(accommodation, text) {
+function renderHostChatList() {
+  const s = state();
+  const rows = hostThreadsForCurrent();
+
+  return `<main class="ghte-main airbnb ghte-host-chat-list">
+    <div class="ghte-section-heading"><div><b>Host chats</b><small>Private to this phone and this RP chat.</small></div></div>
+    ${rows.length ? rows.map(thread => {
+      const stayId = [...(thread.stayIds || [])].reverse().find(idValue => s.accommodations[idValue]);
+      const stay = stayId ? s.accommodations[stayId] : null;
+      const last = (thread.messages || []).at(-1);
+      return `<button type="button" class="ghte-host-thread-row" data-ghte-host-thread="${esc(stay?.id || stayId || '')}" ${stay ? '' : 'disabled'}>
+        ${avatar(thread.host, 'small')}
+        <span><b>${esc(thread.hostName || participantName(thread.host))}</b><small>${esc(stay?.name || 'Previous stay')}</small>${last ? `<em>${esc(last.text)}</em>` : '<em>No messages yet</em>'}</span>
+        <i class="fa-solid fa-chevron-right"></i>
+      </button>`;
+    }).join('') : empty('fa-regular fa-message', 'No host chats yet', 'Open a stay and tap Message host to start one.')}
+  </main>`;
+}
+
+function renderHostChat(stay) {
+  const thread = ensureHostThread(stay);
   const me = currentIdentity();
-  const to = participantName(accommodation?.host);
-  const clean = String(text || '').trim();
-  if (!me || !to || !clean) return false;
+  if (!thread || !me) return empty('fa-regular fa-message', 'Chat unavailable', 'Open the stay again and retry.');
 
-  const action = {
-    type: 'message.send',
-    from: me.name,
-    to,
-    text: clean,
-    expectsReply: true,
-  };
+  const messages = (thread.messages || []).map(message => {
+    const mine = message.senderType === 'guest';
+    return `<div class="ghte-host-bubble ${mine ? 'mine' : 'theirs'}">
+      <span>${esc(message.text).replace(/\n/g, '<br>')}</span>
+      <small>${new Date(message.timeMs || Date.now()).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</small>
+    </div>`;
+  }).join('');
 
-  try {
-    if (typeof phoneApi()?.actionBus?.dispatch === 'function') {
-      return Boolean(phoneApi().actionBus.dispatch(action, {
-        source: GHTE_MODULE,
-        sourceKey: uid('booking-host-message'),
-        roleplayMs: rpNow().getTime(),
-      }));
-    }
-    if (typeof globalThis.GreyhavenLife?.dispatchWorldAction === 'function') {
-      return Boolean(globalThis.GreyhavenLife.dispatchWorldAction(action, {
-        source: GHTE_MODULE,
-        sourceKey: uid('booking-host-message'),
-        roleplayMs: rpNow().getTime(),
-      }));
-    }
-  } catch (error) {
-    console.warn(`[${GHTE_MODULE}] host message`, error);
-  }
-
-  return false;
-}
-
-
-function messageThreadIdForPeer(peerName) {
-  const t = phoneApi()?.getTimeline?.();
-  if (!t || !peerName) return '';
-
-  const contact = Object.values(t.contacts || {}).find(c =>
-    lc(c?.name) === lc(peerName) || lc(c?.nickname) === lc(peerName)
-  );
-  if (!contact) return '';
-
-  const thread = Object.values(t.threads || {}).find(th =>
-    th?.type === 'direct' &&
-    Array.isArray(th.contactIds) &&
-    th.contactIds.length === 1 &&
-    th.contactIds[0] === contact.id
-  );
-
-  return String(thread?.id || '');
-}
-
-function openNativeMessagesThread(peerName, attempt = 0) {
-  if (!peerName || attempt > 7) return false;
-
-  const threadIdValue = messageThreadIdForPeer(peerName);
-  appOpen = '';
-  view = { tab: '', detailId: '', detailKind: '' };
-  qs('#ghte-layer')?.remove();
-
-  const clickMessagesThenThread = () => {
-    const overlay = qs('#ghp-overlay:not([hidden])');
-    if (!overlay) return false;
-
-    const threadRow = threadIdValue
-      ? qsa('[data-thread]', overlay).find(row => String(row.dataset.thread || '') === threadIdValue)
-      : null;
-
-    if (threadRow) {
-      threadRow.click();
-      return true;
-    }
-
-    const messagesButton = qs('[data-open-app="messages"]', overlay);
-    if (messagesButton) {
-      messagesButton.click();
-      setTimeout(() => {
-        const refreshedId = messageThreadIdForPeer(peerName);
-        const row = qsa('#ghp-overlay:not([hidden]) [data-thread]').find(item =>
-          String(item.dataset.thread || '') === String(refreshedId)
-        );
-        if (row) row.click();
-        else setTimeout(() => openNativeMessagesThread(peerName, attempt + 1), 90);
-      }, 70);
-      return true;
-    }
-
-    const backButton = qs('#ghp-overlay:not([hidden]) [data-back]');
-    if (backButton) {
-      backButton.click();
-      setTimeout(() => openNativeMessagesThread(peerName, attempt + 1), 70);
-      return true;
-    }
-
-    return false;
-  };
-
-  requestAnimationFrame(() => {
-    if (!clickMessagesThenThread()) setTimeout(() => openNativeMessagesThread(peerName, attempt + 1), 80);
-  });
-  return true;
-}
-
-function openHostConversation(accommodation) {
-  const peerName = participantName(accommodation?.host);
-  if (!peerName) return false;
-
-  if (!messageThreadIdForPeer(peerName)) {
-    globalThis.toastr?.info?.(`No Messages thread with ${peerName} yet. Send a host message first.`);
-    return false;
-  }
-
-  return openNativeMessagesThread(peerName);
+  return `<main class="ghte-main airbnb ghte-host-chat-screen">
+    <section class="ghte-host-chat-head">
+      ${avatar(stay.host, 'small')}
+      <span><b>${esc(participantName(stay.host))}</b><small>${esc(stay.name)} · ${esc(stay.city)}</small></span>
+      <button type="button" data-ghte-stay-detail="${esc(stay.id)}"><i class="fa-solid fa-house"></i></button>
+    </section>
+    <section class="ghte-host-chat-messages">
+      ${messages || '<div class="ghte-chat-intro">Ask the host about check-in, parking, the property, or anything else about the stay.</div>'}
+      ${hostReplyBusy === thread.id ? '<div class="ghte-host-typing"><i></i><i></i><i></i></div>' : ''}
+    </section>
+    <form class="ghte-host-chat-compose" data-ghte-host-chat-form data-id="${esc(stay.id)}">
+      <input name="text" autocomplete="off" placeholder="Message host…" ${hostReplyBusy === thread.id ? 'disabled' : ''}>
+      <button type="submit" ${hostReplyBusy === thread.id ? 'disabled' : ''}><i class="fa-solid fa-arrow-up"></i></button>
+    </form>
+  </main>`;
 }
 
 function itineraryBundlesForCurrent() {
@@ -1909,8 +1937,7 @@ function renderAccommodationDetail(stay) {
       <div class="ghte-detail-actions">
         <button type="button" class="ghte-primary airbnb" data-ghte-book-private="${esc(stay.id)}">Reserve</button>
         ${stay.maxGuests >= 2 ? `<button type="button" data-ghte-book-shared="${esc(stay.id)}">Create shared stay</button>` : ''}
-        <button type="button" data-ghte-message-host="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
-        ${messageThreadIdForPeer(hostName) ? `<button type="button" data-ghte-open-host-chat="${esc(stay.id)}"><i class="fa-solid fa-comments"></i> Open host chat</button>` : ''}
+        <button type="button" data-ghte-open-host-chat="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
       </div>
     </article>
   </main>`;
@@ -1974,8 +2001,7 @@ function renderReservationDetail(reservation) {
       <section class="ghte-booking-section">
         <div class="ghte-section-row"><b>Host</b><small>${esc(participantName(stay.host))}</small></div>
         <div class="ghte-host-actions">
-          <button type="button" class="ghte-wide-secondary" data-ghte-message-host="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
-          ${messageThreadIdForPeer(participantName(stay.host)) ? `<button type="button" class="ghte-wide-secondary" data-ghte-open-host-chat="${esc(stay.id)}"><i class="fa-solid fa-comments"></i> Open host chat</button>` : ''}
+          <button type="button" class="ghte-wide-secondary" data-ghte-open-host-chat="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
         </div>
       </section>
 
@@ -2205,6 +2231,10 @@ function renderTrips() {
 
 function renderBooking() {
   if (view.detailId) {
+    if (view.detailKind === 'host-chat') {
+      const stay = state().accommodations[view.detailId];
+      return `<div class="ghte-screen">${appHeader('Airbnb', stay ? participantName(stay.host) : 'Host chat', 'airbnb')}${stay ? renderHostChat(stay) : empty('fa-regular fa-message', 'Chat unavailable', 'This stay no longer exists.')}</div>`;
+    }
     if (view.detailKind === 'stay') {
       const stay = state().accommodations[view.detailId];
       return `<div class="ghte-screen">${appHeader('Airbnb', 'Stay details', 'airbnb')}${stay ? renderAccommodationDetail(stay) : empty('fa-solid fa-house', 'Stay unavailable', 'This accommodation no longer exists.')}</div>`;
@@ -2224,12 +2254,13 @@ function renderBooking() {
   if (tab === 'shared') body = renderShared();
   else if (tab === 'transport') body = renderTransport();
   else if (tab === 'trips') body = renderTrips();
+  else if (tab === 'chats') body = renderHostChatList();
   else if (tab === 'saved') body = renderSavedStays();
   else body = renderStays();
 
   return `<div class="ghte-screen">
     ${appHeader('Airbnb', 'Greyhaven Booking', 'airbnb')}
-    ${tabs([['stays','Stays'], ['shared','Shared'], ['transport','Travel'], ['trips','Trips'], ['saved','Saved']], tab)}
+    ${tabs([['stays','Stays'], ['shared','Shared'], ['transport','Travel'], ['trips','Trips'], ['chats','Chats'], ['saved','Saved']], tab)}
     ${body}
   </div>`;
 }
@@ -2391,18 +2422,6 @@ function identityCheckboxes(excludeCurrent = true) {
 }
 
 
-function hostMessageDialog(accommodationId) {
-  const stay = state().accommodations[accommodationId];
-  if (!stay) return;
-
-  openDialog(`<form method="dialog" data-ghte-host-message-form data-id="${esc(stay.id)}">
-    <header><b>Message ${esc(participantName(stay.host))}</b><button type="button" data-ghte-dialog-close><i class="fa-solid fa-xmark"></i></button></header>
-    <p><small>About ${esc(stay.name)} · ${esc(stay.city)}</small></p>
-    <label>Message<textarea name="text" required placeholder="Hi! I had a question about the stay…"></textarea></label>
-    <button class="ghte-primary airbnb" type="submit">Send message</button>
-  </form>`);
-}
-
 function reservationDialog(accommodationId, shared = false) {
   const s = state();
   const stay = s.accommodations[accommodationId];
@@ -2509,13 +2528,9 @@ function handleClick(event) {
     return render();
   }
 
-  if (button.dataset.ghteMessageHost) return hostMessageDialog(button.dataset.ghteMessageHost);
-
-  if (button.dataset.ghteOpenHostChat) {
-    const stay = state().accommodations[button.dataset.ghteOpenHostChat];
-    if (stay) openHostConversation(stay);
-    return;
-  }
+  if (button.dataset.ghteMessageHost) return openHostChat(button.dataset.ghteMessageHost);
+  if (button.dataset.ghteOpenHostChat) return openHostChat(button.dataset.ghteOpenHostChat);
+  if (button.dataset.ghteHostThread) return openHostChat(button.dataset.ghteHostThread);
 
   if (button.dataset.ghteBookPrivate) return reservationDialog(button.dataset.ghteBookPrivate, false);
   if (button.dataset.ghteBookShared) return reservationDialog(button.dataset.ghteBookShared, true);
@@ -2660,6 +2675,50 @@ async function handleSubmit(event) {
   const fd = new FormData(form);
 
   try {
+    if (form.matches('[data-ghte-host-chat-form]')) {
+      const stay = state().accommodations[form.dataset.id];
+      const me = currentIdentity();
+      if (!stay || !me) throw new Error('Host chat is unavailable.');
+
+      const text = String(fd.get('text') || '').trim();
+      if (!text) return;
+
+      const thread = ensureHostThread(stay);
+      if (!thread || hostReplyBusy === thread.id) return;
+
+      thread.messages.push({
+        id: uid('host-message'),
+        senderType: 'guest',
+        senderName: me.name,
+        text,
+        timeMs: rpNow().getTime(),
+      });
+      thread.updatedAt = Date.now();
+      saveSettings();
+
+      hostReplyBusy = thread.id;
+      render();
+
+      try {
+        const reply = await generateHostChatReply(stay, thread, text);
+        if (reply) {
+          thread.messages.push({
+            id: uid('host-message'),
+            senderType: 'host',
+            senderName: participantName(stay.host),
+            text: reply,
+            timeMs: Math.max(rpNow().getTime(), Date.now()),
+          });
+          thread.updatedAt = Date.now();
+          saveSettings();
+        }
+      } finally {
+        hostReplyBusy = '';
+        render();
+      }
+      return;
+    }
+
     if (form.matches('[data-ghte-stay-search]')) {
       const s = state();
       const checkIn = String(fd.get('checkIn') || '');
@@ -2711,28 +2770,6 @@ async function handleDialogSubmit(event) {
   const fd = new FormData(form);
 
   try {
-    if (form.matches('[data-ghte-host-message-form]')) {
-      const stay = state().accommodations[form.dataset.id];
-      if (!stay) throw new Error('Stay is unavailable.');
-      const text = String(fd.get('text') || '').trim();
-      if (!text) throw new Error('Write a message first.');
-
-      const sent = dispatchHostMessage(stay, text);
-      if (!sent) throw new Error('Could not open the host conversation through Greyhaven Phone.');
-
-      // Full SillyTavern characters use the normal Greyhaven Phone one-hop reply,
-      // preserving their card personality. Generated Airbnb hosts get one bounded
-      // fallback reply only when the user explicitly messages them.
-      if (!hasCharacterCard(participantName(stay.host))) {
-        await generateNpcHostReply(stay, text);
-      }
-
-      form.closest('dialog')?.close();
-      globalThis.toastr?.success?.(`Message sent to ${participantName(stay.host)}.`);
-      setTimeout(() => openNativeMessagesThread(participantName(stay.host)), 120);
-      return;
-    }
-
     if (form.matches('[data-ghte-reservation-form]')) {
       const shared = form.dataset.mode === 'shared';
       const participantIds = shared ? [] : fd.getAll('identityId').map(String);

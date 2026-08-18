@@ -847,3 +847,175 @@
 .ghte-host-actions .ghte-wide-secondary{
   width:100%;
 }
+
+
+/* v2.7.1 — Airbnb internal host chats */
+.ghte-host-chat-list{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+.ghte-host-thread-row{
+  width:100%;
+  min-height:72px;
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  align-items:center;
+  gap:11px;
+  padding:11px 12px;
+  border:1px solid var(--ghte-line);
+  border-radius:17px;
+  background:#17191f;
+  color:#fff;
+  text-align:left;
+}
+.ghte-host-thread-row>span{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+.ghte-host-thread-row b{font-size:14px}
+.ghte-host-thread-row small,
+.ghte-host-thread-row em{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--ghte-muted);
+  font-size:10px;
+  font-style:normal;
+}
+.ghte-host-thread-row em{color:rgba(255,255,255,.72)}
+
+.ghte-host-chat-screen{
+  padding:0;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  background:#0f1014;
+}
+.ghte-host-chat-head{
+  flex:0 0 auto;
+  min-height:58px;
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  align-items:center;
+  gap:10px;
+  padding:8px 13px;
+  border-bottom:1px solid var(--ghte-line);
+  background:#14161b;
+}
+.ghte-host-chat-head>span{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+}
+.ghte-host-chat-head b{font-size:14px}
+.ghte-host-chat-head small{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--ghte-muted);
+  font-size:10px;
+}
+.ghte-host-chat-head>button{
+  width:36px;height:36px;border:0;border-radius:12px;
+  background:#242731;color:#fff;
+}
+.ghte-host-chat-messages{
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+  padding:15px 13px 12px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.ghte-chat-intro{
+  align-self:center;
+  max-width:80%;
+  margin:auto 0;
+  color:var(--ghte-muted);
+  font-size:11px;
+  line-height:1.45;
+  text-align:center;
+}
+.ghte-host-bubble{
+  max-width:78%;
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  padding:9px 11px 6px;
+  border-radius:17px;
+  line-height:1.35;
+  word-break:break-word;
+}
+.ghte-host-bubble>span{font-size:13px}
+.ghte-host-bubble>small{
+  align-self:flex-end;
+  color:rgba(255,255,255,.55);
+  font-size:8px;
+}
+.ghte-host-bubble.mine{
+  align-self:flex-end;
+  background:#ff385c;
+  color:#fff;
+  border-bottom-right-radius:6px;
+}
+.ghte-host-bubble.theirs{
+  align-self:flex-start;
+  background:#24262e;
+  color:#fff;
+  border-bottom-left-radius:6px;
+}
+.ghte-host-chat-compose{
+  flex:0 0 auto;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 42px;
+  gap:8px;
+  padding:8px 11px max(10px,env(safe-area-inset-bottom));
+  border-top:1px solid var(--ghte-line);
+  background:#14161b;
+}
+.ghte-host-chat-compose input{
+  width:100%;
+  min-width:0;
+  height:42px;
+  box-sizing:border-box;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:16px;
+  background:#202229;
+  color:#fff;
+  padding:0 13px;
+  outline:none;
+}
+.ghte-host-chat-compose button{
+  width:42px;height:42px;
+  border:0;border-radius:50%;
+  background:#ff385c;color:#fff;
+  font-size:14px;
+}
+.ghte-host-chat-compose button:disabled,
+.ghte-host-chat-compose input:disabled{opacity:.55}
+.ghte-host-typing{
+  align-self:flex-start;
+  display:flex;
+  gap:4px;
+  padding:10px 12px;
+  border-radius:15px 15px 15px 6px;
+  background:#24262e;
+}
+.ghte-host-typing i{
+  width:5px;height:5px;border-radius:50%;
+  background:rgba(255,255,255,.65);
+  animation:ghteHostTyping 1s infinite ease-in-out;
+}
+.ghte-host-typing i:nth-child(2){animation-delay:.14s}
+.ghte-host-typing i:nth-child(3){animation-delay:.28s}
+@keyframes ghteHostTyping{
+  0%,60%,100%{transform:translateY(0);opacity:.45}
+  30%{transform:translateY(-3px);opacity:1}
+}

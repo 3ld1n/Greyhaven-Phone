@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.7.0';
+const GHLA_VERSION = '2.7.1';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -106,8 +106,15 @@ function identities() {
   const api = phoneApi();
   const rows = api?.listIdentities?.();
   if (Array.isArray(rows) && rows.length) {
+    const activeIds = activeCharacterIdentityIds();
+    const currentId = api?.getCurrentIdentity?.()?.id || '';
     return rows
-      .filter(x => x && x.id && x.kind !== 'provisional')
+      .filter(x =>
+        x &&
+        x.id &&
+        x.kind !== 'provisional' &&
+        (activeIds.size === 0 || activeIds.has(String(x.id)) || String(x.id) === String(currentId))
+      )
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   }
 
@@ -200,6 +207,38 @@ function euro(value) {
 
 function money(value) {
   return `€${Math.max(0, Math.round(Number(value) || 0)).toLocaleString()}`;
+}
+
+function propertyEqualRentPayers(property) {
+  const tracked = Array.isArray(property?.tenants) ? property.tenants.length : 0;
+  const untracked = property?.rentSplit === 'equal'
+    ? Math.max(0, Number(property?.untrackedHousemates || 0))
+    : 0;
+  return Math.max(1, tracked + untracked);
+}
+
+function propertyTenantRentShare(property, tenant = null) {
+  const total = Math.max(0, Number(property?.monthlyRent || 0));
+  if (!total) return 0;
+  if (property?.rentSplit === 'equal') return total / propertyEqualRentPayers(property);
+  if (property?.rentSplit === 'custom') return Math.max(0, Number(tenant?.monthlyRent || 0));
+  if ((property?.tenants || []).length <= 1) return total;
+  return 0;
+}
+
+function syncPropertyRentShares(property) {
+  if (!property || !Array.isArray(property.tenants)) return property;
+  if (property.rentSplit === 'equal') {
+    const share = propertyTenantRentShare(property);
+    for (const tenant of property.tenants) {
+      tenant.monthlyRent = share;
+      tenant.splitMode = 'equal';
+    }
+  } else if (property.rentSplit === 'none' && property.tenants.length === 1) {
+    property.tenants[0].monthlyRent = Math.max(0, Number(property.monthlyRent || 0));
+    property.tenants[0].splitMode = 'none';
+  }
+  return property;
 }
 
 function clamp(n, min, max) {
@@ -327,6 +366,7 @@ function normalizeProperty(p = {}) {
   row.status = ['active', 'sold', 'inactive'].includes(row.status) ? row.status : 'active';
   row.createdAt = Number(row.createdAt || Date.now());
   row.updatedAt = Number(row.updatedAt || Date.now());
+  syncPropertyRentShares(row);
   return row;
 }
 
@@ -968,6 +1008,7 @@ function startPropertyTenancy(listingId, tenantIdentityId, startAt, splitMode = 
   property.monthlyRent = listing.monthlyRent;
   property.rentSplit = ['equal', 'custom'].includes(splitMode) ? splitMode : 'none';
   property.untrackedHousemates = Math.max(property.untrackedHousemates, Number(extraHousemates || 0));
+  syncPropertyRentShares(property);
   property.updatedAt = Date.now();
 
   listing.status = 'rented';
@@ -997,6 +1038,7 @@ function endTenancy(propertyId, tenantIdentityId) {
 
   const before = p.tenants.length;
   p.tenants = p.tenants.filter(x => String(x.identityId) !== String(tenantIdentityId));
+  syncPropertyRentShares(p);
   p.updatedAt = Date.now();
   saveSettings();
   return p.tenants.length !== before;
@@ -1913,36 +1955,115 @@ function managerIdentityCandidates() {
 
   const rows = identityRegistryRows();
   const activeIds = activeCharacterIdentityIds();
-  const currentId = currentIdentity()?.id || '';
-  const phoneIds = new Set(phoneRecords().map(x => String(x.timeline?.identityId || '')).filter(Boolean));
-  const byName = new Map();
+  const currentId = String(currentIdentity()?.id || '');
 
-  for (const row of rows) {
-    const key = lc(row.name);
-    if (!key) continue;
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(row);
-  }
+  return rows
+    .filter(row => activeIds.has(String(row.id)) || String(row.id) === currentId)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 
-  const result = [];
-  for (const group of byName.values()) {
-    const active = group.filter(x => activeIds.has(x.id));
-    if (active.length) {
-      // If the user truly has two current cards with the same display name,
-      // keep both. We only collapse old/orphan identity records.
-      result.push(...active);
-      continue;
+function orphanIdentityRows() {
+  try { phoneApi()?.listIdentities?.(); } catch {}
+
+  const activeIds = activeCharacterIdentityIds();
+  const currentId = String(currentIdentity()?.id || '');
+  const assignedIds = new Set(
+    phoneRecords().map(x => String(x.timeline?.identityId || '')).filter(Boolean)
+  );
+
+  return identityRegistryRows()
+    .filter(row =>
+      !activeIds.has(String(row.id)) &&
+      String(row.id) !== currentId &&
+      !assignedIds.has(String(row.id))
+    )
+    .sort((a, b) => a.name.localeCompare(b.name) || b.updatedAt - a.updatedAt);
+}
+
+function removeExactIdentityReferences(value, oldId, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let i = value.length - 1; i >= 0; i--) {
+      if (value[i] === oldId) value.splice(i, 1);
+      else removeExactIdentityReferences(value[i], oldId, seen);
     }
-
-    const ranked = [...group].sort((a, b) => {
-      const diff = identityManagerScore(b, activeIds, phoneIds, currentId) -
-        identityManagerScore(a, activeIds, phoneIds, currentId);
-      return diff || b.updatedAt - a.updatedAt;
-    });
-    if (ranked[0]) result.push(ranked[0]);
+    return;
   }
 
-  return result.sort((a, b) => a.name.localeCompare(b.name));
+  if (Object.prototype.hasOwnProperty.call(value, oldId)) delete value[oldId];
+
+  for (const key of Object.keys(value)) {
+    const current = value[key];
+    if (current === oldId) {
+      value[key] = '';
+    } else {
+      removeExactIdentityReferences(current, oldId, seen);
+    }
+  }
+}
+
+function detachIdentityFromLife(identityId, fallbackName = 'Deleted character') {
+  const s = state();
+  if (!s) return;
+
+  s.mechanics = (s.mechanics || []).filter(x => String(x.identityId || '') !== String(identityId));
+  s.agencies = (s.agencies || []).filter(x => String(x.identityId || '') !== String(identityId));
+
+  for (const vehicle of Object.values(s.vehicles || {})) {
+    if (vehicle?.owner?.kind === 'identity' && String(vehicle.owner.identityId) === String(identityId)) {
+      vehicle.owner = { kind: 'external', relation: 'untracked', label: vehicle.owner.name || fallbackName };
+      vehicle.updatedAt = Date.now();
+    }
+  }
+
+  for (const property of Object.values(s.properties || {})) {
+    if (property?.owner?.kind === 'identity' && String(property.owner.identityId) === String(identityId)) {
+      property.owner = { kind: 'external', relation: 'untracked', label: property.owner.name || fallbackName };
+      property.updatedAt = Date.now();
+    }
+    property.tenants = (property.tenants || []).filter(x => String(x.identityId || '') !== String(identityId));
+    property.occupants = (property.occupants || []).filter(x => String(x.identityId || '') !== String(identityId));
+    syncPropertyRentShares(property);
+  }
+
+  delete s.favorites?.vehicles?.[identityId];
+  delete s.favorites?.properties?.[identityId];
+}
+
+function deleteOrphanIdentity(identityId) {
+  const root = phoneSettingsRoot(false);
+  const row = identityRegistryRows().find(x => String(x.id) === String(identityId));
+  if (!root?.identities?.[identityId] || !row) throw new Error('That old identity no longer exists.');
+
+  const activeIds = activeCharacterIdentityIds();
+  const currentId = String(currentIdentity()?.id || '');
+  const hasPhoneRecord = phoneRecords().some(x => String(x.timeline?.identityId || '') === String(identityId));
+
+  if (activeIds.has(String(identityId)) || String(identityId) === currentId) {
+    throw new Error('This identity belongs to a current SillyTavern character/persona and is protected.');
+  }
+  if (hasPhoneRecord) {
+    throw new Error('This identity still has a phone record in this chat. Delete or reassign that phone first.');
+  }
+
+  const phoneRoot = phoneMetadataRoot(false);
+  if (phoneRoot) {
+    removeExactIdentityReferences(phoneRoot, identityId);
+    savePhoneMetadata(phoneRoot);
+  }
+
+  detachIdentityFromLife(identityId, row.name);
+  removeExactIdentityReferences(root.appRoles, identityId);
+
+  delete root.socialProfiles?.[identityId];
+  delete root.onlyFansAccounts?.[identityId];
+  delete root.identities[identityId];
+
+  saveSettings();
+  return row;
 }
 
 function replaceExactIdentityReferences(value, oldId, newId, seen = new WeakSet()) {
@@ -2415,7 +2536,19 @@ function renderProperty() {
       ${p.address ? `<section class="ghla-card"><b>Address</b><span>${esc(p.address)}, ${esc(p.city)}</span></section>` : ''}
       ${p.description ? `<section class="ghla-card"><p>${esc(p.description)}</p></section>` : ''}
       <section class="ghla-card"><b>Household / tenancy</b>
-        ${p.tenants.length ? p.tenants.map(t => `<div class="ghla-mini-row"><span>${esc(identityById(t.identityId)?.name || t.name || 'Tenant')}</span><small>Tenant${t.monthlyRent ? ` · ${money(t.monthlyRent)}/mo` : ''}</small></div>`).join('') : '<small>No tracked tenants.</small>'}
+        ${p.monthlyRent ? `<div class="ghla-mini-row ghla-rent-total"><span>Total monthly rent</span><strong>${money(p.monthlyRent)}/mo</strong></div>` : ''}
+        ${p.tenants.length ? p.tenants.map(t => {
+          const share = propertyTenantRentShare(p, t);
+          const suffix = p.rentSplit === 'equal'
+            ? `Tenant · ${money(share)}/mo share`
+            : p.rentSplit === 'custom' && share
+              ? `Tenant · ${money(share)}/mo`
+              : p.tenants.length === 1 && share
+                ? `Tenant · ${money(share)}/mo`
+                : 'Tenant';
+          return `<div class="ghla-mini-row"><span>${esc(identityById(t.identityId)?.name || t.name || 'Tenant')}</span><small>${suffix}</small></div>`;
+        }).join('') : '<small>No tracked tenants.</small>'}
+        ${p.rentSplit === 'equal' && p.monthlyRent ? `<small>Split equally between ${propertyEqualRentPayers(p)} rent payer${propertyEqualRentPayers(p) === 1 ? '' : 's'}.</small>` : ''}
         ${p.untrackedHousemates ? `<small>${p.untrackedHousemates} additional untracked household member${p.untrackedHousemates === 1 ? '' : 's'}.</small>` : ''}
       </section>
       <div class="ghla-actions">
@@ -2774,6 +2907,7 @@ function phoneManagerHtml() {
   const identityGroups = identityDuplicateGroups();
   const assigned = new Set(rows.map(x => String(x.timeline?.identityId || '')).filter(Boolean));
   const missing = managerIdentityCandidates().filter(x => !assigned.has(x.id));
+  const orphans = orphanIdentityRows();
 
   const duplicateCount = identityGroups.reduce((sum, group) =>
     sum + group.duplicates.filter(x => x.deletable).length, 0);
@@ -2790,15 +2924,16 @@ function phoneManagerHtml() {
         ${duplicateCount ? `<button type="button" data-ghla-delete-safe-identities class="warning"><i class="fa-solid fa-broom"></i> Delete ${duplicateCount} safe duplicate${duplicateCount === 1 ? '' : 's'}</button>` : ''}
       </div>
 
-      <section class="ghla-manager-note"><i class="fa-solid fa-circle-info"></i><span>Current character-card identities are protected. Old same-name identity records with no phone assignment can be deleted here so they stop appearing as duplicate numbers in searches.</span></section>
+      <section class="ghla-manager-note"><i class="fa-solid fa-circle-info"></i><span>Current SillyTavern character cards and the active persona are protected. Deleted/replaced characters can now be removed even when they never had a phone record, so their old name and number disappear from selectors.</span></section>
 
       <h3>Phone records</h3>
       ${rows.length ? rows.map(({key,timeline}) => {
         const who = identityById(timeline.identityId);
-        const number = who?.phoneNumber || 'no number';
+        const registry = identityRegistryRows().find(x => String(x.id) === String(timeline.identityId || ''));
+        const number = who?.phoneNumber || registry?.phoneNumber || 'no number';
         const identityIsDuplicate = duplicateIdentityIds.has(String(timeline.identityId || ''));
         return `<article class="ghla-phone-record ${duplicateKeys.has(key) || identityIsDuplicate ? 'duplicate' : ''}">
-          <div><b>${esc(timeline.ownerName || who?.name || 'Orphan phone')}</b><small>${esc(number)} · ${esc(timeline.identityId || 'unassigned')}</small>${duplicateKeys.has(key) ? '<em>Possible duplicate phone</em>' : identityIsDuplicate ? '<em>Attached to an old duplicate identity — reassign this phone</em>' : ''}</div>
+          <div><b>${esc(timeline.ownerName || who?.name || registry?.name || 'Orphan phone')}</b><small>${esc(number)} · ${esc(timeline.identityId || 'unassigned')}</small>${duplicateKeys.has(key) ? '<em>Possible duplicate phone</em>' : identityIsDuplicate ? '<em>Attached to an old duplicate identity — reassign this phone</em>' : ''}</div>
           <button type="button" data-ghla-reassign-phone="${esc(key)}">Assign</button>
           <button type="button" data-ghla-delete-phone="${esc(key)}"><i class="fa-solid fa-trash"></i></button>
         </article>`;
@@ -2820,9 +2955,16 @@ function phoneManagerHtml() {
         </section>
       `).join('') : '<small class="ghla-manager-empty">No duplicate global identities detected.</small>'}
 
+      <h3>Old / deleted character identities</h3>
+      <small class="ghla-manager-caption">These global numbers no longer belong to a current SillyTavern character card and have no phone record in this chat.</small>
+      ${orphans.length ? orphans.slice(0,160).map(row => `<div class="ghla-mini-row ghla-orphan-row">
+        <span><b>${esc(row.name)}</b><small>${esc(row.phoneNumber || 'no number')}</small></span>
+        <button type="button" class="danger" data-ghla-delete-orphan-identity="${esc(row.id)}"><i class="fa-solid fa-trash"></i> Delete</button>
+      </div>`).join('') : '<small class="ghla-manager-empty">No removable old identities found.</small>'}
+
       <h3>Missing phones</h3>
-      <small class="ghla-manager-caption">One canonical entry per character. Old duplicate identity numbers are shown above instead of repeating here.</small>
-      ${missing.length ? missing.slice(0,100).map(x => `<div class="ghla-mini-row"><span>${esc(x.name)} · ${esc(x.phoneNumber || 'number will be created by Phone')}</span><button type="button" data-ghla-create-phone-for="${esc(x.id)}">Create</button></div>`).join('') : '<small>Every current/canonical identity already has a phone record in this chat.</small>'}
+      <small class="ghla-manager-caption">Only current character cards/personas are listed here now. Old deleted identities are kept out of all Life selectors.</small>
+      ${missing.length ? missing.slice(0,100).map(x => `<div class="ghla-mini-row"><span>${esc(x.name)} · ${esc(x.phoneNumber || 'number will be created by Phone')}</span><button type="button" data-ghla-create-phone-for="${esc(x.id)}">Create</button></div>`).join('') : '<small>Every current character/persona already has a phone record in this chat.</small>'}
     </main>
   </div>`;
 }
@@ -3098,12 +3240,18 @@ async function handleLifeSubmit(event) {
         bathrooms: fd.get('bathrooms'),
         address: fd.get('address'),
         owner,
-        tenants: tenants.map(t => ({
-          ...t,
-          startAt: existing?.tenants?.find(x => x.identityId === t.identityId)?.startAt || Date.now(),
-          monthlyRent: euro(fd.get('monthlyRent')),
-          splitMode: String(fd.get('rentSplit') || 'none'),
-        })),
+        tenants: tenants.map(t => {
+          const oldTenant = existing?.tenants?.find(x => x.identityId === t.identityId);
+          const splitMode = String(fd.get('rentSplit') || 'none');
+          return {
+            ...t,
+            startAt: oldTenant?.startAt || Date.now(),
+            monthlyRent: splitMode === 'custom'
+              ? Math.max(0, Number(oldTenant?.monthlyRent || 0))
+              : euro(fd.get('monthlyRent')),
+            splitMode,
+          };
+        }),
         monthlyRent: euro(fd.get('monthlyRent')),
         rentSplit: fd.get('rentSplit'),
         untrackedHousemates: fd.get('untrackedHousemates'),
@@ -3261,6 +3409,19 @@ function handleManagerClick(event) {
       const result = deleteDuplicateIdentity(row.id);
       rerenderManager();
       globalThis.toastr?.success?.(`Deleted duplicate ${result.name} identity.`);
+    } catch (error) {
+      globalThis.toastr?.error?.(error.message || String(error));
+    }
+    return;
+  }
+  if (button.dataset.ghlaDeleteOrphanIdentity) {
+    const row = identityRegistryRows().find(x => x.id === button.dataset.ghlaDeleteOrphanIdentity);
+    if (!row) return;
+    if (!confirm(`Permanently delete the old ${row.name} identity and number ${row.phoneNumber || '(no number)'} from Greyhaven Phone?`)) return;
+    try {
+      const deleted = deleteOrphanIdentity(row.id);
+      rerenderManager();
+      globalThis.toastr?.success?.(`Deleted old identity: ${deleted.name}.`);
     } catch (error) {
       globalThis.toastr?.error?.(error.message || String(error));
     }
