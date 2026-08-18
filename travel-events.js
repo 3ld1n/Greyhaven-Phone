@@ -14,8 +14,10 @@
  */
 
 const GHTE_MODULE = 'greyhaven-phone-travel-events';
-const GHTE_VERSION = '2.6.0';
+const GHTE_VERSION = '2.7.0';
 const GHTE_STATE_KEY = 'greyhavenPhoneTravelEvents';
+const GHTE_MIGRATION_KEY = 'greyhavenPhoneTravelEventsV27Migration';
+const GHTE_LEGACY_BACKUP_KEY = 'greyhavenPhoneTravelEventsV26Backup';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 
 let initialized = false;
@@ -72,21 +74,86 @@ function rpNow() {
   return new Date();
 }
 
+function currentChatKey() {
+  const c = ctx();
+  return String(c?.getCurrentChatId?.() || c?.chatId || c?.chatMetadata?.chat_id || c?.chatMetadata?.file_name || 'current-chat');
+}
+
 function saveSettings() {
-  try { ctx()?.saveSettingsDebounced?.(); }
+  const c = ctx();
+  try { c?.saveSettingsDebounced?.(); }
   catch (error) { console.warn(`[${GHTE_MODULE}] save settings`, error); }
+
+  try {
+    if (c?.chatMetadata?.[GHTE_STATE_KEY]) {
+      c.updateChatMetadata?.({ [GHTE_STATE_KEY]: c.chatMetadata[GHTE_STATE_KEY] });
+      if (typeof c.saveMetadataDebounced === 'function') c.saveMetadataDebounced();
+      else c.saveMetadata?.();
+    }
+  } catch (error) {
+    console.warn(`[${GHTE_MODULE}] save chat travel state`, error);
+  }
+}
+
+function freshTimelineState() {
+  return {};
+}
+
+function migrateLegacyGlobalStateIntoCurrentChat(c) {
+  if (!c?.extensionSettings || !c?.chatMetadata) return null;
+
+  const marker = c.extensionSettings[GHTE_MIGRATION_KEY];
+  const legacy = c.extensionSettings[GHTE_STATE_KEY];
+
+  if (
+    !marker?.done &&
+    legacy &&
+    typeof legacy === 'object' &&
+    !Array.isArray(legacy) &&
+    Object.keys(legacy).length
+  ) {
+    const copied = clone(legacy);
+    copied.version = 2;
+    copied.migratedFromGlobalV26 = true;
+    copied.migratedIntoChatKey = currentChatKey();
+    copied.migratedAt = Date.now();
+
+    c.chatMetadata[GHTE_STATE_KEY] = copied;
+
+    // Preserve a safety backup. v2.7 stops reading the global travel state.
+    if (!c.extensionSettings[GHTE_LEGACY_BACKUP_KEY]) {
+      c.extensionSettings[GHTE_LEGACY_BACKUP_KEY] = clone(legacy);
+    }
+    c.extensionSettings[GHTE_MIGRATION_KEY] = {
+      done: true,
+      chatKey: currentChatKey(),
+      migratedAt: Date.now(),
+    };
+
+    try { c.saveSettingsDebounced?.(); } catch {}
+    try {
+      c.updateChatMetadata?.({ [GHTE_STATE_KEY]: copied });
+      if (typeof c.saveMetadataDebounced === 'function') c.saveMetadataDebounced();
+      else c.saveMetadata?.();
+    } catch {}
+
+    return copied;
+  }
+
+  return null;
 }
 
 function state() {
   const c = ctx();
-  if (!c?.extensionSettings) return null;
+  if (!c?.chatMetadata) return null;
 
-  if (!c.extensionSettings[GHTE_STATE_KEY] || typeof c.extensionSettings[GHTE_STATE_KEY] !== 'object') {
-    c.extensionSettings[GHTE_STATE_KEY] = {};
+  let s = c.chatMetadata[GHTE_STATE_KEY];
+  if (!s || typeof s !== 'object' || Array.isArray(s)) {
+    s = migrateLegacyGlobalStateIntoCurrentChat(c) || freshTimelineState();
+    c.chatMetadata[GHTE_STATE_KEY] = s;
   }
 
-  const s = c.extensionSettings[GHTE_STATE_KEY];
-  s.version = 1;
+  s.version = 2;
 
   for (const key of ['accommodations', 'reservations', 'transportBookings', 'events']) {
     if (!s[key] || typeof s[key] !== 'object' || Array.isArray(s[key])) s[key] = {};
@@ -940,6 +1007,90 @@ function localNpcRef(city, indexSeed = 0) {
   };
 }
 
+
+function hasCharacterCard(name) {
+  return (ctx()?.characters || []).some(ch => lc(ch?.name) === lc(name));
+}
+
+async function generateNpcHostReply(accommodation, userText) {
+  const c = ctx();
+  const me = currentIdentity();
+  const hostName = participantName(accommodation?.host);
+  if (!me || !hostName || hasCharacterCard(hostName) || typeof c?.generateRaw !== 'function') return false;
+
+  try {
+    const systemPrompt = `You are ${hostName}, the host/contact for one fictional short-stay property in a realistic life simulator.
+
+Write ONE private phone text reply to ${me.name}.
+- Reply only as ${hostName}.
+- Be concise and natural: usually 1-4 short sentences.
+- Answer only what the guest actually asked.
+- You know the booking property details below.
+- Do not invent dramatic problems, relationships, surnames, or extra events.
+- Do not narrate the guest's actions.
+- Do not output labels such as "${hostName}:" or "TEXT:".
+- This is a normal private message, not prose narration.`;
+
+    const prompt = `PROPERTY:
+Name: ${accommodation.name}
+Type: ${accommodation.type}
+City: ${accommodation.city}
+Area: ${accommodation.area || 'unspecified'}
+Address: ${accommodation.address || 'provided at booking'}
+Nightly price: ${money(accommodation.nightlyPrice)}
+Description: ${accommodation.description || 'Short-stay accommodation'}
+
+GUEST MESSAGE FROM ${me.name}:
+${String(userText || '').trim()}
+
+Reply as ${hostName}.`;
+
+    const raw = await c.generateRaw({
+      prompt,
+      systemPrompt,
+      responseLength: 280,
+      trimNames: false,
+    });
+
+    const reply = String(raw || '')
+      .trim()
+      .replace(/^```(?:text)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .replace(new RegExp(`^${hostName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*`, 'i'), '')
+      .trim()
+      .slice(0, 900);
+
+    if (!reply) return false;
+
+    const action = {
+      type: 'message.send',
+      from: hostName,
+      to: me.name,
+      text: reply,
+      expectsReply: false,
+    };
+
+    if (typeof phoneApi()?.actionBus?.dispatch === 'function') {
+      return Boolean(phoneApi().actionBus.dispatch(action, {
+        source: GHTE_MODULE,
+        sourceKey: uid('booking-npc-host-reply'),
+        roleplayMs: rpNow().getTime(),
+      }));
+    }
+    if (typeof globalThis.GreyhavenLife?.dispatchWorldAction === 'function') {
+      return Boolean(globalThis.GreyhavenLife.dispatchWorldAction(action, {
+        source: GHTE_MODULE,
+        sourceKey: uid('booking-npc-host-reply'),
+        roleplayMs: rpNow().getTime(),
+      }));
+    }
+  } catch (error) {
+    console.warn(`[${GHTE_MODULE}] NPC host reply`, error);
+  }
+
+  return false;
+}
+
 function dispatchHostMessage(accommodation, text) {
   const me = currentIdentity();
   const to = participantName(accommodation?.host);
@@ -974,6 +1125,89 @@ function dispatchHostMessage(accommodation, text) {
   }
 
   return false;
+}
+
+
+function messageThreadIdForPeer(peerName) {
+  const t = phoneApi()?.getTimeline?.();
+  if (!t || !peerName) return '';
+
+  const contact = Object.values(t.contacts || {}).find(c =>
+    lc(c?.name) === lc(peerName) || lc(c?.nickname) === lc(peerName)
+  );
+  if (!contact) return '';
+
+  const thread = Object.values(t.threads || {}).find(th =>
+    th?.type === 'direct' &&
+    Array.isArray(th.contactIds) &&
+    th.contactIds.length === 1 &&
+    th.contactIds[0] === contact.id
+  );
+
+  return String(thread?.id || '');
+}
+
+function openNativeMessagesThread(peerName, attempt = 0) {
+  if (!peerName || attempt > 7) return false;
+
+  const threadIdValue = messageThreadIdForPeer(peerName);
+  appOpen = '';
+  view = { tab: '', detailId: '', detailKind: '' };
+  qs('#ghte-layer')?.remove();
+
+  const clickMessagesThenThread = () => {
+    const overlay = qs('#ghp-overlay:not([hidden])');
+    if (!overlay) return false;
+
+    const threadRow = threadIdValue
+      ? qsa('[data-thread]', overlay).find(row => String(row.dataset.thread || '') === threadIdValue)
+      : null;
+
+    if (threadRow) {
+      threadRow.click();
+      return true;
+    }
+
+    const messagesButton = qs('[data-open-app="messages"]', overlay);
+    if (messagesButton) {
+      messagesButton.click();
+      setTimeout(() => {
+        const refreshedId = messageThreadIdForPeer(peerName);
+        const row = qsa('#ghp-overlay:not([hidden]) [data-thread]').find(item =>
+          String(item.dataset.thread || '') === String(refreshedId)
+        );
+        if (row) row.click();
+        else setTimeout(() => openNativeMessagesThread(peerName, attempt + 1), 90);
+      }, 70);
+      return true;
+    }
+
+    const backButton = qs('#ghp-overlay:not([hidden]) [data-back]');
+    if (backButton) {
+      backButton.click();
+      setTimeout(() => openNativeMessagesThread(peerName, attempt + 1), 70);
+      return true;
+    }
+
+    return false;
+  };
+
+  requestAnimationFrame(() => {
+    if (!clickMessagesThenThread()) setTimeout(() => openNativeMessagesThread(peerName, attempt + 1), 80);
+  });
+  return true;
+}
+
+function openHostConversation(accommodation) {
+  const peerName = participantName(accommodation?.host);
+  if (!peerName) return false;
+
+  if (!messageThreadIdForPeer(peerName)) {
+    globalThis.toastr?.info?.(`No Messages thread with ${peerName} yet. Send a host message first.`);
+    return false;
+  }
+
+  return openNativeMessagesThread(peerName);
 }
 
 function itineraryBundlesForCurrent() {
@@ -1676,6 +1910,7 @@ function renderAccommodationDetail(stay) {
         <button type="button" class="ghte-primary airbnb" data-ghte-book-private="${esc(stay.id)}">Reserve</button>
         ${stay.maxGuests >= 2 ? `<button type="button" data-ghte-book-shared="${esc(stay.id)}">Create shared stay</button>` : ''}
         <button type="button" data-ghte-message-host="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
+        ${messageThreadIdForPeer(hostName) ? `<button type="button" data-ghte-open-host-chat="${esc(stay.id)}"><i class="fa-solid fa-comments"></i> Open host chat</button>` : ''}
       </div>
     </article>
   </main>`;
@@ -1738,7 +1973,10 @@ function renderReservationDetail(reservation) {
 
       <section class="ghte-booking-section">
         <div class="ghte-section-row"><b>Host</b><small>${esc(participantName(stay.host))}</small></div>
-        <button type="button" class="ghte-wide-secondary" data-ghte-message-host="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
+        <div class="ghte-host-actions">
+          <button type="button" class="ghte-wide-secondary" data-ghte-message-host="${esc(stay.id)}"><i class="fa-regular fa-message"></i> Message host</button>
+          ${messageThreadIdForPeer(participantName(stay.host)) ? `<button type="button" class="ghte-wide-secondary" data-ghte-open-host-chat="${esc(stay.id)}"><i class="fa-solid fa-comments"></i> Open host chat</button>` : ''}
+        </div>
       </section>
 
       <div class="ghte-danger-zone">
@@ -2273,6 +2511,12 @@ function handleClick(event) {
 
   if (button.dataset.ghteMessageHost) return hostMessageDialog(button.dataset.ghteMessageHost);
 
+  if (button.dataset.ghteOpenHostChat) {
+    const stay = state().accommodations[button.dataset.ghteOpenHostChat];
+    if (stay) openHostConversation(stay);
+    return;
+  }
+
   if (button.dataset.ghteBookPrivate) return reservationDialog(button.dataset.ghteBookPrivate, false);
   if (button.dataset.ghteBookShared) return reservationDialog(button.dataset.ghteBookShared, true);
 
@@ -2460,7 +2704,7 @@ async function handleSubmit(event) {
   }
 }
 
-function handleDialogSubmit(event) {
+async function handleDialogSubmit(event) {
   const form = event.target;
   if (!(form instanceof HTMLFormElement)) return;
   event.preventDefault();
@@ -2476,8 +2720,16 @@ function handleDialogSubmit(event) {
       const sent = dispatchHostMessage(stay, text);
       if (!sent) throw new Error('Could not open the host conversation through Greyhaven Phone.');
 
+      // Full SillyTavern characters use the normal Greyhaven Phone one-hop reply,
+      // preserving their card personality. Generated Airbnb hosts get one bounded
+      // fallback reply only when the user explicitly messages them.
+      if (!hasCharacterCard(participantName(stay.host))) {
+        await generateNpcHostReply(stay, text);
+      }
+
       form.closest('dialog')?.close();
       globalThis.toastr?.success?.(`Message sent to ${participantName(stay.host)}.`);
+      setTimeout(() => openNativeMessagesThread(participantName(stay.host)), 120);
       return;
     }
 
@@ -2619,6 +2871,7 @@ function bindEvents() {
     bind(key, () => setTimeout(() => {
       appOpen = '';
       qs('#ghte-layer')?.remove();
+      state();
       syncAppDefaults();
       syncUi();
     }, 90));

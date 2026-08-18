@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.6.0';
+const GHLA_VERSION = '2.7.0';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -97,6 +97,7 @@ function state() {
   if (!s.favorites || typeof s.favorites !== 'object' || Array.isArray(s.favorites)) s.favorites = {};
   if (!s.favorites.vehicles || typeof s.favorites.vehicles !== 'object' || Array.isArray(s.favorites.vehicles)) s.favorites.vehicles = {};
   if (!s.favorites.properties || typeof s.favorites.properties !== 'object' || Array.isArray(s.favorites.properties)) s.favorites.properties = {};
+  if (!s.defaultWorldSeeds || typeof s.defaultWorldSeeds !== 'object' || Array.isArray(s.defaultWorldSeeds)) s.defaultWorldSeeds = {};
 
   return s;
 }
@@ -1121,6 +1122,255 @@ function removeAgency(idValue) {
   const s = normalizeAll();
   s.agencies = s.agencies.filter(x => x.id !== idValue);
   saveSettings();
+}
+
+
+/* ---------------- Greyhaven default service characters / homes ---------------- */
+
+const DEFAULT_GREYHAVEN_SERVICES = Object.freeze({
+  mechanics: [
+    { name: 'Grant Harlow', label: 'Harlow Auto & Tow' },
+    { name: 'Nico Russo', label: 'Russo Motorworks' },
+  ],
+  agent: { name: 'Celeste Warren' },
+  landlords: {
+    park: 'Gordon Pike',
+    college: 'Arben Kodra',
+  },
+});
+
+function cardIdentityByName(name) {
+  const c = ctx();
+  const ch = (c?.characters || []).find(x => lc(x?.name) === lc(name));
+  if (!ch) return null;
+
+  const stable = String(ch?.avatar || ch?.data?.avatar || '').trim();
+  const expectedId = stable ? `character:${encodeURIComponent(stable)}` : '';
+  return (expectedId ? identityById(expectedId) : null) ||
+    identities().find(x => expectedId && x.id === expectedId) ||
+    identities().find(x => lc(x.name) === lc(name)) ||
+    null;
+}
+
+function tenantRef(name, monthlyRent = 0, splitMode = 'none') {
+  const who = cardIdentityByName(name);
+  if (!who) return null;
+  return {
+    kind: 'identity',
+    identityId: who.id,
+    name: who.name,
+    startAt: Date.now() - 120 * 86400000,
+    monthlyRent: Math.max(0, Number(monthlyRent || 0)),
+    splitMode,
+  };
+}
+
+function occupantRef(name) {
+  const who = cardIdentityByName(name);
+  if (!who) return null;
+  return { kind: 'identity', identityId: who.id, name: who.name };
+}
+
+function ensureSeededProperty(definition) {
+  const s = normalizeAll();
+  const owner = cardIdentityByName(definition.ownerName);
+  if (!owner) return false;
+
+  let property = s.properties[definition.id];
+  let changed = false;
+
+  if (!property) {
+    property = normalizeProperty({
+      id: definition.id,
+      type: 'apartment',
+      name: definition.name,
+      city: 'Greyhaven',
+      area: definition.area,
+      address: definition.address,
+      sizeSqm: definition.sizeSqm,
+      rooms: definition.rooms,
+      bedrooms: definition.bedrooms,
+      bathrooms: definition.bathrooms,
+      description: definition.description,
+      owner: ownerRefIdentity(owner),
+      tenants: [],
+      occupants: [],
+      untrackedHousemates: 0,
+      monthlyRent: definition.monthlyRent,
+      rentSplit: definition.rentSplit,
+      shortTermEligible: false,
+      longTermRentable: true,
+      status: 'active',
+      seedKey: definition.id,
+      seedManaged: true,
+      rentDueDay: definition.rentDueDay || 1,
+      landlordIdentityId: owner.id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    s.properties[property.id] = property;
+    changed = true;
+  }
+
+  // Do not overwrite later user edits. Only repair the original seed links.
+  if (property.seedManaged === true || property.seedKey === definition.id) {
+    if (property.owner?.kind !== 'identity' || property.owner.identityId !== owner.id) {
+      property.owner = ownerRefIdentity(owner);
+      property.landlordIdentityId = owner.id;
+      changed = true;
+    }
+
+    property.tenants ||= [];
+    for (const tenantDef of definition.tenants || []) {
+      const ref = tenantRef(tenantDef.name, tenantDef.monthlyRent, definition.rentSplit);
+      if (!ref) continue;
+      if (!property.tenants.some(x => x.identityId === ref.identityId)) {
+        property.tenants.push(ref);
+        changed = true;
+      }
+    }
+
+    property.occupants ||= [];
+    for (const name of definition.occupants || []) {
+      const ref = occupantRef(name);
+      if (!ref) continue;
+      if (!property.occupants.some(x => x.identityId === ref.identityId)) {
+        property.occupants.push(ref);
+        changed = true;
+      }
+    }
+
+    if (changed) property.updatedAt = Date.now();
+  }
+
+  return changed;
+}
+
+function seedDefaultGreyhavenWorld() {
+  const s = normalizeAll();
+  if (!s) return false;
+
+  let changed = false;
+
+  for (const mechanicDef of DEFAULT_GREYHAVEN_SERVICES.mechanics) {
+    const who = cardIdentityByName(mechanicDef.name);
+    if (!who) continue;
+    if (!s.mechanics.some(x => x.identityId === who.id)) {
+      s.mechanics.push({
+        id: uid('mechanic'),
+        kind: 'identity',
+        identityId: who.id,
+        name: who.name,
+        label: mechanicDef.label,
+        active: true,
+        seeded: true,
+      });
+      changed = true;
+    }
+  }
+
+  const agent = cardIdentityByName(DEFAULT_GREYHAVEN_SERVICES.agent.name);
+  if (agent && !s.agencies.some(x => x.identityId === agent.id)) {
+    s.agencies.push({
+      id: uid('agency'),
+      kind: 'identity',
+      identityId: agent.id,
+      name: agent.name,
+      active: true,
+      seeded: true,
+      label: 'Warren Property',
+    });
+    changed = true;
+  }
+
+  const propertyDefs = [
+    {
+      id: 'greyhaven:park-area:aurora',
+      ownerName: DEFAULT_GREYHAVEN_SERVICES.landlords.park,
+      name: 'Park Area Apartments · 3A',
+      area: 'Park Area',
+      address: 'Park Area Apartments, Building A, Apt 3A',
+      sizeSqm: 58, rooms: 3, bedrooms: 1, bathrooms: 1,
+      monthlyRent: 680, rentSplit: 'none', rentDueDay: 1,
+      tenants: [{ name: 'Aurora', monthlyRent: 680 }],
+      occupants: [],
+      description: 'An older but well-kept one-bedroom apartment in Greyhaven’s Park Area. The building is not a new luxury development, but it is clean, decent, practical, and in a good neighborhood. Aurora rents this unit from Gordon Pike and pays monthly.',
+    },
+    {
+      id: 'greyhaven:park-area:eldin',
+      ownerName: DEFAULT_GREYHAVEN_SERVICES.landlords.park,
+      name: 'Park Area Apartments · 3B',
+      area: 'Park Area',
+      address: 'Park Area Apartments, Building A, Apt 3B',
+      sizeSqm: 54, rooms: 3, bedrooms: 1, bathrooms: 1,
+      monthlyRent: 640, rentSplit: 'none', rentDueDay: 1,
+      tenants: [{ name: 'Eldin', monthlyRent: 640 }],
+      occupants: [],
+      description: 'A modest, comfortable one-bedroom apartment beside Aurora’s unit in the older Park Area complex. It is maintained well rather than modern or luxurious. Eldin rents it from Gordon Pike and pays monthly.',
+    },
+    {
+      id: 'greyhaven:park-area:liam-family',
+      ownerName: DEFAULT_GREYHAVEN_SERVICES.landlords.park,
+      name: 'Park Area Apartments · 3C',
+      area: 'Park Area',
+      address: 'Park Area Apartments, Building A, Apt 3C',
+      sizeSqm: 82, rooms: 5, bedrooms: 2, bathrooms: 1,
+      monthlyRent: 980, rentSplit: 'equal', rentDueDay: 1,
+      tenants: [
+        { name: 'Liam', monthlyRent: 490 },
+        { name: 'Evelyn', monthlyRent: 490 },
+      ],
+      occupants: ['Alina'],
+      description: 'A two-bedroom family apartment in the same Park Area building as Aurora and Eldin. Liam and Evelyn rent the unit from Gordon Pike and live here with their daughter Alina. The building is older, quiet, decent, and well maintained.',
+    },
+    {
+      id: 'greyhaven:college:leo-rozafa',
+      ownerName: DEFAULT_GREYHAVEN_SERVICES.landlords.college,
+      name: 'College Quarter Apartments · 2D',
+      area: 'College Quarter',
+      address: 'College Quarter Apartments, Apt 2D',
+      sizeSqm: 72, rooms: 4, bedrooms: 2, bathrooms: 1,
+      monthlyRent: 900, rentSplit: 'equal', rentDueDay: 1,
+      tenants: [
+        { name: 'Leo', monthlyRent: 450 },
+        { name: 'Rozafa', monthlyRent: 450 },
+      ],
+      occupants: [],
+      description: 'A practical two-bedroom student apartment within walking distance of Greyhaven City College. Leo and Rozafa are roommates, know each other through living together, and split the rent equally. Arben Kodra is their landlord.',
+    },
+    {
+      id: 'greyhaven:college:alessa-kevin',
+      ownerName: DEFAULT_GREYHAVEN_SERVICES.landlords.college,
+      name: 'College Quarter Apartments · 4B',
+      area: 'College Quarter',
+      address: 'College Quarter Apartments, Apt 4B',
+      sizeSqm: 70, rooms: 4, bedrooms: 2, bathrooms: 1,
+      monthlyRent: 880, rentSplit: 'equal', rentDueDay: 1,
+      tenants: [
+        { name: 'Alessa', monthlyRent: 440 },
+        { name: 'Kevin', monthlyRent: 440 },
+      ],
+      occupants: [],
+      description: 'A decent two-bedroom student apartment near Greyhaven City College. The siblings Alessa and Kevin rent the unit from Arben Kodra and split the rent equally by default; the arrangement can still be edited manually later.',
+    },
+  ];
+
+  for (const definition of propertyDefs) {
+    if (ensureSeededProperty(definition)) changed = true;
+  }
+
+  if (changed) {
+    s.defaultWorldSeeds.serviceCharactersV1 = {
+      seededAt: Date.now(),
+      mechanics: DEFAULT_GREYHAVEN_SERVICES.mechanics.map(x => x.name),
+      agent: DEFAULT_GREYHAVEN_SERVICES.agent.name,
+      landlords: Object.values(DEFAULT_GREYHAVEN_SERVICES.landlords),
+    };
+    saveSettings();
+    syncFacebookAssetListings();
+  }
+
+  return changed;
 }
 
 /* ---------------- phone notifications / reminders ---------------- */
@@ -3051,6 +3301,7 @@ function documentSubmit(event) {
 
 function syncUi() {
   enableRequiredCoreApps();
+  seedDefaultGreyhavenWorld();
   injectManagerSettings();
 
   const overlay = qs('#ghp-overlay');
@@ -3087,9 +3338,17 @@ function bindChatEvents() {
       lifeOpen = false;
       qs('#ghla-layer')?.remove();
       enableRequiredCoreApps();
+      seedDefaultGreyhavenWorld();
       syncFacebookAssetListings();
       syncUi();
     }, 80));
+  }
+
+  for (const key of ['CHARACTER_EDITED', 'GROUP_UPDATED']) {
+    bind(key, () => setTimeout(() => {
+      seedDefaultGreyhavenWorld();
+      syncUi();
+    }, 120));
   }
 }
 
@@ -3149,6 +3408,7 @@ async function init() {
   try { if (phoneApi()) phoneApi().version = GHLA_VERSION; } catch {}
   enableRequiredCoreApps();
   bindChatEvents();
+  seedDefaultGreyhavenWorld();
   syncFacebookAssetListings();
 
   document.addEventListener('click', documentClick, true);

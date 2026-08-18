@@ -836,3 +836,14 @@
   .ghte-detail-actions button:last-child{grid-column:auto}
   .ghte-booking-facts{grid-template-columns:1fr 1fr}
 }
+
+
+/* v2.7.0 — host Messages navigation */
+.ghte-host-actions{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:8px;
+}
+.ghte-host-actions .ghte-wide-secondary{
+  width:100%;
+}
