@@ -754,3 +754,57 @@
 .ghla-market-actions>.ghla-favorite{
   margin-right:auto;
 }
+
+/* =========================================================
+   v2.8.0 — shared Phone chrome + Greyhaven Life Clock
+   ========================================================= */
+#ghla-layer .ghp-status.ghla-addon-status{
+  position:relative!important;
+  top:auto!important;
+  left:auto!important;
+  right:auto!important;
+  width:100%!important;
+  min-height:52px;
+  flex:0 0 52px;
+  padding:8px 20px 4px!important;
+  box-sizing:border-box;
+  z-index:6;
+  background:#0f1014;
+}
+#ghla-layer .ghp-status.ghla-addon-status .ghp-island{pointer-events:none}
+#ghla-layer .ghla-screen{padding-top:0!important}
+#ghla-layer .ghla-header{flex:0 0 auto}
+.ghla-ios-app-icon.clock{background:linear-gradient(145deg,#242a35,#151820);color:#fff}
+.ghla-clock-screen{display:flex;flex-direction:column;height:100%;min-height:0}
+.ghla-clock-main{padding:14px 14px 28px;overflow-y:auto;-webkit-overflow-scrolling:touch;min-height:0;flex:1}
+.ghla-clock-card{display:flex;flex-direction:column;gap:4px;padding:20px;border:1px solid rgba(255,255,255,.09);border-radius:22px;background:#191b21;margin-bottom:12px}
+.ghla-clock-card small{font-size:9px;letter-spacing:.09em;color:#8f949f;font-weight:800}
+.ghla-clock-card strong{font-size:52px;line-height:1.02;color:#fff;letter-spacing:-.035em}
+.ghla-clock-card span{color:#a8acb5;font-size:13px}
+.ghla-clock-shifts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.ghla-clock-shifts button{min-height:44px;border:1px solid rgba(255,255,255,.1);border-radius:13px;background:#20232a;color:#fff;font-size:12px;padding:7px}
+.ghla-clock-shifts button:nth-last-child(-n+2){grid-column:span 1}
+.ghla-clock-set,.ghla-person-picker{display:grid;gap:9px;padding:14px;border:1px solid rgba(255,255,255,.09);border-radius:18px;background:#17191f;margin-bottom:12px}
+.ghla-clock-set label{display:flex;flex-direction:column;gap:6px;color:#a9adb6;font-size:11px}
+.ghla-clock-set input,.ghla-person-picker select{min-height:42px;border:1px solid rgba(255,255,255,.09);border-radius:12px;background:#101216;color:#fff;padding:0 11px;font-size:13px}
+.ghla-clock-set .ghla-check-row{flex-direction:row;align-items:center;gap:8px}
+.ghla-clock-set .ghla-check-row input{min-height:auto;width:18px;height:18px;padding:0}
+.ghla-clock-set button.primary,.ghla-person-picker button,.ghla-section-head button.primary{min-height:42px;border:0;border-radius:12px;background:#4f79e8;color:#fff;font-weight:700}
+.ghla-person-picker{grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.ghla-person-picker button{padding:0 16px}
+.ghla-info-card,.ghla-active-schedule,.ghla-active-exception{display:flex;gap:11px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:16px;background:#17191f;margin-bottom:12px}
+.ghla-info-card>i{font-size:19px;color:#8dc9ff;margin-top:2px}.ghla-info-card>div{display:flex;flex-direction:column;gap:4px}.ghla-info-card b{font-size:12px}.ghla-info-card span{font-size:10px;color:#979ba4;line-height:1.45}
+.ghla-active-schedule,.ghla-active-exception{flex-direction:column;gap:3px;border-color:rgba(93,214,179,.22);background:rgba(70,154,128,.09)}
+.ghla-active-exception{border-color:rgba(255,192,104,.22);background:rgba(168,113,52,.10)}
+.ghla-active-schedule small,.ghla-active-exception small{font-size:8px;letter-spacing:.08em;font-weight:800;color:#8cd8bf}.ghla-active-exception small{color:#f3bf78}
+.ghla-active-schedule b,.ghla-active-exception b{font-size:14px}.ghla-active-schedule span,.ghla-active-exception span{font-size:10px;color:#a0a4ad}
+.ghla-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin:8px 0 10px}.ghla-section-head h3{margin:0;font-size:17px}.ghla-section-head small{display:block;margin-top:3px;color:#9296a0;font-size:10px}.ghla-section-head button{padding:0 14px;white-space:nowrap}
+.ghla-schedule-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:16px;background:#17191f;margin-bottom:9px}
+.ghla-schedule-card>div:first-child{min-width:0;display:flex;flex-direction:column;gap:4px}.ghla-schedule-card b{font-size:13px}.ghla-schedule-card small{font-size:10px;color:#a0a4ad}.ghla-schedule-card span{font-size:9px;color:#797e88;text-transform:capitalize}
+.ghla-mini-actions{display:flex;align-items:center;gap:6px}.ghla-mini-actions button{min-height:34px;border:1px solid rgba(255,255,255,.09);border-radius:10px;background:#22252c;color:#fff;padding:0 9px;font-size:10px}
+.ghla-day-grid{display:grid!important;grid-template-columns:repeat(7,1fr);gap:5px}.ghla-day-grid label{display:block!important}.ghla-day-grid input{display:none}.ghla-day-grid span{display:grid;place-items:center;min-height:35px;border:1px solid rgba(255,255,255,.09);border-radius:10px;background:#14161b;color:#9599a3;font-size:9px}.ghla-day-grid input:checked+span{background:#3d5eb8;color:#fff;border-color:#5578da}
+@media(max-width:520px){
+  .ghla-clock-shifts{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .ghla-clock-shifts button:nth-last-child(-n+2){grid-column:span 1}
+  .ghla-schedule-card{grid-template-columns:1fr}.ghla-mini-actions{justify-content:flex-end}
+}

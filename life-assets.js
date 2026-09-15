@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.7.1';
+const GHLA_VERSION = '2.8.0';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -24,6 +24,8 @@ let lifeOpen = false;
 let lifeView = { app: 'home', tab: '', detailId: '' };
 let vehicleRefreshBusy = false;
 let propertyRefreshBusy = false;
+let clockSchedulePerson = '';
+let clockExceptionPerson = '';
 
 const qs = (sel, root = document) => root?.querySelector?.(sel) || null;
 const qsa = (sel, root = document) => [...(root?.querySelectorAll?.(sel) || [])];
@@ -65,6 +67,179 @@ function rpNow() {
     }
   } catch {}
   return new Date();
+}
+
+
+function addonStatusBar() {
+  const d = rpNow();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `<div class="ghp-status ghla-addon-status">
+    <span data-gh-addon-time>${esc(time)}</span>
+    <button class="ghp-island" type="button" tabindex="-1" aria-label="Dynamic Island"><i class="fa-solid fa-circle"></i><em></em></button>
+    <span><i class="fa-solid fa-signal"></i><i class="fa-solid fa-wifi"></i><i class="fa-solid fa-battery-three-quarters"></i></span>
+  </div>`;
+}
+
+function updateAddonStatusClock() {
+  const d = rpNow();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  qsa('[data-gh-addon-time]', qs('#ghla-layer')).forEach(el => { el.textContent = time; });
+}
+
+function clockApi() {
+  return globalThis.GreyhavenLife || null;
+}
+
+function toDateTimeLocal(date) {
+  const d = new Date(date);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function parseDateTimeLocal(value) {
+  const d = new Date(String(value || ''));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function dayLabel(days = []) {
+  const names = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const sorted = [...new Set((days || []).map(Number).filter(x => x >= 0 && x <= 6))].sort((a,b)=>a-b);
+  if (sorted.length === 7) return 'Every day';
+  if (sorted.join(',') === '1,2,3,4,5') return 'Weekdays';
+  if (sorted.join(',') === '0,6') return 'Weekend';
+  return sorted.map(x => names[x]).join(', ') || 'No days';
+}
+
+function personOptions(rows, selected) {
+  return rows.map(p => `<option value="${esc(p.name)}"${lc(p.name)===lc(selected)?' selected':''}>${esc(p.name)}</option>`).join('');
+}
+
+function activeExceptionFor(name) {
+  try { return clockApi()?.getSlimActiveException?.(name) || null; } catch { return null; }
+}
+
+function currentScheduleFor(name) {
+  try { return clockApi()?.getSlimCurrentSchedule?.(name) || null; } catch { return null; }
+}
+
+function renderClockNow() {
+  const d = rpNow();
+  return `<main class="ghla-clock-main">
+    <section class="ghla-clock-card">
+      <small>AUTHORITATIVE RP TIME</small>
+      <strong>${esc(d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false}))}</strong>
+      <span>${esc(d.toLocaleDateString([], {weekday:'long',month:'long',day:'numeric',year:'numeric'}))}</span>
+    </section>
+    <div class="ghla-clock-shifts">
+      <button type="button" data-ghla-clock-shift="15">+15m</button>
+      <button type="button" data-ghla-clock-shift="60">+1h</button>
+      <button type="button" data-ghla-clock-shift="240">+4h</button>
+      <button type="button" data-ghla-clock-next="morning">Next morning</button>
+      <button type="button" data-ghla-clock-next="day">Next day</button>
+    </div>
+    <form class="ghla-clock-set" data-ghla-clock-set>
+      <label><span>Set date & time</span><input name="when" type="datetime-local" value="${esc(toDateTimeLocal(d))}"></label>
+      <label class="ghla-check-row"><input name="running" type="checkbox" checked><span>Keep clock running after setting it</span></label>
+      <button class="primary" type="submit">Set RP time</button>
+    </form>
+    <section class="ghla-info-card">
+      <i class="fa-regular fa-clock"></i>
+      <div><b>Roleplay wins over assumptions.</b><span>This clock is exact. Schedules are normal expectations only; explicit RP and schedule exceptions override them.</span></div>
+    </section>
+  </main>`;
+}
+
+function renderClockSchedules() {
+  const api = clockApi();
+  const rows = api?.getSlimScheduleProfiles?.() || [];
+  if (!clockSchedulePerson) clockSchedulePerson = currentIdentity()?.name || rows[0]?.name || '';
+  if (!rows.some(x => lc(x.name) === lc(clockSchedulePerson))) clockSchedulePerson = rows[0]?.name || '';
+  const selected = rows.find(x => lc(x.name) === lc(clockSchedulePerson)) || {name:clockSchedulePerson,schedule:[]};
+  const active = currentScheduleFor(selected.name);
+  return `<main class="ghla-clock-main">
+    <form class="ghla-person-picker" data-ghla-clock-person-form>
+      <select name="person">${personOptions(rows, selected.name)}</select>
+      <button type="submit">View</button>
+    </form>
+    ${active ? `<section class="ghla-active-schedule"><small>ACTIVE NOW</small><b>${esc(active.entry?.label || 'Schedule')}</b><span>${esc(active.entry?.start || '')}–${esc(active.entry?.end || '')} · ${esc(active.entry?.type || 'routine')}</span></section>` : ''}
+    <div class="ghla-section-head"><div><h3>${esc(selected.name || 'Schedules')}</h3><small>Global normal routine for this character.</small></div><button type="button" class="primary" data-ghla-schedule-add="${esc(selected.name)}"><i class="fa-solid fa-plus"></i> Add</button></div>
+    ${(selected.schedule||[]).length ? selected.schedule.map(s => `<section class="ghla-schedule-card">
+      <div><b>${esc(s.label)}</b><small>${esc(dayLabel(s.days))} · ${esc(s.start)}–${esc(s.end)}</small><span>${esc(s.type === 'obligation' ? 'Obligation' : 'Routine')}${s.status?` · ${esc(s.status)}`:''}</span></div>
+      <div class="ghla-mini-actions"><button type="button" data-ghla-schedule-edit="${esc(selected.name)}|${esc(s.id)}">Edit</button><button type="button" data-ghla-schedule-delete="${esc(selected.name)}|${esc(s.id)}">Delete</button></div>
+    </section>`).join('') : emptyState('fa-regular fa-calendar', 'No schedules', 'Add only routines that are useful for continuity.')}
+  </main>`;
+}
+
+function renderClockExceptions() {
+  const api = clockApi();
+  const rows = api?.getSlimScheduleProfiles?.() || [];
+  if (!clockExceptionPerson) clockExceptionPerson = currentIdentity()?.name || rows[0]?.name || '';
+  if (!rows.some(x => lc(x.name) === lc(clockExceptionPerson))) clockExceptionPerson = rows[0]?.name || '';
+  const exceptions = api?.getSlimExceptions?.(clockExceptionPerson) || [];
+  const active = activeExceptionFor(clockExceptionPerson);
+  return `<main class="ghla-clock-main">
+    <form class="ghla-person-picker" data-ghla-exception-person-form>
+      <select name="person">${personOptions(rows, clockExceptionPerson)}</select>
+      <button type="submit">View</button>
+    </form>
+    ${active ? `<section class="ghla-active-exception"><small>ACTIVE EXCEPTION</small><b>${esc(active.label)}</b><span>Normal recurring schedules are suspended.</span></section>` : ''}
+    <div class="ghla-section-head"><div><h3>${esc(clockExceptionPerson || 'Exceptions')}</h3><small>Vacation, sick day, day off, leave or a custom exception.</small></div><button type="button" class="primary" data-ghla-exception-add="${esc(clockExceptionPerson)}"><i class="fa-solid fa-plus"></i> Add</button></div>
+    ${exceptions.length ? exceptions.map(x => `<section class="ghla-schedule-card">
+      <div><b>${esc(x.label)}</b><small>${esc(new Date(x.startMs).toLocaleString())}${x.endMs?` → ${esc(new Date(x.endMs).toLocaleString())}`:' → until cleared'}</small><span>${esc(x.type)}</span></div>
+      <div class="ghla-mini-actions"><button type="button" data-ghla-exception-edit="${esc(clockExceptionPerson)}|${esc(x.id)}">Edit</button><button type="button" data-ghla-exception-delete="${esc(clockExceptionPerson)}|${esc(x.id)}">Delete</button></div>
+    </section>`).join('') : emptyState('fa-solid fa-umbrella-beach', 'No exceptions', 'Normal schedules apply unless RP says otherwise.')}
+  </main>`;
+}
+
+function renderClock() {
+  const tab = lifeView.tab || 'now';
+  const body = tab === 'schedules' ? renderClockSchedules() : tab === 'exceptions' ? renderClockExceptions() : renderClockNow();
+  return `<div class="ghla-screen ghla-clock-screen">
+    ${lifeHeader('Clock', 'Greyhaven Life')}
+    ${tabs([['now','Now'],['schedules','Schedules'],['exceptions','Exceptions']], tab)}
+    ${body}
+  </div>`;
+}
+
+function scheduleDialog(personName, scheduleId = '') {
+  const api = clockApi();
+  const profile = (api?.getSlimScheduleProfiles?.() || []).find(x => lc(x.name) === lc(personName));
+  const existing = profile?.schedule?.find(x => x.id === scheduleId) || null;
+  const s = existing || { id:'', label:'', days:[1,2,3,4,5], start:'09:00', end:'17:00', type:'routine', status:'', availability:'busy', reminderMinutes:60, notes:'' };
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  return openDialog(`<form class="ghla-dialog-card" data-ghla-schedule-form data-person="${esc(personName)}" data-id="${esc(s.id||'')}">
+    <header><div><b>${s.id?'Edit':'Add'} schedule</b><small>${esc(personName)}</small></div><button type="button" data-ghla-dialog-close>×</button></header>
+    <main class="ghla-form-grid">
+      <label class="span-2"><span>Name</span><input name="label" value="${esc(s.label)}" placeholder="Hospital Shift" required></label>
+      <div class="span-2 ghla-day-grid">${days.map((d,i)=>`<label><input type="checkbox" name="days" value="${i}" ${(s.days||[]).includes(i)?'checked':''}><span>${d}</span></label>`).join('')}</div>
+      <label><span>Start</span><input name="start" type="time" value="${esc(s.start)}" required></label>
+      <label><span>End</span><input name="end" type="time" value="${esc(s.end)}" required></label>
+      <label><span>Kind</span><select name="type"><option value="routine"${s.type!=='obligation'?' selected':''}>Routine</option><option value="obligation"${s.type==='obligation'?' selected':''}>Obligation</option></select></label>
+      <label><span>Status/activity</span><input name="status" value="${esc(s.status||'')}" placeholder="Working"></label>
+      <label><span>Reminder minutes</span><input name="reminderMinutes" type="number" min="0" max="1440" value="${esc(s.reminderMinutes ?? 60)}"></label>
+      <label class="span-2"><span>Notes</span><textarea name="notes" placeholder="Optional short schedule note">${esc(s.notes||'')}</textarea></label>
+    </main>
+    <footer><button type="button" data-ghla-dialog-close>Cancel</button><button type="submit" class="primary">Save schedule</button></footer>
+  </form>`);
+}
+
+function exceptionDialog(personName, exceptionId = '') {
+  const api = clockApi();
+  const existing = (api?.getSlimExceptions?.(personName) || []).find(x => x.id === exceptionId) || null;
+  const now = rpNow();
+  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate()+1);
+  const x = existing || { id:'', type:'dayoff', label:'Day off', startMs:now.getTime(), endMs:tomorrow.getTime(), notes:'' };
+  return openDialog(`<form class="ghla-dialog-card" data-ghla-exception-form data-person="${esc(personName)}" data-id="${esc(x.id||'')}">
+    <header><div><b>${x.id?'Edit':'Add'} exception</b><small>${esc(personName)}</small></div><button type="button" data-ghla-dialog-close>×</button></header>
+    <main class="ghla-form-grid">
+      <label><span>Type</span><select name="type">${['dayoff','vacation','sick','leave','cancelled','custom'].map(v=>`<option value="${v}"${x.type===v?' selected':''}>${esc(v)}</option>`).join('')}</select></label>
+      <label><span>Label</span><input name="label" value="${esc(x.label)}" required></label>
+      <label><span>Starts</span><input name="startAt" type="datetime-local" value="${esc(toDateTimeLocal(new Date(x.startMs)))}" required></label>
+      <label><span>Ends</span><input name="endAt" type="datetime-local" value="${x.endMs?esc(toDateTimeLocal(new Date(x.endMs))):''}"></label>
+      <label class="span-2"><span>Notes</span><textarea name="notes">${esc(x.notes||'')}</textarea></label>
+    </main>
+    <footer><button type="button" data-ghla-dialog-close>Cancel</button><button type="submit" class="primary">Save exception</button></footer>
+  </form>`);
 }
 
 function saveSettings() {
@@ -2273,7 +2448,7 @@ function openLife(appName = 'home') {
   lifeOpen = true;
   lifeView = {
     app: appName,
-    tab: appName === 'garage' ? 'owned' : appName === 'property' ? 'owned' : '',
+    tab: appName === 'garage' ? 'owned' : appName === 'property' ? 'owned' : appName === 'clock' ? 'now' : '',
     detailId: '',
   };
   syncLifeFolderBlur();
@@ -2318,7 +2493,7 @@ function tabs(items, selected) {
 }
 
 function lifeHeader(title, subtitle = '') {
-  return `<header class="ghla-header">
+  return `${addonStatusBar()}<header class="ghla-header">
     <button type="button" data-ghla-back><i class="fa-solid fa-chevron-left"></i></button>
     <div><b>${esc(title)}</b>${subtitle ? `<small>${esc(subtitle)}</small>` : ''}</div>
     <span></span>
@@ -2336,6 +2511,11 @@ function renderLifeHome() {
   return `<div class="ghla-folder-overlay" data-ghla-folder-backdrop>
     <h1>Life</h1>
     <section class="ghla-ios-folder" aria-label="Life folder">
+      <button type="button" class="ghla-ios-folder-app" data-ghla-app="clock">
+        <span class="ghla-ios-app-icon clock"><i class="fa-regular fa-clock"></i></span>
+        <b>Clock</b>
+        <small>${esc(rpNow().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false}))}</small>
+      </button>
       <button type="button" class="ghla-ios-folder-app" data-ghla-app="garage">
         <span class="ghla-ios-app-icon vehicle"><i class="fa-solid fa-car-side"></i></span>
         <b>Garage</b>
@@ -2657,7 +2837,9 @@ function renderLife() {
 
   if (lifeView.app === 'garage') layer.innerHTML = renderGarage();
   else if (lifeView.app === 'property') layer.innerHTML = renderProperty();
+  else if (lifeView.app === 'clock') layer.innerHTML = renderClock();
   else layer.innerHTML = renderLifeHome();
+  updateAddonStatusClock();
 }
 
 /* ---------------- dialogs ---------------- */
@@ -3037,7 +3219,8 @@ function handleLifeClick(event) {
   if (button.matches('[data-ghla-back]')) return lifeBack();
 
   if (button.dataset.ghlaApp) {
-    lifeView = { app: button.dataset.ghlaApp, tab: 'owned', detailId: '' };
+    const app = button.dataset.ghlaApp;
+    lifeView = { app, tab: app === 'clock' ? 'now' : 'owned', detailId: '' };
     syncLifeFolderBlur();
     return renderLife();
   }
@@ -3046,6 +3229,47 @@ function handleLifeClick(event) {
     lifeView.tab = button.dataset.ghlaTab;
     lifeView.detailId = '';
     return renderLife();
+  }
+
+  if (button.dataset.ghlaClockShift) {
+    clockApi()?.shiftMinutes?.(Number(button.dataset.ghlaClockShift));
+    return renderLife();
+  }
+  if (button.dataset.ghlaClockNext === 'morning') {
+    const d = rpNow(); d.setDate(d.getDate()+1); d.setHours(8,0,0,0);
+    clockApi()?.setManualTime?.(d, true);
+    return renderLife();
+  }
+  if (button.dataset.ghlaClockNext === 'day') {
+    const d = rpNow(); d.setDate(d.getDate()+1);
+    clockApi()?.setManualTime?.(d, true);
+    return renderLife();
+  }
+  if (button.dataset.ghlaScheduleAdd !== undefined) return scheduleDialog(button.dataset.ghlaScheduleAdd);
+  if (button.dataset.ghlaScheduleEdit) {
+    const [name,id] = button.dataset.ghlaScheduleEdit.split('|');
+    return scheduleDialog(name,id);
+  }
+  if (button.dataset.ghlaScheduleDelete) {
+    const [name,id] = button.dataset.ghlaScheduleDelete.split('|');
+    if (confirm('Delete this recurring schedule?')) {
+      clockApi()?.deleteSlimSchedule?.(name,id);
+      renderLife();
+    }
+    return;
+  }
+  if (button.dataset.ghlaExceptionAdd !== undefined) return exceptionDialog(button.dataset.ghlaExceptionAdd);
+  if (button.dataset.ghlaExceptionEdit) {
+    const [name,id] = button.dataset.ghlaExceptionEdit.split('|');
+    return exceptionDialog(name,id);
+  }
+  if (button.dataset.ghlaExceptionDelete) {
+    const [name,id] = button.dataset.ghlaExceptionDelete.split('|');
+    if (confirm('Delete this exception?')) {
+      clockApi()?.deleteSlimException?.(name,id);
+      renderLife();
+    }
+    return;
   }
 
   if (button.dataset.ghlaVehicle) {
@@ -3153,6 +3377,76 @@ function handleLifeClick(event) {
 async function handleLifeSubmit(event) {
   const form = event.target;
   if (!(form instanceof HTMLFormElement)) return;
+
+  if (form.matches('[data-ghla-clock-set]')) {
+    event.preventDefault();
+    const fd = new FormData(form);
+    const d = parseDateTimeLocal(fd.get('when'));
+    if (!d) return globalThis.toastr?.error?.('Choose a valid date and time.');
+    clockApi()?.setManualTime?.(d, fd.get('running') === 'on');
+    renderLife();
+    return;
+  }
+
+  if (form.matches('[data-ghla-clock-person-form]')) {
+    event.preventDefault();
+    clockSchedulePerson = norm(new FormData(form).get('person'));
+    renderLife();
+    return;
+  }
+
+  if (form.matches('[data-ghla-exception-person-form]')) {
+    event.preventDefault();
+    clockExceptionPerson = norm(new FormData(form).get('person'));
+    renderLife();
+    return;
+  }
+
+  if (form.matches('[data-ghla-schedule-form]')) {
+    event.preventDefault();
+    const fd = new FormData(form);
+    const person = norm(form.dataset.person);
+    const days = [...form.querySelectorAll('input[name="days"]:checked')].map(x => Number(x.value));
+    if (!person || !norm(fd.get('label')) || !days.length) return globalThis.toastr?.error?.('Choose a name and at least one day.');
+    clockApi()?.saveSlimSchedule?.(person, {
+      id: norm(form.dataset.id) || undefined,
+      label: fd.get('label'),
+      days,
+      start: fd.get('start'),
+      end: fd.get('end'),
+      type: fd.get('type'),
+      status: fd.get('status'),
+      availability: 'busy',
+      reminderMinutes: fd.get('reminderMinutes'),
+      notes: fd.get('notes'),
+    });
+    form.closest('dialog')?.close();
+    clockSchedulePerson = person;
+    renderLife();
+    return;
+  }
+
+  if (form.matches('[data-ghla-exception-form]')) {
+    event.preventDefault();
+    const fd = new FormData(form);
+    const person = norm(form.dataset.person);
+    const start = parseDateTimeLocal(fd.get('startAt'));
+    const end = fd.get('endAt') ? parseDateTimeLocal(fd.get('endAt')) : null;
+    if (!person || !start || (end && end <= start)) return globalThis.toastr?.error?.('Choose a valid exception period.');
+    clockApi()?.saveSlimException?.(person, {
+      id: norm(form.dataset.id) || undefined,
+      type: fd.get('type'),
+      label: fd.get('label'),
+      startMs: start.getTime(),
+      endMs: end ? end.getTime() : null,
+      suppressObligations: true,
+      notes: fd.get('notes'),
+    });
+    form.closest('dialog')?.close();
+    clockExceptionPerson = person;
+    renderLife();
+    return;
+  }
 
   if (form.matches('[data-ghla-vehicle-search]')) {
     event.preventDefault();

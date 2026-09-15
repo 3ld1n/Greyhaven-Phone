@@ -14,7 +14,7 @@
  */
 
 const GHTE_MODULE = 'greyhaven-phone-travel-events';
-const GHTE_VERSION = '2.7.1';
+const GHTE_VERSION = '2.8.0';
 const GHTE_STATE_KEY = 'greyhavenPhoneTravelEvents';
 const GHTE_MIGRATION_KEY = 'greyhavenPhoneTravelEventsV27Migration';
 const GHTE_LEGACY_BACKUP_KEY = 'greyhavenPhoneTravelEventsV26Backup';
@@ -78,6 +78,23 @@ function rpNow() {
 function currentChatKey() {
   const c = ctx();
   return String(c?.getCurrentChatId?.() || c?.chatId || c?.chatMetadata?.chat_id || c?.chatMetadata?.file_name || 'current-chat');
+}
+
+
+function addonStatusBar() {
+  const d = rpNow();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `<div class="ghp-status ghte-addon-status">
+    <span data-gh-addon-time>${esc(time)}</span>
+    <button class="ghp-island" type="button" tabindex="-1" aria-label="Dynamic Island"><i class="fa-solid fa-circle"></i><em></em></button>
+    <span><i class="fa-solid fa-signal"></i><i class="fa-solid fa-wifi"></i><i class="fa-solid fa-battery-three-quarters"></i></span>
+  </div>`;
+}
+
+function updateAddonStatusClock() {
+  const d = rpNow();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  qsa('[data-gh-addon-time]', qs('#ghte-layer')).forEach(el => { el.textContent = time; });
 }
 
 function saveSettings() {
@@ -1861,7 +1878,7 @@ function back() {
 }
 
 function appHeader(title, subtitle = '', brand = '') {
-  return `<header class="ghte-header ${brand}">
+  return `${addonStatusBar()}<header class="ghte-header ${brand}">
     <button type="button" data-ghte-back><i class="fa-solid fa-chevron-left"></i></button>
     <div><b>${esc(title)}</b>${subtitle ? `<small>${esc(subtitle)}</small>` : ''}</div>
     <span></span>
@@ -2369,6 +2386,7 @@ function render() {
   const layer = ensureLayer();
   if (!layer) return;
   layer.innerHTML = appOpen === 'events' ? renderEvents() : renderBooking();
+  updateAddonStatusClock();
 }
 
 /* ---------------- dialogs ---------------- */
