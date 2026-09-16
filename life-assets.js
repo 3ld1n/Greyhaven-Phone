@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.8.1';
+const GHLA_VERSION = '2.8.2';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -90,6 +90,21 @@ function clockApi() {
   return globalThis.GreyhavenLife || null;
 }
 
+function clockState() {
+  try {
+    const api = clockApi();
+    if (typeof api?.getSlimClockState === 'function') return api.getSlimClockState();
+    const time = api?.getState?.()?.time || {};
+    return {
+      mode: time.mode || 'real',
+      manualRunning: time.manualRunning !== false,
+      now: rpNow().toISOString(),
+    };
+  } catch {
+    return { mode:'real', manualRunning:true, now:rpNow().toISOString() };
+  }
+}
+
 function toDateTimeLocal(date) {
   const d = new Date(date);
   const pad = n => String(n).padStart(2, '0');
@@ -124,6 +139,8 @@ function currentScheduleFor(name) {
 
 function renderClockNow() {
   const d = rpNow();
+  const cstate = clockState();
+  const running = cstate.mode !== 'manual' || cstate.manualRunning !== false;
   return `<main class="ghla-clock-main">
     <section class="ghla-clock-card">
       <small>AUTHORITATIVE RP TIME</small>
@@ -139,7 +156,7 @@ function renderClockNow() {
     </div>
     <form class="ghla-clock-set" data-ghla-clock-set>
       <label><span>Set date & time</span><input name="when" type="datetime-local" value="${esc(toDateTimeLocal(d))}"></label>
-      <label class="ghla-check-row"><input name="running" type="checkbox" checked><span>Keep clock running after setting it</span></label>
+      <label class="ghla-check-row"><input name="running" type="checkbox" ${running?'checked':''}><span>Keep clock running after setting it</span></label>
       <button class="primary" type="submit">Set RP time</button>
     </form>
     <section class="ghla-info-card">
@@ -162,11 +179,11 @@ function renderClockSchedules() {
       <button type="submit">View</button>
     </form>
     ${active ? `<section class="ghla-active-schedule"><small>ACTIVE NOW</small><b>${esc(active.entry?.label || 'Schedule')}</b><span>${esc(active.entry?.start || '')}–${esc(active.entry?.end || '')} · ${esc(active.entry?.type || 'routine')}</span></section>` : ''}
-    <div class="ghla-section-head"><div><h3>${esc(selected.name || 'Schedules')}</h3><small>Global normal routine for this character.</small></div><button type="button" class="primary" data-ghla-schedule-add="${esc(selected.name)}"><i class="fa-solid fa-plus"></i> Add</button></div>
+    <div class="ghla-section-head"><div><h3>${esc(selected.name || 'Schedules')}</h3><small>Global routine — saved for this character across every chat.</small></div><button type="button" class="primary" data-ghla-schedule-add="${esc(selected.name)}"><i class="fa-solid fa-plus"></i> Add</button></div>
     ${(selected.schedule||[]).length ? selected.schedule.map(s => `<section class="ghla-schedule-card">
-      <div><b>${esc(s.label)}</b><small>${esc(dayLabel(s.days))} · ${esc(s.start)}–${esc(s.end)}</small><span>${esc(s.type === 'obligation' ? 'Obligation' : 'Routine')}${s.status?` · ${esc(s.status)}`:''}</span></div>
+      <div><b>${esc(s.label)} <em class="ghla-global-badge">GLOBAL</em></b><small>${esc(dayLabel(s.days))} · ${esc(s.start)}–${esc(s.end)}</small><span>${esc(s.type === 'obligation' ? 'Obligation' : 'Routine')}${s.status?` · ${esc(s.status)}`:''}</span></div>
       <div class="ghla-mini-actions"><button type="button" data-ghla-schedule-edit="${esc(selected.name)}|${esc(s.id)}">Edit</button><button type="button" data-ghla-schedule-delete="${esc(selected.name)}|${esc(s.id)}">Delete</button></div>
-    </section>`).join('') : emptyState('fa-regular fa-calendar', 'No schedules', 'Add only routines that are useful for continuity.')}
+    </section>`).join('') : emptyState('fa-regular fa-calendar', 'No global schedules', 'Add a routine here once and it will be used in every chat with this character.')}
   </main>`;
 }
 
