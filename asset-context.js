@@ -1,4 +1,4 @@
-/* Greyhaven Phone v2.8.0 — private personal asset knowledge */
+/* Greyhaven Phone v2.8.1 — private personal asset knowledge */
 
 const GHAC_KEY = 'greyhaven_phone_personal_assets';
 const POSITION = 1;

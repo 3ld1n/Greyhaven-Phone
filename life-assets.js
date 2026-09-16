@@ -12,7 +12,7 @@
  */
 
 const GHLA_MODULE = 'greyhaven-phone-life-assets';
-const GHLA_VERSION = '2.8.0';
+const GHLA_VERSION = '2.8.1';
 const GHLA_SETTINGS_KEY = 'greyhavenPhoneLifeAssets';
 const PHONE_SETTINGS_KEY = 'greyhavenPhone';
 const PHONE_META_KEY = 'greyhavenPhone';
@@ -2368,9 +2368,10 @@ function ensureCss() {
 function lifeIconMarkup() {
   return `<button class="ghp-app-icon ghla-life-folder-icon" data-ghla-open-life aria-label="Open Life folder">
     <span class="ghp-app-square ghla-folder-preview">
+      <i class="fa-regular fa-clock"></i>
       <i class="fa-solid fa-car-side"></i>
       <i class="fa-solid fa-house"></i>
-      <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      <i></i><i></i><i></i><i></i><i></i><i></i>
     </span>
     <small>Life</small>
   </button>`;
@@ -2444,7 +2445,32 @@ function syncLifeFolderBlur() {
   overlay.classList.toggle('ghla-folder-open', lifeOpen && lifeView.app === 'home');
 }
 
-function openLife(appName = 'home') {
+function openLife(appName = 'home', attempt = 0) {
+  const overlay = qs('#ghp-overlay');
+
+  // Public callers (especially the floating Greyhaven Life clock) may call this
+  // while the Phone is closed. v2.8.0 silently rendered into nothing in that
+  // case. Open the Phone first and retry once its content exists.
+  if (!overlay || overlay.hidden || !qs('#ghp-overlay:not([hidden]) .ghp-content')) {
+    if (attempt === 0) {
+      try {
+        Promise.resolve(phoneApi()?.open?.()).catch(error => {
+          console.warn(`[${GHLA_MODULE}] could not open Phone before Life`, error);
+        });
+      } catch (error) {
+        console.warn(`[${GHLA_MODULE}] could not open Phone before Life`, error);
+      }
+    }
+
+    if (attempt < 18) {
+      setTimeout(() => openLife(appName, attempt + 1), 90);
+      return true;
+    }
+
+    globalThis.toastr?.warning?.('Greyhaven Phone opened, but the Life interface was not ready yet. Try once more.');
+    return false;
+  }
+
   lifeOpen = true;
   lifeView = {
     app: appName,
@@ -2453,6 +2479,7 @@ function openLife(appName = 'home') {
   };
   syncLifeFolderBlur();
   renderLife();
+  return true;
 }
 
 function closeLife() {
@@ -3845,6 +3872,7 @@ function expose() {
     refreshVehicleMarket,
     refreshPropertyMarket,
     openLife,
+    openClock: () => openLife('clock'),
     openPhoneManager,
     syncFacebookAssetListings,
   };
