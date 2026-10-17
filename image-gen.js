@@ -12,7 +12,7 @@ import {
 } from './image-gen-core.js';
 
 const MODULE = 'greyhaven-phone-imagegen';
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 const SETTINGS_KEY = 'greyhavenPhone';
 const META_KEY = 'greyhavenPhone';
 const REF_DB_NAME = 'GreyhavenPhoneImageGen';
@@ -28,10 +28,11 @@ const MANUAL_ONLY_APPS = new Set(['onlyfans','darkweb','marketplace','garage','p
 
 let initialized = false;
 let uiObserver = null;
-let scanTimer = null;
-let scanQueued = false;
 let augmentQueued = false;
 let generationQueue = Promise.resolve();
+let registryCache = null;
+let registryDirty = true;
+const refreshStampByPhone = new Map();
 const pending = new Set();
 const pendingReason = new Map();
 const failed = new Map();
@@ -399,16 +400,34 @@ function itemKey(app, scope, row, ownerId='') {
   return `${currentChatKey()}|${ownerId}|${app}|${scope}|${stable}`;
 }
 
-function senderIdentity(row) {
-  return identityById(row?.senderId || row?.identityId || row?.sellerIdentityId || row?.creatorIdentityId) || identityByName(row?.sender || row?.author || row?.sellerName || row?.creator || '');
+function buildIdentityIndex() {
+  // listIdentities() is one relatively expensive Greyhaven core call. Build
+  // lookup maps once per registry refresh instead of calling getIdentityByName
+  // for every photo in every app on every DOM mutation.
+  const rows = identities();
+  const byId = new Map();
+  const byName = new Map();
+  for (const row of rows) {
+    if (row?.id) byId.set(String(row.id), row);
+    const name = lower(row?.name);
+    if (name && !byName.has(name)) byName.set(name, row);
+  }
+  return { rows, byId, byName };
 }
 
-function makeItem({app,scope,row,ownerId,manualOnly=false,source='metadata',threadId='',storeName='',getTarget=null}) {
+function senderIdentity(row, identityIndex=null) {
+  const id = String(row?.senderId || row?.identityId || row?.sellerIdentityId || row?.creatorIdentityId || '');
+  const name = cleanText(row?.sender || row?.author || row?.sellerName || row?.creator || '');
+  if (identityIndex) return identityIndex.byId.get(id) || identityIndex.byName.get(lower(name)) || null;
+  return identityById(id) || identityByName(name);
+}
+
+function makeItem({app,scope,row,ownerId,manualOnly=false,source='metadata',threadId='',storeName='',getTarget=null,identityIndex=null}) {
   if (!row || row.type === 'video' || row.mediaType === 'video') return null;
   const description = mediaDescription(row);
   const isPhoto = row.type === 'photo' || row.mediaType === 'photo' || (!!description && !row.type && !row.mediaType) || (!!row.visual && row.type !== 'video');
   if (!isPhoto || !description || !row.id) return null;
-  const sender = senderIdentity(row);
+  const sender = senderIdentity(row, identityIndex);
   return {
     key:itemKey(app,scope,row,ownerId), id:String(row.id), app, scope, row, ownerId,
     description, caption:String(row.text || row.caption || '').trim(), mediaKey:String(row.mediaKey || ''),
@@ -418,44 +437,82 @@ function makeItem({app,scope,row,ownerId,manualOnly=false,source='metadata',thre
   };
 }
 
-function currentMediaRegistry() {
-  const box = currentTimelineBox();
+function buildCurrentMediaRegistry(box=currentTimelineBox()) {
   if (!box) return [];
   const { timeline:t, owner } = box;
+  const identityIndex = buildIdentityIndex();
   const items = [];
   const add = item => { if (item) items.push(item); };
+  const common = { ownerId:owner.id, identityIndex };
 
   for (const [threadId,th] of Object.entries(t.threads || {})) {
-    for (const row of th.messages || []) add(makeItem({ app:'messages',scope:'message',row,ownerId:owner.id,threadId,getTarget:() => currentTimelineBox()?.timeline?.threads?.[threadId]?.messages?.find(x => x.id === row.id) }));
+    for (const row of th.messages || []) add(makeItem({ ...common, app:'messages',scope:'message',row,threadId,getTarget:() => currentTimelineBox()?.timeline?.threads?.[threadId]?.messages?.find(x => x.id === row.id) }));
   }
 
   for (const app of ['instagram','snapchat','facebook','onlyfans','darkweb']) {
     const store = t[app];
     if (!store) continue;
     for (const [threadId,th] of Object.entries(store.threads || {})) {
-      for (const row of th.messages || []) add(makeItem({ app,scope:'dm',row,ownerId:owner.id,threadId,manualOnly:app==='onlyfans'||app==='darkweb',getTarget:() => currentTimelineBox()?.timeline?.[app]?.threads?.[threadId]?.messages?.find(x => x.id === row.id) }));
+      for (const row of th.messages || []) add(makeItem({ ...common, app,scope:'dm',row,threadId,manualOnly:app==='onlyfans'||app==='darkweb',getTarget:() => currentTimelineBox()?.timeline?.[app]?.threads?.[threadId]?.messages?.find(x => x.id === row.id) }));
     }
   }
 
-  for (const row of t.instagram?.posts || []) add(makeItem({app:'instagram',scope:'post',row,ownerId:owner.id,getTarget:() => currentTimelineBox()?.timeline?.instagram?.posts?.find(x=>x.id===row.id)}));
-  for (const row of t.instagram?.stories || []) add(makeItem({app:'instagram',scope:'story',row,ownerId:owner.id,getTarget:() => currentTimelineBox()?.timeline?.instagram?.stories?.find(x=>x.id===row.id)}));
-  for (const row of t.facebook?.posts || []) add(makeItem({app:'facebook',scope:'post',row,ownerId:owner.id,getTarget:() => currentTimelineBox()?.timeline?.facebook?.posts?.find(x=>x.id===row.id)}));
-  for (const row of t.snapchat?.stories || []) add(makeItem({app:'snapchat',scope:'story',row,ownerId:owner.id,getTarget:() => currentTimelineBox()?.timeline?.snapchat?.stories?.find(x=>x.id===row.id)}));
-  for (const row of t.snapchat?.memories || []) add(makeItem({app:'snapchat',scope:'memory',row,ownerId:owner.id,manualOnly:true,getTarget:() => currentTimelineBox()?.timeline?.snapchat?.memories?.find(x=>x.id===row.id)}));
-  for (const row of t.photos || []) add(makeItem({app:'photos',scope:'library',row,ownerId:owner.id,manualOnly:true,getTarget:() => currentTimelineBox()?.timeline?.photos?.find(x=>x.id===row.id)}));
+  for (const row of t.instagram?.posts || []) add(makeItem({...common,app:'instagram',scope:'post',row,getTarget:() => currentTimelineBox()?.timeline?.instagram?.posts?.find(x=>x.id===row.id)}));
+  for (const row of t.instagram?.stories || []) add(makeItem({...common,app:'instagram',scope:'story',row,getTarget:() => currentTimelineBox()?.timeline?.instagram?.stories?.find(x=>x.id===row.id)}));
+  for (const row of t.facebook?.posts || []) add(makeItem({...common,app:'facebook',scope:'post',row,getTarget:() => currentTimelineBox()?.timeline?.facebook?.posts?.find(x=>x.id===row.id)}));
+  for (const row of t.snapchat?.stories || []) add(makeItem({...common,app:'snapchat',scope:'story',row,getTarget:() => currentTimelineBox()?.timeline?.snapchat?.stories?.find(x=>x.id===row.id)}));
+  for (const row of t.snapchat?.memories || []) add(makeItem({...common,app:'snapchat',scope:'memory',row,manualOnly:true,getTarget:() => currentTimelineBox()?.timeline?.snapchat?.memories?.find(x=>x.id===row.id)}));
+  for (const row of t.photos || []) add(makeItem({...common,app:'photos',scope:'library',row,manualOnly:true,getTarget:() => currentTimelineBox()?.timeline?.photos?.find(x=>x.id===row.id)}));
 
   const root = metadataRoot();
-  for (const row of root?.marketplace?.listings || []) add(makeItem({app:'marketplace',scope:'listing',row,ownerId:owner.id,manualOnly:true,getTarget:() => metadataRoot()?.marketplace?.listings?.find(x=>x.id===row.id)}));
-  for (const row of root?.darkWeb?.listings || root?.darkweb?.listings || []) add(makeItem({app:'darkweb',scope:'listing',row,ownerId:owner.id,manualOnly:true,getTarget:() => (metadataRoot()?.darkWeb?.listings || metadataRoot()?.darkweb?.listings || []).find(x=>x.id===row.id)}));
+  for (const row of root?.marketplace?.listings || []) add(makeItem({...common,app:'marketplace',scope:'listing',row,manualOnly:true,getTarget:() => metadataRoot()?.marketplace?.listings?.find(x=>x.id===row.id)}));
+  for (const row of root?.darkWeb?.listings || root?.darkweb?.listings || []) add(makeItem({...common,app:'darkweb',scope:'listing',row,manualOnly:true,getTarget:() => (metadataRoot()?.darkWeb?.listings || metadataRoot()?.darkweb?.listings || []).find(x=>x.id===row.id)}));
 
   const phoneSettings = ctx()?.extensionSettings?.[SETTINGS_KEY];
   for (const [identityId,account] of Object.entries(phoneSettings?.onlyFansAccounts || {})) {
-    for (const row of account?.posts || []) add(makeItem({app:'onlyfans',scope:'post',row,ownerId:owner.id,manualOnly:true,source:'settings',getTarget:() => ctx()?.extensionSettings?.[SETTINGS_KEY]?.onlyFansAccounts?.[identityId]?.posts?.find(x=>x.id===row.id)}));
+    for (const row of account?.posts || []) add(makeItem({...common,app:'onlyfans',scope:'post',row,manualOnly:true,source:'settings',getTarget:() => ctx()?.extensionSettings?.[SETTINGS_KEY]?.onlyFansAccounts?.[identityId]?.posts?.find(x=>x.id===row.id)}));
   }
 
   const unique = new Map();
   for (const item of items) if (!unique.has(item.key)) unique.set(item.key,item);
   return [...unique.values()];
+}
+
+function invalidateRegistry() {
+  registryDirty = true;
+}
+
+function cacheRegistry(items, token) {
+  const byKey = new Map(items.map(item => [item.key,item]));
+  const byId = new Map();
+  const byDescription = new Map();
+  for (const item of items) {
+    const idList = byId.get(item.id) || []; idList.push(item); byId.set(item.id,idList);
+    const desc = cleanText(item.description);
+    const descList = byDescription.get(desc) || []; descList.push(item); byDescription.set(desc,descList);
+  }
+  registryCache = { token, items, byKey, byId, byDescription };
+  registryDirty = false;
+  return registryCache;
+}
+
+function currentMediaRegistry({force=false}={}) {
+  const box = currentTimelineBox();
+  if (!box) { registryCache=null; registryDirty=true; return []; }
+  const token = `${currentChatKey()}|${box.owner.id}`;
+  if (!force && !registryDirty && registryCache?.token === token) return registryCache.items;
+  return cacheRegistry(buildCurrentMediaRegistry(box), token).items;
+}
+
+function registryMaps(force=false) {
+  const registry = currentMediaRegistry({force});
+  if (registryCache?.items === registry) return registryCache;
+  return cacheRegistry(registry, `${currentChatKey()}|${currentIdentity()?.id || ''}`);
+}
+
+function registryItem(key) {
+  const maps = registryMaps(false);
+  return maps.byKey.get(key) || null;
 }
 
 function saveItemSource(item) {
@@ -544,12 +601,11 @@ function phoneIsOpen() {
   return !!overlay && overlay.hidden === false;
 }
 
-function scanForNewMedia() {
-  scanQueued = false;
+function processNewMediaAfterRefresh() {
   if (!phoneIsOpen() || !hasPhone()) return;
   const owner = currentIdentity();
   if (!owner) return;
-  const registry = currentMediaRegistry();
+  const registry = currentMediaRegistry({force:true});
   const s = imageSettings();
   const seen = seenSet(owner.id);
   const baseline = baselineKey(owner.id);
@@ -558,7 +614,6 @@ function scanForNewMedia() {
     for (const item of registry) seen.add(item.key);
     s.baselineChats[baseline] = true;
     saveSeen(owner.id, seen);
-    augmentPhoneDom();
     return;
   }
 
@@ -567,16 +622,30 @@ function scanForNewMedia() {
     if (seen.has(item.key)) continue;
     seen.add(item.key);
     changed = true;
-    if (!item.mediaKey && autoEnabled(item)) queueGeneration(item.key, 'auto');
+    if (!item.mediaKey && autoEnabled(item)) queueGeneration(item, 'auto');
   }
   if (changed) saveSeen(owner.id, seen);
-  augmentPhoneDom();
 }
 
-function scheduleScan(delay=40) {
-  if (scanQueued) return;
-  scanQueued = true;
-  setTimeout(scanForNewMedia, delay);
+function refreshStampKey(box) {
+  return `${currentChatKey()}|${box?.owner?.id || ''}`;
+}
+
+function maybeProcessPhoneRefresh() {
+  const box = currentTimelineBox();
+  if (!box) return;
+  const key = refreshStampKey(box);
+  const stamp = Number(box.timeline?.refresh?.lastAt || 0);
+  if (!refreshStampByPhone.has(key)) {
+    refreshStampByPhone.set(key, stamp);
+    return;
+  }
+  const previous = Number(refreshStampByPhone.get(key) || 0);
+  if (stamp && stamp !== previous) {
+    refreshStampByPhone.set(key, stamp);
+    invalidateRegistry();
+    processNewMediaAfterRefresh();
+  }
 }
 
 async function fileToBase64(blob) {
@@ -694,10 +763,29 @@ async function clearProviderKey() {
   updateProviderStatusDom();
 }
 
+function updateGenerationStateDom(key) {
+  const isPending = pending.has(key);
+  const error = failed.get(key) || '';
+  for (const button of document.querySelectorAll('.ghimg-generate[data-ghimg-key]')) {
+    if (button.dataset.ghimgKey !== key) continue;
+    button.disabled = isPending;
+    button.innerHTML = isPending
+      ? '<i class="fa-solid fa-spinner fa-spin"></i> Generating…'
+      : '<i class="fa-solid fa-wand-magic-sparkles"></i> Generate';
+    const host = button.closest('[data-ghimg-key]') || button.parentElement;
+    if (host) {
+      host.classList.toggle('ghimg-pending', isPending);
+      host.classList.toggle('ghimg-auto-pending', isPending && pendingReason.get(key)==='auto');
+      host.querySelectorAll(':scope > .ghimg-error').forEach(node => node.remove());
+      if (error && !isPending) {
+        const small=document.createElement('small'); small.className='ghimg-error'; small.textContent=error; host.appendChild(small);
+      }
+    }
+  }
+}
+
 async function generateItem(item, reason='manual') {
   if (!item || item.mediaKey) return item?.mediaKey || '';
-  if (pending.has(item.key)) return '';
-  pending.add(item.key); pendingReason.set(item.key,reason); failed.delete(item.key); augmentPhoneDom();
   try {
     if (!providerStatus?.configured) await refreshProviderStatus();
     if (!providerStatus?.configured) throw new Error('Wiro is not configured in Greyhaven Phone Settings.');
@@ -730,6 +818,7 @@ async function generateItem(item, reason='manual') {
     }
     propagateGeneratedState(item, mediaKey, dimensions.width, dimensions.height);
     item.mediaKey = mediaKey;
+    invalidateRegistry();
 
     const usage = s.usage;
     usage.images += 1;
@@ -749,30 +838,24 @@ async function generateItem(item, reason='manual') {
     return '';
   } finally {
     pending.delete(item.key); pendingReason.delete(item.key);
-    augmentPhoneDom();
+    updateGenerationStateDom(item.key);
   }
 }
 
-function queueGeneration(key, reason='auto') {
-  generationQueue = generationQueue.then(async () => {
-    const item = currentMediaRegistry().find(x => x.key === key);
-    if (!item || item.mediaKey) return;
-    await generateItem(item,reason);
-  }).catch(error => console.error(`[${MODULE}] queue`,error));
+function queueGeneration(itemOrKey, reason='auto') {
+  const item = typeof itemOrKey === 'string' ? registryItem(itemOrKey) : itemOrKey;
+  if (!item || item.mediaKey || pending.has(item.key)) return generationQueue;
+  pending.add(item.key);
+  pendingReason.set(item.key,reason);
+  failed.delete(item.key);
+  updateGenerationStateDom(item.key);
+  generationQueue = generationQueue.then(() => generateItem(item,reason)).catch(error => {
+    console.error(`[${MODULE}] queue`,error);
+    pending.delete(item.key); pendingReason.delete(item.key);
+    failed.set(item.key,error?.message || String(error));
+    updateGenerationStateDom(item.key);
+  });
   return generationQueue;
-}
-
-function registryMaps() {
-  const registry = currentMediaRegistry();
-  const byKey = new Map(registry.map(x => [x.key,x]));
-  const byId = new Map();
-  const byDescription = new Map();
-  for (const item of registry) {
-    const idList = byId.get(item.id) || []; idList.push(item); byId.set(item.id,idList);
-    const desc = cleanText(item.description);
-    const descList = byDescription.get(desc) || []; descList.push(item); byDescription.set(desc,descList);
-  }
-  return { registry,byKey,byId,byDescription };
 }
 
 function inferItemForNode(node,maps) {
@@ -822,6 +905,17 @@ function manualButton(item) {
   button.innerHTML = isPending
     ? '<i class="fa-solid fa-spinner fa-spin"></i> Generating…'
     : '<i class="fa-solid fa-wand-magic-sparkles"></i> Generate';
+  // Bind directly to the generated button. Greyhaven Phone has its own overlay
+  // click dispatcher; a direct handler avoids a second full media-registry scan
+  // just to discover which button was tapped and gives instant iOS feedback.
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (pending.has(item.key)) return;
+    button.disabled = true;
+    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Generating…';
+    queueGeneration(item,'manual');
+  });
   return button;
 }
 
@@ -918,7 +1012,7 @@ function settingsSectionHtml() {
     <div class="ghimg-inline-actions"><button type="button" class="primary" data-ghimg-save-provider>Save Wiro Settings</button><button type="button" data-ghimg-clear-provider>Remove Credentials</button></div>
     <div class="ghimg-usage"><span><b>${usage.images}</b><small>generated</small></span><span><b>${usage.totalCost?`$${usage.totalCost.toFixed(3)}`:'—'}</b><small>Wiro reported cost</small></span></div>
     <button type="button" class="ghimg-wide" data-ghimg-open-references><i class="fa-regular fa-images"></i><span><b>Character Reference Packs</b><small>Manage every character from any phone.</small></span><i class="fa-solid fa-chevron-right"></i></button>
-    <div class="ghimg-auto"><h4>Automatic generation · ${esc(owner?.name || 'this phone')}</h4><p>All switches start OFF. They apply only to new direct photo messages received after you enable them. Feed posts, stories, listings and old photos stay manual.</p>
+    <div class="ghimg-auto"><h4>Automatic generation · ${esc(owner?.name || 'this phone')}</h4><p>All switches start OFF. Automatic image checks run only when Refresh Phone finishes. New direct photo messages can generate automatically; opening apps, scrolling, feed posts, stories, listings and old photos never trigger paid generation scans.</p>
       ${apps.map(app=>`<details><summary><span><i class="${app==='messages'?'fa-solid fa-comment':app==='snapchat'?'fa-brands fa-snapchat':app==='instagram'?'fa-brands fa-instagram':'fa-brands fa-facebook-f'}"></i> ${appLabels[app]}</span><small>${appCandidates(app).filter(x=>auto?.[app]?.[x.id]).length} enabled</small></summary><div>${appCandidates(app).map(identity=>`<label class="ghimg-auto-row"><span>${avatarHtml(identity)}<b>${esc(identity.name)}</b></span><input type="checkbox" data-ghimg-auto-app="${esc(app)}" data-ghimg-auto-identity="${esc(identity.id)}" ${auto?.[app]?.[identity.id]?'checked':''}></label>`).join('')||'<small class="ghimg-muted">No eligible contacts/friends in this app yet.</small>'}</div></details>`).join('')}
       <div class="ghimg-manual-note"><i class="fa-solid fa-hand-pointer"></i><span><b>Manual by design</b><small>OnlyFans, Marketplace, Dark Web, Garage / Properties / Booking / Events media never spend credits automatically. Use Generate on the exact image you want.</small></span></div>
     </div>
@@ -998,16 +1092,15 @@ function installPromptDetailHook() {
 }
 function augmentPhoneDom() {
   if (!phoneIsOpen()) return;
+  maybeProcessPhoneRefresh();
   injectSettingsSection();
-  const maps = registryMaps();
+  const maps = registryMaps(false);
   augmentMediaButtons(maps);
 }
 
 function bindDomEvents() {
   document.addEventListener('click', async event => {
     const target = event.target instanceof Element ? event.target : null; if (!target) return;
-    const generate = target.closest('[data-ghimg-key].ghimg-generate');
-    if (generate) { event.preventDefault();event.stopPropagation();const item=currentMediaRegistry().find(x=>x.key===generate.dataset.ghimgKey);if(item)queueGeneration(item.key,'manual');return; }
     if (target.closest('[data-ghimg-save-provider]')) { event.preventDefault();await saveProviderConfig();return; }
     if (target.closest('[data-ghimg-clear-provider]')) { event.preventDefault();await clearProviderKey();return; }
     if (target.closest('[data-ghimg-open-references]')) { event.preventDefault();openReferenceManager();return; }
@@ -1091,7 +1184,6 @@ function observePhoneUi() {
   if (uiObserver) return;
   uiObserver = new MutationObserver(mutations => {
     if (!mutations.some(mutationTouchesPhone)) return;
-    scheduleScan(100);
     scheduleAugment();
   });
   uiObserver.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['hidden']});
@@ -1100,7 +1192,7 @@ function observePhoneUi() {
 function bindSillyTavernEvents() {
   const c = ctx();
   if (!c?.eventSource || !c?.eventTypes) return;
-  const bind = key => { const name=c.eventTypes[key];if(name)c.eventSource.on(name,()=>{installPromptDetailHook();scheduleScan(100)}); };
+  const bind = key => { const name=c.eventTypes[key];if(name)c.eventSource.on(name,()=>{installPromptDetailHook();invalidateRegistry();scheduleAugment()}); };
   for (const key of ['CHAT_CHANGED','CHAT_CREATED','PERSONA_CHANGED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SENT','MESSAGE_EDITED','GROUP_UPDATED','CHARACTER_EDITED']) bind(key);
 }
 
@@ -1138,8 +1230,9 @@ async function init() {
   bindSillyTavernEvents();
   installPromptDetailHook();
   exposeApi();
-  scanTimer = setInterval(() => { installPromptDetailHook(); if (phoneIsOpen()) scheduleScan(0); }, 5000);
-  scheduleScan(250);
+  // No polling. Greyhaven Phone data only needs an image-generation scan when
+  // its own Refresh Phone cycle changes timeline.refresh.lastAt. Normal app
+  // navigation only re-decorates the visible DOM using the cached registry.
   scheduleAugment();
   initialized=true;
   console.info(`[${MODULE}] v${VERSION} loaded`);
