@@ -19,3 +19,9 @@
 .ghimg-ref-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:12px}.ghimg-ref-card{position:relative;aspect-ratio:3/4;border-radius:14px;overflow:hidden;background:#25262c;border:2px solid transparent}.ghimg-ref-card.primary{border-color:#8d63ed}.ghimg-ref-card img{width:100%;height:100%;object-fit:cover}.ghimg-ref-card button{position:absolute;top:7px;width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.68);backdrop-filter:blur(8px);color:#fff;border:1px solid rgba(255,255,255,.18)}.ghimg-ref-card [data-ghimg-primary-ref]{left:7px}.ghimg-ref-card [data-ghimg-remove-ref]{right:7px}.ghimg-ref-card.primary [data-ghimg-primary-ref]{color:#f8d65c}
 .ghimg-ref-empty{grid-column:1/-1;min-height:180px;border:1px dashed rgba(255,255,255,.16);border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:22px}.ghimg-ref-empty>i{font-size:30px;margin-bottom:8px;opacity:.7}.ghimg-ref-empty span{opacity:.65;max-width:320px}
 @media(max-width:600px){.ghimg-dialog{width:calc(100vw - 12px);max-height:calc(100dvh - 12px)}.ghimg-dialog-card{border-radius:18px;max-height:calc(100dvh - 12px)}.ghimg-ref-grid{grid-template-columns:repeat(2,1fr)}}
+
+/* v2.9.1: visible iOS reference-upload feedback inside the modal top layer */
+.ghimg-ref-status{margin:10px 0;padding:10px 12px;border-radius:10px;font-size:.9rem;line-height:1.35;background:rgba(255,255,255,.06)}
+.ghimg-ref-status.busy{opacity:.85}
+.ghimg-ref-status.good{background:rgba(68,180,110,.14)}
+.ghimg-ref-status.bad{background:rgba(210,72,72,.16)}

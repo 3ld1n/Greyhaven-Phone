@@ -12,7 +12,7 @@ import {
 } from './image-gen-core.js';
 
 const MODULE = 'greyhaven-phone-imagegen';
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const SETTINGS_KEY = 'greyhavenPhone';
 const META_KEY = 'greyhavenPhone';
 const REF_DB_NAME = 'GreyhavenPhoneImageGen';
@@ -30,6 +30,7 @@ let initialized = false;
 let uiObserver = null;
 let scanTimer = null;
 let scanQueued = false;
+let augmentQueued = false;
 let generationQueue = Promise.resolve();
 const pending = new Set();
 const pendingReason = new Map();
@@ -265,22 +266,33 @@ function referencePack(identityId) {
 async function addReferences(identityId, files) {
   const s = imageSettings();
   const identity = identityById(identityId);
-  if (!s || !identity) return;
+  const result = { added:0, duplicates:0, errors:[] };
+  if (!s || !identity) { result.errors.push('Character reference pack is unavailable.'); return result; }
   const pack = referencePack(identityId);
-  if (pack.length >= MAX_PACK_REFS) return;
+  if (pack.length >= MAX_PACK_REFS) return result;
   const existingHashes = new Set(pack.map(x => x.hash).filter(Boolean));
-  for (const file of [...files].slice(0, MAX_PACK_REFS - pack.length)) {
-    if (!String(file?.type || '').startsWith('image/')) continue;
-    const normalized = await compressReference(file);
-    if (existingHashes.has(normalized.hash)) continue;
-    const refId = `ref:${uuid()}`;
-    const dbKey = `${identityId}|${refId}`;
-    await dbPut(refDb, REF_STORE, dbKey, normalized.blob);
-    pack.push({ id:refId, dbKey, hash:normalized.hash, width:normalized.width, height:normalized.height, createdAt:Date.now(), primary:pack.length === 0 });
-    existingHashes.add(normalized.hash);
+  const selected = [...files].slice(0, MAX_PACK_REFS - pack.length);
+  for (const file of selected) {
+    const label = String(file?.name || 'Selected image');
+    const type = String(file?.type || '');
+    if (type && !type.startsWith('image/')) { result.errors.push(`${label}: not an image file.`); continue; }
+    try {
+      const normalized = await compressReference(file);
+      if (existingHashes.has(normalized.hash)) { result.duplicates += 1; continue; }
+      const refId = `ref:${uuid()}`;
+      const dbKey = `${identityId}|${refId}`;
+      await dbPut(refDb, REF_STORE, dbKey, normalized.blob);
+      pack.push({ id:refId, dbKey, hash:normalized.hash, width:normalized.width, height:normalized.height, createdAt:Date.now(), primary:pack.length === 0 });
+      existingHashes.add(normalized.hash);
+      result.added += 1;
+    } catch (error) {
+      console.warn(`[${MODULE}] reference upload`, error);
+      result.errors.push(`${label}: ${error?.message || String(error)}`);
+    }
   }
   s.referencePacks[identityId] = pack.slice(0, MAX_PACK_REFS);
   saveImageSettings();
+  return result;
 }
 
 async function removeReference(identityId, refId) {
@@ -624,11 +636,12 @@ function updateProviderStatusDom() {
   const el = document.querySelector('[data-ghimg-provider-status]');
   if (!el) return;
   if (providerStatus?.ok && providerStatus.configured) {
+    const auth = providerStatus.authMode === 'signature' ? 'Signature auth · key + secret stored server-side.' : 'API-key-only auth · key stored server-side.';
     el.className = 'ghimg-provider-status good';
-    el.innerHTML = '<i class="fa-solid fa-circle-check"></i><span><b>Wiro connected</b><small>API key stored on the SillyTavern server.</small></span>';
+    el.innerHTML = `<i class="fa-solid fa-circle-check"></i><span><b>Wiro credentials saved</b><small>${esc(auth)}</small></span>`;
   } else if (providerStatus?.ok) {
     el.className = 'ghimg-provider-status warn';
-    el.innerHTML = '<i class="fa-solid fa-key"></i><span><b>Wiro key not configured</b><small>Save an API key below before generating.</small></span>';
+    el.innerHTML = '<i class="fa-solid fa-key"></i><span><b>Wiro key not configured</b><small>Save your project credentials below before generating.</small></span>';
   } else {
     el.className = 'ghimg-provider-status bad';
     el.innerHTML = `<i class="fa-solid fa-server"></i><span><b>Image relay unavailable</b><small>${esc(providerStatus?.error || 'Install/restart the Greyhaven Image server plugin.')}</small></span>`;
@@ -639,6 +652,7 @@ async function saveProviderConfig() {
   const section = document.querySelector('#ghimg-settings-section');
   if (!section) return;
   const apiKey = section.querySelector('[data-ghimg-api-key]')?.value?.trim() || '';
+  const apiSecret = section.querySelector('[data-ghimg-api-secret]')?.value?.trim() || '';
   const model = section.querySelector('[data-ghimg-model]')?.value || DEFAULT_IMAGE_MODEL;
   const s = imageSettings();
   s.model = GHIMG_MODELS[model] ? model : DEFAULT_IMAGE_MODEL;
@@ -646,8 +660,9 @@ async function saveProviderConfig() {
   const button = section.querySelector('[data-ghimg-save-provider]');
   if (button) { button.disabled=true; button.textContent='Saving…'; }
   try {
-    providerStatus = await pluginRequest('/config', { method:'POST', body:JSON.stringify({ model:s.model, ...(apiKey?{apiKey}:{}) }) });
+    providerStatus = await pluginRequest('/config', { method:'POST', body:JSON.stringify({ model:s.model, ...(apiKey?{apiKey}:{}), ...(apiSecret?{apiSecret}:{}) }) });
     const input = section.querySelector('[data-ghimg-api-key]'); if (input) input.value='';
+    const secretInput = section.querySelector('[data-ghimg-api-secret]'); if (secretInput) secretInput.value='';
     globalThis.toastr?.success?.('Greyhaven image provider saved.');
   } catch (error) {
     globalThis.toastr?.error?.(error?.message || String(error));
@@ -661,7 +676,7 @@ async function saveProviderConfig() {
 async function clearProviderKey() {
   if (!confirm('Remove the saved Wiro API key from the SillyTavern server?')) return;
   try {
-    providerStatus = await pluginRequest('/config', { method:'POST', body:JSON.stringify({ clearApiKey:true, model:imageSettings().model }) });
+    providerStatus = await pluginRequest('/config', { method:'POST', body:JSON.stringify({ clearApiKey:true, clearApiSecret:true, model:imageSettings().model }) });
     globalThis.toastr?.success?.('Wiro API key removed.');
   } catch (error) { globalThis.toastr?.error?.(error?.message || String(error)); }
   updateProviderStatusDom();
@@ -886,8 +901,9 @@ function settingsSectionHtml() {
     <label class="stack"><span><b>Wiro model</b><small>OpenRouter remains your text API. This model is used only for Greyhaven images.</small></span>
       <select data-ghimg-model>${Object.entries(GHIMG_MODELS).map(([id,m])=>`<option value="${esc(id)}" ${s.model===id?'selected':''}>${esc(m.label)}</option>`).join('')}</select>
     </label>
-    <label class="stack"><span><b>Wiro API key</b><small>Saved server-side by the Greyhaven Image relay. The saved key is never shown back to the phone.</small></span><input data-ghimg-api-key type="password" autocomplete="off" placeholder="Paste a new Wiro key"></label>
-    <div class="ghimg-inline-actions"><button type="button" class="primary" data-ghimg-save-provider>Save Wiro Settings</button><button type="button" data-ghimg-clear-provider>Remove Key</button></div>
+    <label class="stack"><span><b>Wiro API key</b><small>Your Wiro project key. It is saved only on the SillyTavern server.</small></span><input data-ghimg-api-key type="password" autocomplete="off" placeholder="Paste a new Wiro key"></label>
+    <label class="stack"><span><b>Wiro API secret <em>(if your project uses Signature Based auth)</em></b><small>If Wiro gave you a secret, paste it here. Leave blank only for an API Key Only project.</small></span><input data-ghimg-api-secret type="password" autocomplete="off" placeholder="Paste Wiro secret (optional for key-only projects)"></label>
+    <div class="ghimg-inline-actions"><button type="button" class="primary" data-ghimg-save-provider>Save Wiro Settings</button><button type="button" data-ghimg-clear-provider>Remove Credentials</button></div>
     <div class="ghimg-usage"><span><b>${usage.images}</b><small>generated</small></span><span><b>${usage.totalCost?`$${usage.totalCost.toFixed(3)}`:'—'}</b><small>Wiro reported cost</small></span></div>
     <button type="button" class="ghimg-wide" data-ghimg-open-references><i class="fa-regular fa-images"></i><span><b>Character Reference Packs</b><small>Manage every character from any phone.</small></span><i class="fa-solid fa-chevron-right"></i></button>
     <div class="ghimg-auto"><h4>Automatic generation · ${esc(owner?.name || 'this phone')}</h4><p>All switches start OFF. They apply only to new direct photo messages received after you enable them. Feed posts, stories, listings and old photos stay manual.</p>
@@ -918,7 +934,7 @@ function renderReferenceManager(dialog,selectedId='') {
   } else {
     const identity = identityById(selectedId); if (!identity) return renderReferenceManager(dialog,'');
     const pack = referencePack(selectedId);
-    dialog.innerHTML = `<div class="ghimg-dialog-card"><header><button type="button" data-ghimg-back-references><i class="fa-solid fa-chevron-left"></i></button><div><b>${esc(identity.name)}</b><small>Reference Pack · ${pack.length}/${MAX_PACK_REFS}</small></div><button type="button" data-ghimg-dialog-close><i class="fa-solid fa-xmark"></i></button></header><main><div class="ghimg-ref-hero">${avatarHtml(identity)}<span><b>${esc(identity.name)}</b><small>These images can be used anywhere this character appears, even outside the current group/chat.</small></span></div><div class="ghimg-ref-grid">${pack.map(ref=>`<div class="ghimg-ref-card ${ref.primary?'primary':''}"><img data-ghimg-ref-db="${esc(ref.dbKey)}" alt="Reference"><button type="button" data-ghimg-primary-ref="${esc(ref.id)}" data-ghimg-ref-owner="${esc(identity.id)}" title="Use as primary"><i class="${ref.primary?'fa-solid':'fa-regular'} fa-star"></i></button><button type="button" data-ghimg-remove-ref="${esc(ref.id)}" data-ghimg-ref-owner="${esc(identity.id)}" title="Remove"><i class="fa-solid fa-trash"></i></button></div>`).join('')||'<div class="ghimg-ref-empty"><i class="fa-regular fa-images"></i><b>No custom references yet</b><span>The character avatar will be used as a fallback until you add some.</span></div>'}</div><input type="file" accept="image/*" multiple hidden data-ghimg-ref-input data-ghimg-ref-owner="${esc(identity.id)}"><button type="button" class="ghimg-wide primary" data-ghimg-add-ref="${esc(identity.id)}" ${pack.length>=MAX_PACK_REFS?'disabled':''}><i class="fa-solid fa-plus"></i><span><b>Add reference images</b><small>Up to ${MAX_PACK_REFS} per character. Duplicate images are ignored.</small></span></button></main></div>`;
+    dialog.innerHTML = `<div class="ghimg-dialog-card"><header><button type="button" data-ghimg-back-references><i class="fa-solid fa-chevron-left"></i></button><div><b>${esc(identity.name)}</b><small>Reference Pack · ${pack.length}/${MAX_PACK_REFS}</small></div><button type="button" data-ghimg-dialog-close><i class="fa-solid fa-xmark"></i></button></header><main><div class="ghimg-ref-hero">${avatarHtml(identity)}<span><b>${esc(identity.name)}</b><small>These images can be used anywhere this character appears, even outside the current group/chat.</small></span></div><div class="ghimg-ref-grid">${pack.map(ref=>`<div class="ghimg-ref-card ${ref.primary?'primary':''}"><img data-ghimg-ref-db="${esc(ref.dbKey)}" alt="Reference"><button type="button" data-ghimg-primary-ref="${esc(ref.id)}" data-ghimg-ref-owner="${esc(identity.id)}" title="Use as primary"><i class="${ref.primary?'fa-solid':'fa-regular'} fa-star"></i></button><button type="button" data-ghimg-remove-ref="${esc(ref.id)}" data-ghimg-ref-owner="${esc(identity.id)}" title="Remove"><i class="fa-solid fa-trash"></i></button></div>`).join('')||'<div class="ghimg-ref-empty"><i class="fa-regular fa-images"></i><b>No custom references yet</b><span>The character avatar will be used as a fallback until you add some.</span></div>'}</div><div class="ghimg-ref-status" data-ghimg-ref-status hidden></div><input type="file" accept="image/*,.heic,.heif" multiple hidden data-ghimg-ref-input data-ghimg-ref-owner="${esc(identity.id)}"><button type="button" class="ghimg-wide primary" data-ghimg-add-ref="${esc(identity.id)}" ${pack.length>=MAX_PACK_REFS?'disabled':''}><i class="fa-solid fa-plus"></i><span><b>Add reference images</b><small>Up to ${MAX_PACK_REFS} per character. Duplicate images are ignored.</small></span></button></main></div>`;
     hydrateReferenceImages(dialog);
   }
 }
@@ -986,7 +1002,15 @@ function bindDomEvents() {
     const close = target.closest('[data-ghimg-dialog-close]'); if (close) { close.closest('dialog')?.close();return; }
     const back = target.closest('[data-ghimg-back-references]'); if (back) { renderReferenceManager(back.closest('dialog'),'');return; }
     const openPack = target.closest('[data-ghimg-open-pack]'); if (openPack) { renderReferenceManager(openPack.closest('dialog'),openPack.dataset.ghimgOpenPack);return; }
-    const addRef = target.closest('[data-ghimg-add-ref]'); if (addRef) { addRef.closest('dialog')?.querySelector('[data-ghimg-ref-input]')?.click();return; }
+    const addRef = target.closest('[data-ghimg-add-ref]'); if (addRef) {
+      const input=addRef.closest('dialog')?.querySelector('[data-ghimg-ref-input]');
+      if (input) {
+        input.value='';
+        try { if (typeof input.showPicker === 'function') input.showPicker(); else input.click(); }
+        catch { input.click(); }
+      }
+      return;
+    }
     const remove = target.closest('[data-ghimg-remove-ref]'); if (remove) { const d=remove.closest('dialog');await removeReference(remove.dataset.ghimgRefOwner,remove.dataset.ghimgRemoveRef);renderReferenceManager(d,remove.dataset.ghimgRefOwner);return; }
     const primary = target.closest('[data-ghimg-primary-ref]'); if (primary) { const d=primary.closest('dialog');setPrimaryReference(primary.dataset.ghimgRefOwner,primary.dataset.ghimgPrimaryRef);renderReferenceManager(d,primary.dataset.ghimgRefOwner);return; }
   }, true);
@@ -998,8 +1022,30 @@ function bindDomEvents() {
     if (input.matches('[data-ghimg-model]')) { const s=imageSettings();s.model=GHIMG_MODELS[input.value]?input.value:DEFAULT_IMAGE_MODEL;saveImageSettings();return; }
     if (input.matches('[data-ghimg-ref-input]')) {
       const ownerId=input.dataset.ghimgRefOwner,d=input.closest('dialog');
-      try { await addReferences(ownerId,input.files || []);renderReferenceManager(d,ownerId); }
-      catch (error) { globalThis.toastr?.error?.(error?.message || String(error)); }
+      const files=[...(input.files || [])];
+      input.value='';
+      if (!files.length) return;
+      const button=d?.querySelector('[data-ghimg-add-ref]');
+      const status=d?.querySelector('[data-ghimg-ref-status]');
+      if (button) button.disabled=true;
+      if (status) { status.hidden=false; status.className='ghimg-ref-status busy'; status.textContent=`Processing ${files.length} image${files.length===1?'':'s'}…`; }
+      try {
+        const result=await addReferences(ownerId,files);
+        renderReferenceManager(d,ownerId);
+        const nextStatus=d?.querySelector('[data-ghimg-ref-status]');
+        if (nextStatus && (result.errors.length || result.duplicates)) {
+          nextStatus.hidden=false;
+          nextStatus.className=`ghimg-ref-status ${result.errors.length?'bad':'good'}`;
+          nextStatus.textContent=[result.added?`${result.added} added.`:'',result.duplicates?`${result.duplicates} duplicate${result.duplicates===1?'':'s'} skipped.`:'',...result.errors].filter(Boolean).join(' ');
+        } else if (result.added) {
+          globalThis.toastr?.success?.(`${result.added} reference image${result.added===1?'':'s'} added.`);
+        }
+      } catch (error) {
+        console.warn(`[${MODULE}] reference upload`, error);
+        if (status) { status.hidden=false; status.className='ghimg-ref-status bad'; status.textContent=error?.message || String(error); }
+      } finally {
+        if (button?.isConnected) button.disabled=false;
+      }
       return;
     }
   }, true);
@@ -1010,9 +1056,32 @@ function bindDomEvents() {
   }, true);
 }
 
+function scheduleAugment() {
+  if (augmentQueued) return;
+  augmentQueued = true;
+  requestAnimationFrame(() => {
+    augmentQueued = false;
+    if (phoneIsOpen()) augmentPhoneDom();
+  });
+}
+
+function mutationTouchesPhone(mutation) {
+  const target = mutation.target instanceof Element ? mutation.target : mutation.target?.parentElement;
+  if (target?.closest?.('#ghp-overlay')) return true;
+  for (const node of mutation.addedNodes || []) {
+    if (!(node instanceof Element)) continue;
+    if (node.id === 'ghp-overlay' || node.closest?.('#ghp-overlay') || node.querySelector?.('#ghp-overlay')) return true;
+  }
+  return false;
+}
+
 function observePhoneUi() {
   if (uiObserver) return;
-  uiObserver = new MutationObserver(() => { scheduleScan(30);requestAnimationFrame(augmentPhoneDom); });
+  uiObserver = new MutationObserver(mutations => {
+    if (!mutations.some(mutationTouchesPhone)) return;
+    scheduleScan(100);
+    scheduleAugment();
+  });
   uiObserver.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['hidden']});
 }
 
@@ -1057,8 +1126,9 @@ async function init() {
   bindSillyTavernEvents();
   installPromptDetailHook();
   exposeApi();
-  scanTimer = setInterval(() => { installPromptDetailHook(); if (phoneIsOpen()) scheduleScan(0); }, 1800);
+  scanTimer = setInterval(() => { installPromptDetailHook(); if (phoneIsOpen()) scheduleScan(0); }, 5000);
   scheduleScan(250);
+  scheduleAugment();
   initialized=true;
   console.info(`[${MODULE}] v${VERSION} loaded`);
 }
