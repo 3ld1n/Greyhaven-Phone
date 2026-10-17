@@ -1,10 +1,10 @@
 {
   "display_name": "Greyhaven Phone",
   "loading_order": 860,
-  "js": "loader.js",
-  "css": "style.css",
+  "js": "entry.js",
+  "css": "entry.css",
   "author": "Eldin + ChatGPT",
-  "version": "2.8.2",
+  "version": "2.9.0",
   "auto_update": false,
   "minimum_client_version": "1.13.3"
 }
