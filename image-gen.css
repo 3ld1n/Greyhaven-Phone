@@ -25,3 +25,14 @@
 .ghimg-ref-status.busy{opacity:.85}
 .ghimg-ref-status.good{background:rgba(68,180,110,.14)}
 .ghimg-ref-status.bad{background:rgba(210,72,72,.16)}
+
+/* v2.10.0 — metadata inspector, retry tools and realism workflow */
+.ghimg-metadata-preview{display:-webkit-box!important;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;max-height:4.3em}
+.ghimg-metadata-details{width:min(100%,330px);margin:8px auto 2px;padding:0;border:1px solid rgba(255,255,255,.10);border-radius:11px;background:rgba(0,0,0,.16);text-align:left;position:relative;z-index:5}
+.ghimg-metadata-details>summary{padding:8px 10px;cursor:pointer;list-style:none;font-size:11px;color:rgba(255,255,255,.78);display:flex;align-items:center;gap:7px}
+.ghimg-metadata-details>summary::-webkit-details-marker{display:none}.ghimg-metadata-details[open]>summary{border-bottom:1px solid rgba(255,255,255,.08)}
+.ghimg-metadata-details>div{padding:9px 10px;font-size:11px;line-height:1.45;color:rgba(255,255,255,.76);white-space:normal}
+.ghimg-tools-host{position:relative!important}.ghimg-tools-chip{position:absolute!important;z-index:14!important;top:8px!important;right:8px!important;height:30px!important;min-width:43px!important;padding:0 9px!important;border:1px solid rgba(255,255,255,.18)!important;border-radius:16px!important;background:rgba(24,18,38,.72)!important;color:#e5d9ff!important;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);display:flex!important;align-items:center!important;justify-content:center!important;gap:5px!important;font-size:10px!important;box-shadow:0 4px 16px rgba(0,0,0,.22)}
+.ghimg-tools-chip span{font-weight:700}.ghimg-tools-chip:active{transform:scale(.96)}
+.ghimg-tools-card main{display:flex;flex-direction:column;gap:11px}.ghimg-editor-label{display:flex!important;flex-direction:column!important;align-items:stretch!important;gap:7px!important;padding:0!important}.ghimg-editor-label>span{display:flex;flex-direction:column}.ghimg-editor-label small{opacity:.66;line-height:1.35}.ghimg-editor-label textarea{box-sizing:border-box;width:100%;min-height:170px;resize:vertical;padding:11px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:#101116;color:#fff;font:inherit;line-height:1.42}
+.ghimg-tools-context{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 11px;border-radius:11px;background:rgba(255,255,255,.05)}.ghimg-tools-context span{opacity:.7;text-align:right;font-size:11px}

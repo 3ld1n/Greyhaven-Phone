@@ -12,7 +12,7 @@ import {
 } from './image-gen-core.js';
 
 const MODULE = 'greyhaven-phone-imagegen';
-const VERSION = '1.2.0';
+const VERSION = '2.0.0';
 const SETTINGS_KEY = 'greyhavenPhone';
 const META_KEY = 'greyhavenPhone';
 const REF_DB_NAME = 'GreyhavenPhoneImageGen';
@@ -38,6 +38,7 @@ const pendingReason = new Map();
 const failed = new Map();
 const refUrls = new Map();
 const generatedUrls = new Map();
+const mediaKeyUrls = new Map();
 let refDbPromise = null;
 let phoneDbPromise = null;
 let providerStatus = null;
@@ -68,6 +69,44 @@ function currentChatKey() {
   const c = ctx();
   const id = c?.getCurrentChatId?.() || c?.chatId || '';
   return c?.groupId ? `group:${c.groupId}:${id}` : `chat:${c?.characterId ?? ''}:${id}`;
+}
+
+function phoneSettingsRoot() {
+  const c = ctx();
+  if (!c?.extensionSettings) return null;
+  c.extensionSettings[SETTINGS_KEY] ||= {};
+  return c.extensionSettings[SETTINGS_KEY];
+}
+
+function onlyFansRefreshGuide() {
+  return cleanText(phoneSettingsRoot()?.socialStudio?.onlyFansRefreshGuide || '');
+}
+
+function continuityForItem(item) {
+  const life = globalThis.GreyhavenLife;
+  if (!life) return '';
+  const pieces = [];
+  try {
+    const sender = item?.senderName ? life.getResolvedPerson?.(item.senderName) : null;
+    const scene = life.getScene?.();
+    const location = cleanText(sender?.location || sender?.area ? [sender?.location,sender?.area].filter(Boolean).join(', ') : '');
+    const sceneLocation = cleanText([scene?.label,scene?.location,scene?.area].filter(Boolean).join(' · '));
+    if (location) pieces.push(`${cleanText(item.senderName || 'Sender')}'s tracked location: ${location}.`);
+    else if (sceneLocation) pieces.push(`Current roleplay scene: ${sceneLocation}.`);
+    const notes = cleanText(scene?.notes || '').slice(0,260);
+    if (notes) pieces.push(`Visible scene continuity: ${notes}.`);
+    const time = life.getTime?.();
+    const d = time ? new Date(time) : null;
+    if (d && !Number.isNaN(d.getTime())) {
+      const clock = new Intl.DateTimeFormat(undefined,{weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false}).format(d);
+      const hour = d.getHours();
+      const part = hour < 6 ? 'late night' : hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 21 ? 'evening' : 'night';
+      pieces.push(`Roleplay time: ${clock} (${part}).`);
+    }
+  } catch (error) {
+    console.warn(`[${MODULE}] continuity`, error);
+  }
+  return pieces.join(' ');
 }
 
 function imageSettings() {
@@ -202,6 +241,18 @@ async function dbGet(dbPromise, store, key) {
     req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error || new Error('Database read failed.'));
   });
+}
+
+
+async function mediaUrlForKey(mediaKey) {
+  if (!mediaKey) return '';
+  let url = mediaKeyUrls.get(mediaKey);
+  if (url) return url;
+  const blob = await dbGet(phoneMediaDb, PHONE_MEDIA_STORE, mediaKey).catch(() => null);
+  if (!blob) return '';
+  url = URL.createObjectURL(blob);
+  mediaKeyUrls.set(mediaKey,url);
+  return url;
 }
 
 async function dbDelete(dbPromise, store, key) {
@@ -472,6 +523,11 @@ function buildCurrentMediaRegistry(box=currentTimelineBox()) {
   for (const [identityId,account] of Object.entries(phoneSettings?.onlyFansAccounts || {})) {
     for (const row of account?.posts || []) add(makeItem({...common,app:'onlyfans',scope:'post',row,manualOnly:true,source:'settings',getTarget:() => ctx()?.extensionSettings?.[SETTINGS_KEY]?.onlyFansAccounts?.[identityId]?.posts?.find(x=>x.id===row.id)}));
   }
+  for (const [identityId,profile] of Object.entries(phoneSettings?.socialStudioProfiles || {})) {
+    for (const app of ['instagram','facebook']) {
+      for (const row of profile?.[app]?.posts || []) add(makeItem({...common,app,scope:'post',row,manualOnly:true,source:'settings',getTarget:() => ctx()?.extensionSettings?.[SETTINGS_KEY]?.socialStudioProfiles?.[identityId]?.[app]?.posts?.find(x=>x.id===row.id)}));
+    }
+  }
 
   const unique = new Map();
   for (const item of items) if (!unique.has(item.key)) unique.set(item.key,item);
@@ -541,6 +597,7 @@ function propagateGeneratedState(item, mediaKey, width, height) {
   if (root) apply(root);
   const phoneSettings = ctx()?.extensionSettings?.[SETTINGS_KEY];
   if (phoneSettings?.onlyFansAccounts) apply(phoneSettings.onlyFansAccounts);
+  if (phoneSettings?.socialStudioProfiles) apply(phoneSettings.socialStudioProfiles);
   saveMetadata(root);
   saveImageSettings();
 }
@@ -782,10 +839,45 @@ function updateGenerationStateDom(key) {
       }
     }
   }
+  for (const button of document.querySelectorAll('.ghimg-tools-chip[data-ghimg-tools-key]')) {
+    if (button.dataset.ghimgToolsKey !== key) continue;
+    button.disabled=isPending;
+    button.innerHTML=isPending?'<i class="fa-solid fa-spinner fa-spin"></i><span>AI</span>':'<i class="fa-solid fa-wand-magic-sparkles"></i><span>AI</span>';
+  }
 }
 
-async function generateItem(item, reason='manual') {
-  if (!item || item.mediaKey) return item?.mediaKey || '';
+
+function descriptionFieldFor(item,target) {
+  if (!target || typeof target !== 'object') return '';
+  if (Object.prototype.hasOwnProperty.call(target,'mediaDescription')) return 'mediaDescription';
+  if (Object.prototype.hasOwnProperty.call(target,'visual')) return 'visual';
+  if (Object.prototype.hasOwnProperty.call(target,'description')) return 'description';
+  return ['message','dm'].includes(item?.scope) ? 'mediaDescription' : 'visual';
+}
+
+function saveItemDescription(item,value) {
+  const next = String(value || '').trim();
+  if (!item || !next) throw new Error('Image metadata cannot be empty.');
+  const target = item.getTarget?.();
+  if (!target) throw new Error('This media item is no longer available. Refresh the phone and try again.');
+  const field = descriptionFieldFor(item,target);
+  target[field] = next;
+  item.description = next;
+  saveItemSource(item);
+  for (const details of document.querySelectorAll('.ghimg-metadata-details[data-ghimg-meta-key]')) {
+    if (details.dataset.ghimgMetaKey !== item.key) continue;
+    const body=details.querySelector(':scope > div'); if (body) body.textContent=next;
+  }
+  invalidateRegistry();
+  document.dispatchEvent(new CustomEvent('greyhaven:image-metadata-changed',{detail:{key:item.key,id:item.id,description:next}}));
+  scheduleAugment();
+  return next;
+}
+
+async function generateItem(item, reason='manual', options={}) {
+  const force = options?.force === true;
+  if (!item || (item.mediaKey && !force)) return item?.mediaKey || '';
+  const oldMediaKey = item.mediaKey || '';
   try {
     if (!providerStatus?.configured) await refreshProviderStatus();
     if (!providerStatus?.configured) throw new Error('Wiro is not configured in Greyhaven Phone Settings.');
@@ -797,7 +889,7 @@ async function generateItem(item, reason='manual') {
     const wardrobeLines = subjects.map(wardrobeLine).filter(Boolean);
     const maxRefs = Number(GHIMG_MODELS[imageSettings().model]?.maxReferences || MAX_WIRO_REFERENCES);
     const { payload:references, assignments } = await loadReferencePayload(subjects,maxRefs);
-    const prompt = buildImagePrompt({ description:item.description, subjects, referenceAssignments:assignments, wardrobeLines, app:item.app, scope:item.scope });
+    const prompt = buildImagePrompt({ description:item.description, subjects, referenceAssignments:assignments, wardrobeLines, app:item.app, scope:item.scope, continuity:continuityForItem(item) });
     const s = imageSettings();
     const response = await pluginRequest('/generate', {
       method:'POST',
@@ -818,6 +910,10 @@ async function generateItem(item, reason='manual') {
     }
     propagateGeneratedState(item, mediaKey, dimensions.width, dimensions.height);
     item.mediaKey = mediaKey;
+    if (force && oldMediaKey && oldMediaKey !== mediaKey) {
+      try { await dbDelete(phoneMediaDb, PHONE_MEDIA_STORE, oldMediaKey); } catch {}
+      const oldUrl = mediaKeyUrls.get(oldMediaKey); if (oldUrl) { URL.revokeObjectURL(oldUrl); mediaKeyUrls.delete(oldMediaKey); }
+    }
     invalidateRegistry();
 
     const usage = s.usage;
@@ -842,14 +938,14 @@ async function generateItem(item, reason='manual') {
   }
 }
 
-function queueGeneration(itemOrKey, reason='auto') {
+function queueGeneration(itemOrKey, reason='auto', options={}) {
   const item = typeof itemOrKey === 'string' ? registryItem(itemOrKey) : itemOrKey;
-  if (!item || item.mediaKey || pending.has(item.key)) return generationQueue;
+  if (!item || (item.mediaKey && !options?.force) || pending.has(item.key)) return generationQueue;
   pending.add(item.key);
   pendingReason.set(item.key,reason);
   failed.delete(item.key);
   updateGenerationStateDom(item.key);
-  generationQueue = generationQueue.then(() => generateItem(item,reason)).catch(error => {
+  generationQueue = generationQueue.then(() => generateItem(item,reason,options)).catch(error => {
     console.error(`[${MODULE}] queue`,error);
     pending.delete(item.key); pendingReason.delete(item.key);
     failed.set(item.key,error?.message || String(error));
@@ -877,7 +973,7 @@ function inferItemForNode(node,maps) {
       const rows = maps.byId.get(market.dataset.marketMessage) || [];
       const hit = rows.find(x => x.app === 'marketplace'); if (hit) return hit;
     }
-    for (const attr of ['data-instagram-like','data-facebook-like','data-onlyfans-post','data-open-onlyfans-post']) {
+    for (const attr of ['data-instagram-like','data-facebook-like','data-onlyfans-post','data-open-onlyfans-post','data-ghsocial-post']) {
       const el = holder.querySelector?.(`[${attr}]`);
       const id = el?.getAttribute(attr);
       if (id) { const rows=maps.byId.get(id)||[]; if(rows.length===1)return rows[0]; }
@@ -895,28 +991,124 @@ function inferItemForNode(node,maps) {
   return null;
 }
 
+function openMediaTools(item) {
+  if (!item) return;
+  let dialog = document.querySelector('#ghimg-media-tools-dialog');
+  if (!dialog) {
+    dialog=document.createElement('dialog');
+    dialog.id='ghimg-media-tools-dialog';
+    dialog.className='ghimg-dialog';
+    document.body.appendChild(dialog);
+  }
+  const model = GHIMG_MODELS[imageSettings()?.model] || {};
+  const action = item.mediaKey ? 'Regenerate image' : 'Generate image';
+  dialog.innerHTML=`<div class="ghimg-dialog-card ghimg-tools-card"><header><div><b>AI Image Tools</b><small>${esc(item.app)} · ${esc(item.scope)}</small></div><button type="button" data-ghimg-tools-close><i class="fa-solid fa-xmark"></i></button></header><main><label class="ghimg-editor-label"><span><b>Image metadata</b><small>Edit what Seedream should actually render. This is saved back to the Greyhaven media item.</small></span><textarea data-ghimg-edit-description>${esc(item.description)}</textarea></label><div class="ghimg-tools-context"><b>Current model</b><span>${esc(model.label || imageSettings()?.model || '')}</span></div><div class="ghimg-inline-actions"><button type="button" data-ghimg-save-description class="primary"><i class="fa-solid fa-floppy-disk"></i> Save metadata</button><button type="button" data-ghimg-regenerate class="primary"><i class="fa-solid fa-rotate"></i> ${esc(action)}</button></div>${item.mediaKey?'<small class="ghimg-muted">Regenerate makes a new paid Wiro request and replaces the current generated preview only after the new image succeeds.</small>':'<small class="ghimg-muted">Tip: hold the Generate button any time to reopen these tools before spending a credit.</small>'}</main></div>`;
+  const textarea=dialog.querySelector('[data-ghimg-edit-description]');
+  dialog.querySelector('[data-ghimg-tools-close]').onclick=()=>dialog.close();
+  dialog.querySelector('[data-ghimg-save-description]').onclick=()=>{
+    try {
+      saveItemDescription(item,textarea.value);
+      globalThis.toastr?.success?.('Image metadata saved.');
+      dialog.close();
+    } catch (error) { globalThis.toastr?.error?.(error?.message || String(error)); }
+  };
+  dialog.querySelector('[data-ghimg-regenerate]').onclick=()=>{
+    try { saveItemDescription(item,textarea.value); }
+    catch (error) { globalThis.toastr?.error?.(error?.message || String(error)); return; }
+    const force=!!item.mediaKey;
+    if (force && !confirm('Generate a new paid image and replace the current one if it succeeds?')) return;
+    dialog.close();
+    queueGeneration(item,'manual',{force});
+  };
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(()=>textarea?.focus?.());
+}
+
+function bindToolsHold(button,item) {
+  let timer=null,start=null;
+  const clear=()=>{if(timer)clearTimeout(timer);timer=null;start=null};
+  button.addEventListener('pointerdown',event=>{
+    if (event.button!==undefined && event.button!==0) return;
+    clear();start={x:Number(event.clientX||0),y:Number(event.clientY||0)};
+    timer=setTimeout(()=>{
+      timer=null;
+      button.dataset.ghimgHeld='1';
+      try { navigator.vibrate?.(20); } catch {}
+      openMediaTools(item);
+    },560);
+  });
+  button.addEventListener('pointermove',event=>{
+    if (!timer||!start) return;
+    if (Math.hypot(Number(event.clientX||0)-start.x,Number(event.clientY||0)-start.y)>12) clear();
+  });
+  const finish=()=>{clear();setTimeout(()=>delete button.dataset.ghimgHeld,80)};
+  button.addEventListener('pointerup',finish);button.addEventListener('pointercancel',finish);button.addEventListener('pointerleave',clear);
+}
+
+function addMetadataDetails(node,item) {
+  if (!node || !item || node.querySelector?.('.ghimg-metadata-details')) return;
+  const preview=node.querySelector?.(':scope > p') || node.querySelector?.('p');
+  if (preview) preview.classList.add('ghimg-metadata-preview');
+  const details=document.createElement('details');
+  details.className='ghimg-metadata-details';
+  details.dataset.ghimgMetaKey=item.key;
+  details.innerHTML=`<summary><i class="fa-solid fa-circle-info"></i> Image metadata</summary><div>${esc(item.description)}</div>`;
+  const button=node.querySelector?.('.ghimg-generate');
+  if (button) node.insertBefore(details,button); else node.appendChild(details);
+}
+
 function manualButton(item) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'ghimg-generate';
   button.dataset.ghimgKey = item.key;
+  button.title = 'Tap to generate · hold to edit metadata or retry';
   const isPending = pending.has(item.key);
   button.disabled = isPending;
   button.innerHTML = isPending
     ? '<i class="fa-solid fa-spinner fa-spin"></i> Generating…'
     : '<i class="fa-solid fa-wand-magic-sparkles"></i> Generate';
-  // Bind directly to the generated button. Greyhaven Phone has its own overlay
-  // click dispatcher; a direct handler avoids a second full media-registry scan
-  // just to discover which button was tapped and gives instant iOS feedback.
+  bindToolsHold(button,item);
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (pending.has(item.key)) return;
+    if (button.dataset.ghimgHeld==='1' || pending.has(item.key)) return;
     button.disabled = true;
     button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Generating…';
     queueGeneration(item,'manual');
   });
   return button;
+}
+
+function generatedToolsButton(item) {
+  const button=document.createElement('button');
+  button.type='button';button.className='ghimg-tools-chip';button.dataset.ghimgToolsKey=item.key;
+  button.innerHTML='<i class="fa-solid fa-wand-magic-sparkles"></i><span>AI</span>';
+  button.title='AI image tools · edit metadata or regenerate';
+  bindToolsHold(button,item);
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();if(button.dataset.ghimgHeld==='1')return;openMediaTools(item)});
+  return button;
+}
+
+function inferGeneratedItemForContainer(container,maps) {
+  const direct=inferItemForNode(container,maps);if(direct?.mediaKey)return direct;
+  if (container.matches?.('.ghp-of-post')) {
+    const caption=cleanText(container.querySelector(':scope > p')?.textContent || '');
+    const candidates=maps.items.filter(x=>x.app==='onlyfans'&&x.scope==='post'&&x.mediaKey&&cleanText(x.caption)===caption);
+    if(candidates.length===1)return candidates[0];
+  }
+  return null;
+}
+
+function augmentGeneratedTools(maps) {
+  const containers=[...document.querySelectorAll('#ghp-overlay .ghp-msg.has-media,#ghp-overlay .ghp-feed article,#ghp-overlay .ghp-of-post,#ghsocial-profile-dialog .ghsocial-post-card')];
+  for (const container of containers) {
+    if (container.querySelector(':scope > .ghimg-tools-chip')) continue;
+    const item=inferGeneratedItemForContainer(container,maps);
+    if (!item?.mediaKey) continue;
+    container.classList.add('ghimg-tools-host');
+    container.appendChild(generatedToolsButton(item));
+  }
 }
 
 function augmentMediaButtons(maps) {
@@ -927,6 +1119,7 @@ function augmentMediaButtons(maps) {
     ...overlay.querySelectorAll('.ghp-media-visual:not(.has-local) .ghp-media-placeholder'),
     ...overlay.querySelectorAll('.ghp-fake-photo'),
     ...overlay.querySelectorAll('.ghp-photos > div:not(:has(img)):not(:has(video))'),
+    ...document.querySelectorAll('#ghsocial-profile-dialog[open] .ghp-fake-photo'),
   ];
 
   for (const node of nodes) {
@@ -938,11 +1131,13 @@ function augmentMediaButtons(maps) {
     node.classList.toggle('ghimg-pending',isPending);
     node.classList.toggle('ghimg-auto-pending',isPending && pendingReason.get(item.key)==='auto');
     node.appendChild(manualButton(item));
+    addMetadataDetails(node,item);
     const error = failed.get(item.key);
     if (error) {
       const small = document.createElement('small'); small.className='ghimg-error'; small.textContent=error; node.appendChild(small);
     }
   }
+  augmentGeneratedTools(maps);
 }
 
 function renderGeneratedIntoDom(key,url,{width,height}={}) {
@@ -960,6 +1155,7 @@ function renderGeneratedIntoDom(key,url,{width,height}={}) {
       const img=document.createElement('img');img.dataset.ghimgGenerated='1';img.src=url;node.replaceChildren(img);
     }
   }
+  scheduleAugment();
 }
 
 function appCandidates(app) {
@@ -1069,16 +1265,33 @@ function installPromptDetailHook() {
   const st = globalThis.SillyTavern;
   if (!st || typeof st.getContext !== 'function' || st.getContext.__ghimgDetailHook) return;
   const originalGetContext = st.getContext.bind(st);
-  const instruction = `\n\n[Greyhaven image metadata rule]\nWhenever this task creates a photo/video/visual/mediaDescription for Phone, Snapchat, Instagram, Facebook, OnlyFans, Marketplace or another Greyhaven app, make that visual description useful as direct image-generation metadata. Describe the visible scene concretely in 2-4 sentences: exact established character names for named people, pose/action, facial expression, framing/camera angle, environment/background, lighting/time of day and important visible objects. First-person wording is allowed for the sender (I/me/myself), but use exact names for other established characters. Do not invent clothing when it is not established; Greyhaven Wardrobe will supply authoritative clothing separately. Do not add invisible emotions, secrets or facts that cannot be seen in the image.`;
+  const instruction = `\n\n[Greyhaven image metadata rule]\nWhenever this task creates a photo, visual, mediaDescription, social post image or image-bearing message for Greyhaven Phone, write the visual metadata as a compact generation-ready scene description, normally 2-4 natural sentences (about 45-90 words). Include: (1) the exact established name of every visible known character and a brief visible appearance cue when established, (2) pose/action and clearly visible facial expression or mood, (3) framing/camera position such as close selfie, mirror selfie, waist-up, full body, eye level or low angle, (4) the specific current physical location/room and concrete background details from the scenario or Greyhaven Life/World Snapshot, (5) time of day and believable lighting, and (6) a few important visible objects that belong in that location. Keep continuity with the current roleplay instead of inventing a generic bedroom, studio, hotel, office or outdoor background. If Greyhaven Life provides the sender's location or the current scene/time, use it unless the event explicitly establishes a different place or time. For selfies, say whether the phone is handheld, mirror-visible or outside the frame. First-person wording is allowed for the sender, but use exact names for other established people. Do not invent clothing when it is unknown; Greyhaven Wardrobe supplies authoritative clothing separately. Do not describe invisible thoughts, secrets or off-camera facts.`;
   const wrapGenerate = context => {
     if (!context || typeof context.generateRaw !== 'function' || context.generateRaw.__ghimgDetailWrapped) return context;
     const originalGenerate = context.generateRaw.bind(context);
     const wrappedGenerate = async options => {
       if (!options || typeof options !== 'object') return originalGenerate(options);
       const system = String(options.systemPrompt || '');
-      const phoneTask = /Greyhaven|Marketplace|OnlyFans|Snapchat|phone refresh|roleplay phone/i.test(system);
-      if (!phoneTask || system.includes('[Greyhaven image metadata rule]')) return originalGenerate(options);
-      return originalGenerate({ ...options, systemPrompt:system + instruction });
+      const phoneTask = /Greyhaven|Marketplace|OnlyFans|Snapchat|Instagram|Facebook|phone refresh|roleplay phone/i.test(system);
+      let nextSystem = system;
+      if (phoneTask && !nextSystem.includes('[Greyhaven image metadata rule]')) nextSystem += instruction;
+      const creatorGuide = onlyFansRefreshGuide();
+      const onlyFansTask = /OnlyFans|adults-only creator platform|creator posts/i.test(system);
+      if (onlyFansTask) {
+        const root = phoneSettingsRoot();
+        if (root) {
+          root.socialStudio ||= {};
+          if (root.socialStudio.lastOnlyFansSystemPrompt !== system) {
+            root.socialStudio.lastOnlyFansSystemPrompt = system;
+            try { ctx()?.saveSettingsDebounced?.(); } catch {}
+          }
+        }
+      }
+      if (onlyFansTask && creatorGuide && !nextSystem.includes('[Greyhaven OnlyFans custom guidance]')) {
+        nextSystem += `\n\n[Greyhaven OnlyFans custom guidance]\n${creatorGuide}\nUse this as additional creative direction for new creator posts. Preserve character personality, established relationships, current setting and age eligibility. Do not repeat the same pose, room or outfit every time unless continuity calls for it.`;
+      }
+      if (nextSystem === system) return originalGenerate(options);
+      return originalGenerate({ ...options, systemPrompt:nextSystem });
     };
     Object.defineProperty(wrappedGenerate,'__ghimgDetailWrapped',{value:true});
     try { context.generateRaw = wrappedGenerate; } catch {}
@@ -1203,6 +1416,11 @@ function exposeApi() {
     getSettings:()=>clone(imageSettings()),
     getReferencePack:identityId=>clone(referencePack(identityId)),
     generateMedia:key=>queueGeneration(key,'manual'),
+    regenerateMedia:key=>queueGeneration(key,'manual',{force:true}),
+    getMediaUrl:mediaKey=>mediaUrlForKey(mediaKey),
+    openMediaTools:key=>{const item=registryItem(key);if(item)openMediaTools(item);return !!item;},
+    invalidate:()=>{invalidateRegistry();scheduleAugment();},
+    refreshUi:()=>scheduleAugment(),
     listCurrentMedia:()=>clone(currentMediaRegistry().map(({getTarget,row,...x})=>x)),
     getMediaMetadata:key=>{
       const item=currentMediaRegistry().find(x=>x.key===key);
@@ -1228,6 +1446,7 @@ async function init() {
   bindDomEvents();
   observePhoneUi();
   bindSillyTavernEvents();
+  document.addEventListener('greyhaven:social-changed',()=>{invalidateRegistry();scheduleAugment()});
   installPromptDetailHook();
   exposeApi();
   // No polling. Greyhaven Phone data only needs an image-generation scan when

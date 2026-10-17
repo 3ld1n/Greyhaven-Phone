@@ -132,18 +132,26 @@ export function selectReferenceAssignments({ subjects=[], packs={}, maxTotal=MAX
   return assignments;
 }
 
-export function buildImagePrompt({ description='', subjects=[], referenceAssignments=[], wardrobeLines=[], app='messages', scope='message' }={}) {
-  const scene = String(description ?? '').trim();
-  const lines = [
-    'Create exactly one photorealistic image from the scene metadata below.',
-    'Treat the scene metadata as authoritative. Do not add unrelated people, clothing, objects or plot details.',
-  ];
+export function buildImagePrompt({ description='', subjects=[], referenceAssignments=[], wardrobeLines=[], app='messages', scope='message', continuity='' }={}) {
+  const scene = cleanText(description);
+  const context = cleanText(continuity);
+  const socialPhonePhoto = ['snapchat','messages','instagram','facebook'].includes(app)
+    && ['message','dm','story','post'].includes(scope);
+  const appStyle = app === 'snapchat'
+    ? 'Make it feel like a spontaneous Snapchat phone photo, casual and immediate.'
+    : app === 'messages'
+      ? 'Make it feel like a believable private phone photo genuinely taken and sent in chat.'
+      : app === 'instagram'
+        ? 'Make it feel like a believable Instagram photo: intentional enough to post, still natural.'
+        : app === 'facebook'
+          ? 'Make it feel like an everyday Facebook photo, natural rather than staged.'
+          : app === 'onlyfans'
+            ? 'Make it feel like an authentic creator photo from a phone or ordinary camera unless the scene explicitly describes a professional shoot.'
+            : 'Use coherent real-world photography that matches the scene.';
 
-  if (['snapchat','messages','instagram','facebook'].includes(app) && ['message','dm','story','post'].includes(scope)) {
-    lines.push('The result should feel like a believable modern phone photo: natural skin texture, realistic optics, normal imperfections, and no artificial beauty-filter look unless the scene explicitly asks for one.');
-  }
-
-  if (scene) lines.push(`SCENE METADATA:\n${scene}`);
+  const lines = ['Create exactly one photorealistic image.'];
+  if (scene) lines.push(`SCENE — follow this literally:\n${scene}`);
+  if (context) lines.push(`CONTINUITY — use only to fill scene details that are not specified above:\n${context}`);
 
   if (referenceAssignments.length) {
     const grouped = new Map();
@@ -152,23 +160,22 @@ export function buildImagePrompt({ description='', subjects=[], referenceAssignm
       list.refs.push(`[Image ${index + 1}]`);
       grouped.set(assignment.subject.id, list);
     });
-    lines.push('REFERENCE IDENTITIES:');
+    lines.push('IDENTITY REFERENCES:');
     for (const {subject,refs} of grouped.values()) {
-      lines.push(`${cleanText(subject.name)} = ${refs.join(', ')}. Preserve this exact person's facial identity, hair, apparent age, build and distinguishing features. Do not merge their identity with another subject.`);
+      lines.push(`${cleanText(subject.name)} = ${refs.join(', ')}. Preserve this person’s face, hair, apparent age, build and stable distinguishing features. Use the references for identity only; use the current scene and wardrobe for pose, clothing, jewelry, background, lighting and camera.`);
     }
-  }
-
-  if (subjects.length) {
-    lines.push(`VISIBLE/REFERENCED ESTABLISHED PEOPLE: ${subjects.map(x => cleanText(x.name)).filter(Boolean).join(', ')}.`);
   }
 
   const wardrobe = wardrobeLines.filter(Boolean);
   if (wardrobe.length) {
-    lines.push('AUTHORITATIVE CURRENT WARDROBE:');
-    lines.push(...wardrobe);
-    lines.push('Wardrobe instructions are authoritative and override conflicting clothing details in the scene metadata as well as model default clothing assumptions. Do not silently add garments that are excluded by an ONLY-wearing or naked statement.');
+    lines.push(`WARDROBE — authoritative:\n${wardrobe.join('\n')}\nThis overrides clothing visible in references. If it says ONLY wearing or naked, add no other garments.`);
   }
 
-  lines.push('Keep anatomy, hands, eyes, teeth, reflections, shadows and perspective physically coherent. Avoid waxy skin, duplicated limbs, fused fingers, malformed faces, random text, watermarks and obvious AI artifacts.');
+  lines.push(appStyle);
+  lines.push(socialPhonePhoto
+    ? 'Use normal smartphone optics and exposure, natural depth, realistic skin pores and fine facial detail, subtle asymmetry and ordinary imperfections; no beauty-filter or glossy CGI look.'
+    : 'Use believable optics, natural skin/material texture and physically coherent lighting; keep retouching subtle and avoid glossy CGI skin.');
+  lines.push('Keep jewelry and piercings realistic and small: nose jewelry tiny, navel jewelry small, earrings proportionate, necklace chains fine and pendants modest. Character names are identity labels, not visible necklace/tattoo/logo text unless the scene explicitly asks for that text.');
+  lines.push('Keep hands, fingers, eyes, teeth, limbs, fabric contact, reflections, shadows and perspective physically coherent. Keep the stated location/background consistent and add no unrelated people or objects. No random text, watermark or signature.');
   return lines.join('\n\n');
 }
