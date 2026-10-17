@@ -215,8 +215,20 @@ async function dbDelete(dbPromise, store, key) {
 }
 
 async function blobHash(blob) {
-  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
-  return [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2,'0')).join('');
+  // Reference hashes are used only for local duplicate detection, not security.
+  // Avoid WebCrypto here because Safari does not expose crypto.subtle in every
+  // SillyTavern/PWA context (notably plain-HTTP/insecure origins).
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    h1 ^= b;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= (b + (i & 0xff));
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `gh1-${(h1 >>> 0).toString(16).padStart(8,'0')}${(h2 >>> 0).toString(16).padStart(8,'0')}-${bytes.length.toString(16)}`;
 }
 
 async function imageBitmapFromBlob(blob) {
