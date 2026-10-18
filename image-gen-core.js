@@ -137,8 +137,7 @@ export function selectReferenceAssignments({ subjects=[], packs={}, maxTotal=MAX
 export function buildImagePrompt({ description='', subjects=[], referenceAssignments=[], wardrobeLines=[], app='messages', scope='message', continuity='' }={}) {
   const scene = cleanText(description);
   const context = cleanText(continuity);
-  const wardrobe = wardrobeLines.filter(Boolean);
-  const text = `${scene} ${wardrobe.join(' ')}`;
+  const text = scene;
   const socialPhoto = ['snapchat','messages','instagram','facebook','onlyfans'].includes(app);
   const professional = /(?:professional (?:camera|photo|portrait|shoot)|studio (?:camera|photograph|shoot)|dslr|mirrorless camera)/i.test(scene);
   const filter = /(?:snapchat|face|beauty|cat ears|dog ears|AR)\s+(?:filter|lens)|(?:filter|lens)\s+(?:on|with|showing)|filtered selfie/i.test(scene);
@@ -170,8 +169,8 @@ export function buildImagePrompt({ description='', subjects=[], referenceAssignm
       lines.push(`${cleanText(subject.name)} = ${refs.join(', ')}. Maintain this person’s real facial proportions, hair, skin tone, apparent age and overall build. References establish identity, not the current outfit, scene, pose or camera.`);
     }
   }
-  if (wardrobe.length) lines.push(`CURRENT WARDROBE (authoritative if explicitly known):\n${wardrobe.join('\n')}\nDo not copy clothing from reference photos over the current scene wardrobe.`);
   lines.push(camera);
+  lines.push('Follow age, clothing, accessories and props only when they are explicitly stated in the scene metadata. Do not import outfit details from reference photos or from a character\'s general style.');
   lines.push('Prioritize believable human photography: natural skin tone and modest skin texture, small real imperfections, facial asymmetry, naturally directed eyes, fine hair detail, consistent shadows, plausible depth of field and realistic fabric. Avoid plastic skin, excessive smoothing, fashion retouching, synthetic glow, HDR and artificial cinematic lighting unless the camera metadata specifically asks for it.');
   // Deliberately do NOT list possible jewelry (nose rings, belly piercings etc.)
   // in every prompt: Seedream can hallucinate those merely from the reminder.

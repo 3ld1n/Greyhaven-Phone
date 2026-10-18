@@ -52,6 +52,7 @@ function settingsRoot() {
   const root=c.extensionSettings[SETTINGS_KEY];
   root.socialStudio ||= {};
   root.socialStudio.onlyFansFullPrompt = String(root.socialStudio.onlyFansFullPrompt || '');
+  root.socialStudio.onlyFansCreatorPrompt = String(root.socialStudio.onlyFansCreatorPrompt || '');
   root.socialStudio.lastOnlyFansSystemPrompt = String(root.socialStudio.lastOnlyFansSystemPrompt || '');
   root.socialStudio.deletedPostIds = Array.isArray(root.socialStudio.deletedPostIds) ? root.socialStudio.deletedPostIds : [];
   root.socialStudioProfiles = root.socialStudioProfiles && typeof root.socialStudioProfiles==='object' && !Array.isArray(root.socialStudioProfiles) ? root.socialStudioProfiles : {};
@@ -63,8 +64,18 @@ const DEFAULT_ONLYFANS_MAIN_PROMPT = `You generate ONE manual OnlyFans content r
 Use only the ASSIGNED 18+ creators supplied in the user prompt. Never invent a creator, identity ID or surname. Match each creator's established personality, current situation, aesthetic and prior posts; vary camera mode, poses, wardrobe, background and tone organically. New posts may be bolder or ordinary as appropriate to that creator; do not make every image an innocent mirror selfie. Give each image a compact photographic description: exact creator name, expression, action, frame, and one chosen camera mode (raw front-facing phone selfie; explicitly described Snapchat-style filter; rear-camera phone snapshot; or justified professional photo), with only a short plausible location/lighting cue. Do not embellish rooms or invent accessories.
 Return {"summary":"short text","posts":[{"creatorIdentityId":"exact supplied ID","creator":"exact supplied name","type":"photo","visual":"clear, concise image metadata","caption":"short in-character caption","likes":0,"comments":0}]}.
 Create 1–4 plausible new posts total from the supplied creator roster. Keep output compatible with Greyhaven Phone's JSON post parser. No minors, coercion or non-consensual content.`;
+function looksLikeOnlyFansPrompt(value) {
+  const text = String(value || '').trim();
+  return /creatorIdentityId/.test(text) && /\"posts\"/.test(text);
+}
 function onlyFansDefaultPrompt() {
-  return String(settingsRoot()?.socialStudio?.lastOnlyFansSystemPrompt || DEFAULT_ONLYFANS_MAIN_PROMPT);
+  const captured = String(settingsRoot()?.socialStudio?.lastOnlyFansSystemPrompt || '').trim();
+  return looksLikeOnlyFansPrompt(captured) ? captured : DEFAULT_ONLYFANS_MAIN_PROMPT;
+}
+function onlyFansSavedPrompt() {
+  const root = settingsRoot();
+  const saved = String(root?.socialStudio?.onlyFansCreatorPrompt || root?.socialStudio?.onlyFansFullPrompt || '').trim();
+  return looksLikeOnlyFansPrompt(saved) ? saved : '';
 }
 function saveSettings() {
   try { ctx()?.saveSettingsDebounced?.(); }
@@ -371,10 +382,10 @@ function augmentOnlyFansControls() {
   const app=document.querySelector('#ghp-overlay .ghp-onlyfans');if(!app)return;
   const role=app.querySelector('.ghp-role-settings');
   if(role&&!app.querySelector('.ghsocial-of-guide')){
-    const root=settingsRoot(),box=document.createElement('section');box.className='ghsocial-of-guide';
-    const saved=String(root?.socialStudio?.onlyFansFullPrompt||'');
+    const box=document.createElement('section');box.className='ghsocial-of-guide';
+    const saved=onlyFansSavedPrompt();
     const captured=onlyFansDefaultPrompt();
-    box.innerHTML=`<h3><i class="fa-solid fa-sliders"></i> Main creator refresh prompt</h3><p>Edit the COMPLETE instructions sent to the AI when OnlyFans refresh generates posts. Keep the required JSON output structure and 18+ restrictions so Greyhaven Phone can parse them. This replaces the original prompt, not appends to it.</p><label><span><b>Full prompt</b><small>${saved?'Custom prompt is active':'Built-in prompt is active'} · reset restores the current default.</small></span><textarea data-ghsocial-of-main spellcheck="false">${esc(saved||captured)}</textarea></label><div class="ghsocial-of-controls"><button type="button" data-ghsocial-save-of-main class="ghp-wide-action primary"><i class="fa-solid fa-floppy-disk"></i> Save main prompt</button><button type="button" data-ghsocial-reset-of-main class="ghp-wide-action"><i class="fa-solid fa-rotate-left"></i> Reset to default</button></div>`;
+    box.innerHTML=`<h3><i class="fa-solid fa-sliders"></i> OnlyFans creator post refresh prompt</h3><p>Edit only the dedicated prompt used when OnlyFans refresh creates new creator posts. Keep the required JSON output structure and 18+ restrictions so Greyhaven Phone can parse it. This replaces the built-in creator-post refresh prompt, not the whole phone refresh prompt.</p><label><span><b>Creator refresh prompt</b><small>${saved?'Custom creator prompt is active':'Built-in creator prompt is active'} · reset restores the current default.</small></span><textarea data-ghsocial-of-main spellcheck="false">${esc(saved||captured)}</textarea></label><div class="ghsocial-of-controls"><button type="button" data-ghsocial-save-of-main class="ghp-wide-action primary"><i class="fa-solid fa-floppy-disk"></i> Save creator prompt</button><button type="button" data-ghsocial-reset-of-main class="ghp-wide-action"><i class="fa-solid fa-rotate-left"></i> Reset to default</button></div>`;
     role.insertAdjacentElement('afterend',box);
   }
   const newPost=app.querySelector('[data-new-onlyfans-post]'),grid=newPost?.closest('main')?.querySelector('.ghp-of-grid');
@@ -459,8 +470,8 @@ function bindEvents() {
     const del=target.closest('[data-ghsocial-delete]');if(del&&page){event.preventDefault();event.stopPropagation();deleteGlobalPost(page.dataset.identityId,page.dataset.app,del.dataset.ghsocialDelete);return;}
     const ofEdit=target.closest('[data-ghsocial-of-edit]');if(ofEdit){event.preventDefault();event.stopPropagation();onlyFansPostEditor(ofEdit.dataset.ghsocialOfEdit);return;}
     const ofDelete=target.closest('[data-ghsocial-of-delete]');if(ofDelete){event.preventDefault();event.stopPropagation();deleteOnlyFansPost(ofDelete.dataset.ghsocialOfDelete);return;}
-    const savePrompt=target.closest('[data-ghsocial-save-of-main]');if(savePrompt){const root=settingsRoot(),value=savePrompt.closest('.ghsocial-of-guide')?.querySelector('[data-ghsocial-of-main]')?.value?.trim()||'';if(!value||!/JSON|\{/.test(value)){globalThis.toastr?.warning?.('Keep a non-empty prompt with JSON output instructions.');return;}root.socialStudio.onlyFansFullPrompt=value;saveSettings();globalThis.toastr?.success?.('Main OnlyFans refresh prompt saved.');return;}
-    const resetPrompt=target.closest('[data-ghsocial-reset-of-main]');if(resetPrompt){const root=settingsRoot();root.socialStudio.onlyFansFullPrompt='';saveSettings();const input=resetPrompt.closest('.ghsocial-of-guide')?.querySelector('[data-ghsocial-of-main]');if(input)input.value=onlyFansDefaultPrompt();globalThis.toastr?.success?.('Restored the built-in main prompt.');return;}
+    const savePrompt=target.closest('[data-ghsocial-save-of-main]');if(savePrompt){const root=settingsRoot(),value=savePrompt.closest('.ghsocial-of-guide')?.querySelector('[data-ghsocial-of-main]')?.value?.trim()||'';if(!looksLikeOnlyFansPrompt(value)){globalThis.toastr?.warning?.('Keep a valid OnlyFans creator-post prompt with the required posts JSON structure.');return;}root.socialStudio.onlyFansCreatorPrompt=value;saveSettings();globalThis.toastr?.success?.('OnlyFans creator prompt saved.');return;}
+    const resetPrompt=target.closest('[data-ghsocial-reset-of-main]');if(resetPrompt){const root=settingsRoot();root.socialStudio.onlyFansCreatorPrompt='';root.socialStudio.onlyFansFullPrompt='';saveSettings();const box=resetPrompt.closest('.ghsocial-of-guide');if(box){const input=box.querySelector('[data-ghsocial-of-main]');if(input)input.value=onlyFansDefaultPrompt();const hint=box.querySelector('small');if(hint)hint.textContent='Built-in creator prompt is active · reset restores the current default.';}globalThis.toastr?.success?.('OnlyFans creator prompt reset.');return;}
 
   },true);
   document.addEventListener('keydown',event=>{const target=event.target instanceof Element?event.target:null;if(!target||!target.matches('[data-ghsocial-open-profile]')||!['Enter',' '].includes(event.key))return;event.preventDefault();openProfile(target.dataset.ghsocialOpenProfile,target.dataset.ghsocialOpenApp||'instagram');},true);
@@ -468,7 +479,7 @@ function bindEvents() {
 }
 
 function expose() {
-  globalThis.GreyhavenSocialStudio={version:VERSION,openProfile,sync:syncNow,getProfile:identityId=>clone(profileFor(identityId,false)),getOnlyFansMainPrompt:()=>settingsRoot()?.socialStudio?.onlyFansFullPrompt||onlyFansDefaultPrompt()};
+  globalThis.GreyhavenSocialStudio={version:VERSION,openProfile,sync:syncNow,getProfile:identityId=>clone(profileFor(identityId,false)),getOnlyFansMainPrompt:()=>onlyFansSavedPrompt()||onlyFansDefaultPrompt()};
 }
 async function waitReady(timeout=15000){const start=Date.now();while(Date.now()-start<timeout){if(globalThis.GreyhavenPhone&&ctx()?.extensionSettings&&document.body)return true;await new Promise(r=>setTimeout(r,100));}return false;}
 async function init(){if(initialized)return;if(!await waitReady()){console.warn(`[${MODULE}] Greyhaven Phone was not ready.`);return;}settingsRoot();bindEvents();observeUi();expose();scheduleSync();scheduleAugment();initialized=true;console.info(`[${MODULE}] v${VERSION} loaded`);}

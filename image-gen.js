@@ -885,10 +885,9 @@ async function generateItem(item, reason='manual', options={}) {
     const rawSender = item.senderIdentityId ? identityById(item.senderIdentityId) : identityByName(item.senderName);
     const sender = allIdentities.find(x => x.id === rawSender?.id) || allIdentities.find(x => lower(x.name) === lower(rawSender?.name || item.senderName)) || rawSender;
     const subjects = resolveImageSubjects({ description:item.description, sender, identities:allIdentities });
-    const wardrobeLines = subjects.map(wardrobeLine).filter(Boolean);
     const maxRefs = Number(GHIMG_MODELS[imageSettings().model]?.maxReferences || MAX_WIRO_REFERENCES);
     const { payload:references, assignments } = await loadReferencePayload(subjects,maxRefs);
-    const prompt = buildImagePrompt({ description:item.description, subjects, referenceAssignments:assignments, wardrobeLines, app:item.app, scope:item.scope, continuity:continuityForItem(item) });
+    const prompt = buildImagePrompt({ description:item.description, subjects, referenceAssignments:assignments, app:item.app, scope:item.scope, continuity:continuityForItem(item) });
     const s = imageSettings();
     const response = await pluginRequest('/generate', {
       method:'POST',
@@ -1264,7 +1263,10 @@ function installPromptDetailHook() {
   const st = globalThis.SillyTavern;
   if (!st || typeof st.getContext !== 'function' || st.getContext.__ghimgDetailHook) return;
   const originalGetContext = st.getContext.bind(st);
-  const instruction = `\n\n[Greyhaven image metadata rule]\nFor any Greyhaven Phone photo/post/message, produce a short photographic description (normally 25–55 words, 1–3 concise sentences), prioritizing WHO is in the photo, their visible pose/action, expression/mood, what part of the person is in frame, and a simple credible setting. State the exact established character name. Clearly choose ONE camera mode for each image: (A) unedited raw front-facing phone selfie (default for casual self-sent direct photos), (B) front-facing phone selfie with a specific Snapchat/AR filter and EXACT description of its visible effects, only when a filter is intentionally chosen, (C) unedited rear/back camera phone photo taken by another person, or (D) professional camera photograph, only when context justifies it. Mirror selfies are fine when the scene suggests one. State believable lighting/time in a few words; identify the relevant room or place with at most one unobtrusive backdrop cue. The PERSON, not the architecture or view, is always the subject. Never invent city skylines, skyscrapers, oversized windows, ornate décor, or extraneous scene props. Prefer candid composition, real phone image flaws and unretouched skin. No arbitrary accessory or jewelry mentions. Clothing should match the established RP/Wardrobe, never be guessed when unknown; Wardrobe is authoritative. No extraneous people, internal thoughts or secrets. Preserve already-established exact camera filters, garments and objects if they matter to the scene.`;
+  const instruction = `
+
+[Greyhaven image metadata rule]
+For any Greyhaven Phone photo/post/message, produce a short photographic description (normally 25–60 words, 1–3 concise sentences), prioritizing WHO is in the photo, their age, visible clothing, pose/action, expression or mood, what part of the person is in frame, and a simple credible setting. State the exact established character name and include age naturally when it is known or strongly established (for example "20-year-old Eldin" or "a woman in her early 30s"). Clearly choose ONE camera mode for each image: (A) unedited raw front-facing phone selfie (default for casual self-sent direct photos), (B) front-facing phone selfie with a specific Snapchat/AR filter and an EXACT description of its visible effects, only when a filter is intentionally chosen, (C) unedited rear/back camera phone photo taken by another person, or (D) professional camera photograph, only when context justifies it. Mirror selfies are fine when the scene suggests one. State believable lighting/time in a few words; identify the relevant room or place with at most one unobtrusive backdrop cue. Keep any clothing description brief and concrete inside the metadata itself so it can be edited manually later. The PERSON, not the architecture or view, is always the subject. Never invent city skylines, skyscrapers, oversized windows, ornate décor, or extraneous scene props. Prefer candid composition, real phone image flaws, unretouched skin and realism over stylization. No arbitrary accessory or jewelry mentions; mention jewelry, piercings or accessories only when they are intentionally part of the scene or explicitly known. No extraneous people, internal thoughts or secrets. Preserve already-established exact camera filters, age, garments and important handheld objects if they matter to the scene. Do not describe invisible thoughts, secrets or off-camera facts.`;
   const wrapGenerate = context => {
     if (!context || typeof context.generateRaw !== 'function' || context.generateRaw.__ghimgDetailWrapped) return context;
     const originalGenerate = context.generateRaw.bind(context);
@@ -1275,18 +1277,19 @@ function installPromptDetailHook() {
       let nextSystem = system;
       if (phoneTask && !nextSystem.includes('[Greyhaven image metadata rule]')) nextSystem += instruction;
       const onlyFansTask = /adults-only creator platform|one manual content refresh for a fictional|one dedicated OnlyFans refresh/i.test(system);
+      const looksLikeOnlyFansPrompt = value => /creatorIdentityId/.test(String(value || '')) && /"posts"/.test(String(value || ''));
       if (onlyFansTask) {
         const root = phoneSettingsRoot();
         if (root) {
           root.socialStudio ||= {};
-          // Capture the untouched built-in prompt, not a previously injected one.
-          if (root.socialStudio.lastOnlyFansSystemPrompt !== system) {
+          // Capture only the dedicated creator-refresh prompt, not unrelated whole-phone prompts.
+          if (looksLikeOnlyFansPrompt(system) && root.socialStudio.lastOnlyFansSystemPrompt !== system) {
             root.socialStudio.lastOnlyFansSystemPrompt = system;
             try { ctx()?.saveSettingsDebounced?.(); } catch {}
           }
           // This is a FULL prompt override, not appended weak guidance.
-          const override = String(root.socialStudio.onlyFansFullPrompt || '').trim();
-          if (override) nextSystem = override;
+          const override = String(root.socialStudio.onlyFansCreatorPrompt || root.socialStudio.onlyFansFullPrompt || '').trim();
+          if (looksLikeOnlyFansPrompt(override)) nextSystem = override;
           // The photo metadata contract still applies after a full override.
           if (!nextSystem.includes('[Greyhaven image metadata rule]')) nextSystem += instruction;
         }
