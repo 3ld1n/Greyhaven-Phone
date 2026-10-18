@@ -13,3 +13,41 @@
 @media(max-width:370px){.ghsocial-profile-feed.instagram{grid-template-columns:1fr}}
 .ghsocial-original-prompt textarea{box-sizing:border-box;width:100%;min-height:180px;margin-top:8px;padding:9px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:#0d0e13;color:rgba(255,255,255,.68);font:10px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}.ghsocial-of-guide>label{display:flex;flex-direction:column;gap:6px}.ghsocial-of-guide>label>span{display:flex;flex-direction:column}.ghsocial-of-guide>label small{color:rgba(255,255,255,.55);font-size:10px;line-height:1.35}
 .ghsocial-open-own{box-sizing:border-box;width:100%;min-height:58px;margin:8px 0 12px;padding:9px 11px;border:1px solid rgba(88,136,255,.18);border-radius:14px;background:rgba(58,93,177,.10);color:#fff;display:grid;grid-template-columns:36px minmax(0,1fr) 16px;gap:9px;align-items:center;text-align:left}.ghsocial-open-own>i:first-child{width:36px;height:36px;border-radius:11px;background:rgba(79,131,255,.15);color:#a8c1ff;display:grid;place-items:center}.ghsocial-open-own>span{display:flex;flex-direction:column}.ghsocial-open-own small{color:rgba(255,255,255,.55);font-size:9px}.ghsocial-open-own>i:last-child{color:rgba(255,255,255,.45);font-size:10px}
+
+/* v2.10.1 — native in-phone social pages, app separation and compact profiles. */
+#ghsocial-profile-page{position:absolute;inset:5px;z-index:74;overflow:hidden;border-radius:43px;background:#0b0c10;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif}
+#ghsocial-profile-page .ghsocial-native-screen{height:100%;display:flex;flex-direction:column;overflow:hidden;background:#0c0d12}
+#ghsocial-profile-page .ghsocial-native-header{margin-top:53px;height:54px;min-height:54px;display:grid;grid-template-columns:42px minmax(0,1fr) 42px;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid rgba(255,255,255,.1)}
+#ghsocial-profile-page .ghsocial-native-header>b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;font-size:17px}
+#ghsocial-profile-page .ghsocial-native-header>button{border:0;background:transparent;color:#f7f7fb;font-size:18px;min-height:41px;min-width:40px}
+#ghsocial-profile-page .ghsocial-native-header>button:last-child{color:#9eb5ff}
+#ghsocial-profile-page .ghsocial-native-header>button:disabled{opacity:.45}
+#ghsocial-profile-page .ghsocial-native-main{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:12px 12px max(26px,env(safe-area-inset-bottom))}
+#ghsocial-profile-page .ghsocial-account-head{display:grid;grid-template-columns:86px minmax(0,1fr);gap:12px;align-items:center;margin-bottom:10px}
+#ghsocial-profile-page .ghsocial-avatar.hero{height:80px;width:80px;border:1px solid rgba(255,255,255,.13)}
+#ghsocial-profile-page .ghsocial-profile-stats{display:flex;justify-content:space-around;gap:8px;text-align:center}
+#ghsocial-profile-page .ghsocial-profile-stats>span{display:flex;flex-direction:column;gap:4px;min-width:0}
+#ghsocial-profile-page .ghsocial-profile-stats b{font-size:17px;font-weight:650}
+#ghsocial-profile-page .ghsocial-profile-stats small{font-size:11px;color:#ddd}
+#ghsocial-profile-page .ghsocial-bio{display:flex;flex-direction:column;gap:2px;margin-bottom:13px;font-size:13px}
+#ghsocial-profile-page .ghsocial-bio small{opacity:.6}
+#ghsocial-profile-page .ghsocial-account-actions{display:flex;gap:8px;margin:10px 0}
+#ghsocial-profile-page .ghsocial-action{min-width:0;flex:1;min-height:37px;border:0;border-radius:9px;background:#2d3039;color:#f7f7fb;font-size:13px;font-weight:600}
+#ghsocial-profile-page .ghsocial-action.primary{background:#3478f7}
+#ghsocial-profile-page .ghsocial-new-post{min-height:38px;font-size:12px;margin:6px 0 10px}
+#ghsocial-profile-page .ghsocial-gallery-title{display:flex;align-items:center;justify-content:center;gap:8px;padding:11px 0;margin-top:8px;border-top:1px solid rgba(255,255,255,.13);font-size:13px;font-weight:650}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px}
+#ghsocial-profile-page .ghsocial-profile-feed.facebook{display:grid;grid-template-columns:1fr;gap:12px}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-post-card{aspect-ratio:1;border-radius:0;background:#17191f}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-post-card>.ghp-social-media{aspect-ratio:1;width:100%;height:100%;object-fit:cover;max-height:none}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-post-card>.ghp-fake-photo{min-height:0;height:100%;box-sizing:border-box;padding:5px;overflow:hidden}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-post-card>.ghp-fake-photo i{font-size:16px}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-post-card>.ghp-fake-photo p{font-size:9px;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-post-copy{display:none}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-owner-controls{top:3px;right:3px;gap:2px}
+#ghsocial-profile-page .ghsocial-profile-feed.instagram .ghsocial-owner-controls button{height:22px!important;width:22px!important;font-size:9px!important}
+#ghsocial-profile-page .ghsocial-profile-feed.facebook .ghsocial-post-card>.ghp-social-media{max-height:420px;object-fit:contain}
+#ghsocial-profile-page .ghsocial-empty{min-height:180px}
+.ghsocial-of-guide textarea[data-ghsocial-of-main]{min-height:260px;font-size:11px;line-height:1.5}
+.ghsocial-of-controls{display:flex;gap:8px}.ghsocial-of-controls button{flex:1;min-width:0;font-size:11px;padding:6px}
+@media(max-width:370px){#ghsocial-profile-page .ghsocial-profile-feed.instagram{grid-template-columns:repeat(3,minmax(0,1fr))}#ghsocial-profile-page .ghsocial-profile-stats b{font-size:15px}}

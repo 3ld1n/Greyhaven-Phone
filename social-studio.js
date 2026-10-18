@@ -1,5 +1,5 @@
 const MODULE = 'greyhaven-phone-socialstudio';
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const SETTINGS_KEY = 'greyhavenPhone';
 const META_KEY = 'greyhavenPhone';
 
@@ -51,11 +51,20 @@ function settingsRoot() {
   c.extensionSettings[SETTINGS_KEY] ||= {};
   const root=c.extensionSettings[SETTINGS_KEY];
   root.socialStudio ||= {};
-  root.socialStudio.onlyFansRefreshGuide = String(root.socialStudio.onlyFansRefreshGuide || '');
+  root.socialStudio.onlyFansFullPrompt = String(root.socialStudio.onlyFansFullPrompt || '');
   root.socialStudio.lastOnlyFansSystemPrompt = String(root.socialStudio.lastOnlyFansSystemPrompt || '');
   root.socialStudio.deletedPostIds = Array.isArray(root.socialStudio.deletedPostIds) ? root.socialStudio.deletedPostIds : [];
   root.socialStudioProfiles = root.socialStudioProfiles && typeof root.socialStudioProfiles==='object' && !Array.isArray(root.socialStudioProfiles) ? root.socialStudioProfiles : {};
   return root;
+}
+// Fallback only until a refresh captures the actual source prompt from Greyhaven Phone.
+// Reset always returns to the CURRENT built-in source prompt if it has been captured.
+const DEFAULT_ONLYFANS_MAIN_PROMPT = `You generate ONE manual OnlyFans content refresh for a fictional Greyhaven roleplay phone. Return ONLY valid JSON, no markdown or commentary.
+Use only the ASSIGNED 18+ creators supplied in the user prompt. Never invent a creator, identity ID or surname. Match each creator's established personality, current situation, aesthetic and prior posts; vary camera mode, poses, wardrobe, background and tone organically. New posts may be bolder or ordinary as appropriate to that creator; do not make every image an innocent mirror selfie. Give each image a compact photographic description: exact creator name, expression, action, frame, and one chosen camera mode (raw front-facing phone selfie; explicitly described Snapchat-style filter; rear-camera phone snapshot; or justified professional photo), with only a short plausible location/lighting cue. Do not embellish rooms or invent accessories.
+Return {"summary":"short text","posts":[{"creatorIdentityId":"exact supplied ID","creator":"exact supplied name","type":"photo","visual":"clear, concise image metadata","caption":"short in-character caption","likes":0,"comments":0}]}.
+Create 1–4 plausible new posts total from the supplied creator roster. Keep output compatible with Greyhaven Phone's JSON post parser. No minors, coercion or non-consensual content.`;
+function onlyFansDefaultPrompt() {
+  return String(settingsRoot()?.socialStudio?.lastOnlyFansSystemPrompt || DEFAULT_ONLYFANS_MAIN_PROMPT);
 }
 function saveSettings() {
   try { ctx()?.saveSettingsDebounced?.(); }
@@ -223,21 +232,99 @@ function profilePostCard(row,app,mine) {
   const copy=app==='instagram'?row.caption:row.text;
   return `<article class="ghsocial-post-card" data-ghsocial-app="${esc(app)}"><span hidden data-ghsocial-post="${esc(row.id)}"></span>${media}<div class="ghsocial-post-copy"><small>${esc(rel(row.timeMs))}</small>${copy?`<p>${esc(copy)}</p>`:''}</div>${mine?`<div class="ghsocial-owner-controls"><button type="button" data-ghsocial-edit="${esc(row.id)}" data-ghsocial-edit-app="${esc(app)}" title="Edit"><i class="fa-solid fa-pen"></i></button><button type="button" data-ghsocial-delete="${esc(row.id)}" data-ghsocial-delete-app="${esc(app)}" title="Delete"><i class="fa-solid fa-trash"></i></button></div>`:''}</article>`;
 }
-function renderProfileDialog(dialog,identityId,app='instagram') {
-  const identity=identityById(identityId);if(!identity){dialog.close();return;}
-  const profile=profileFor(identityId,true),mine=String(currentIdentity()?.id||'')===String(identityId),posts=[...(profile?.[app]?.posts||[])].sort((a,b)=>Number(b.timeMs||0)-Number(a.timeMs||0));
-  const social=globalThis.GreyhavenPhone?.getSocialProfile?.(identity)||{};
-  const handle=clean(app==='instagram'?(social.instagramUsername||social.instagram||social.handle||''):(social.facebookName||social.facebook||''));
-  dialog.dataset.identityId=identityId;dialog.dataset.app=app;
-  dialog.innerHTML=`<div class="ghsocial-dialog-card"><header><button type="button" data-ghsocial-close><i class="fa-solid fa-xmark"></i></button><div><b>${esc(identity.name)}</b><small>${app==='instagram'?'Instagram':'Facebook'} profile · global</small></div><span></span></header><main><section class="ghsocial-profile-head">${avatarHtml(identity,'hero')}<div><h2>${esc(identity.name)}</h2>${handle?`<small>${esc(handle)}</small>`:''}<p>${posts.length} persistent post${posts.length===1?'':'s'} · available across chats</p></div></section><div class="ghsocial-app-switch"><button type="button" data-ghsocial-switch="instagram" class="${app==='instagram'?'active':''}"><i class="fa-brands fa-instagram"></i> Instagram</button><button type="button" data-ghsocial-switch="facebook" class="${app==='facebook'?'active':''}"><i class="fa-brands fa-facebook-f"></i> Facebook</button></div>${mine?`<button type="button" class="ghsocial-new-post" data-ghsocial-new-post="${esc(app)}"><i class="fa-solid fa-plus"></i> New ${app==='instagram'?'Instagram':'Facebook'} post</button>`:''}<div class="ghsocial-profile-feed ${app}">${posts.length?posts.map(row=>profilePostCard(row,app,mine)).join(''):`<div class="ghsocial-empty"><i class="${app==='instagram'?'fa-brands fa-instagram':'fa-brands fa-facebook-f'}"></i><b>No persistent posts yet</b><span>Posts seen in Greyhaven will be collected here automatically.</span></div>`}</div></main></div>`;
-  hydrateProfileMedia(dialog);
+function socialRelationship(identityId,app) {
+  const t=globalThis.GreyhavenPhone?.getTimeline?.();
+  return t?.relationships?.[identityId]?.apps?.[app] || {};
+}
+function socialMetrics(identity,app,posts) {
+  const profile=globalThis.GreyhavenPhone?.getSocialProfile?.(identity) || {};
+  const own=String(currentIdentity()?.id||'')===String(identity.id);
+  if (app==='instagram') {
+    const counts=own ? globalThis.GreyhavenPhone?.getSocialCounts?.()?.instagram : null;
+    const info=profile.instagram && typeof profile.instagram==='object' ? profile.instagram : {};
+    return {posts:posts.length,followers:Math.max(0,Number(counts?.followers??info.followersBase??0)),following:Math.max(0,Number(counts?.following??info.followingBase??0))};
+  }
+  const counts=own ? globalThis.GreyhavenPhone?.getSocialCounts?.()?.facebook : null;
+  return {posts:posts.length,friends:Math.max(0,Number(counts?.friends??profile.facebook?.friendsBase??0))};
+}
+function socialHandle(identity,app) {
+  const profile=globalThis.GreyhavenPhone?.getSocialProfile?.(identity) || {};
+  const section=profile[app];
+  const candidates=app==='instagram'
+    ? [profile.instagramUsername,section?.username,section?.handle,profile.handle]
+    : [profile.facebookName,section?.name,section?.username];
+  return candidates.find(x=>typeof x==='string'&&x.trim())?.trim()||'';
+}
+function profileRoot() { return document.querySelector('#ghsocial-profile-page'); }
+function closeProfile() { profileRoot()?.remove(); }
+function renderProfilePage(page,identityId,app='instagram') {
+  if (!page) return;
+  const identity=identityById(identityId); if(!identity){closeProfile();return;}
+  const profile=profileFor(identityId,true),mine=String(currentIdentity()?.id||'')===String(identityId);
+  const posts=[...(profile?.[app]?.posts||[])].sort((a,b)=>Number(b.timeMs||0)-Number(a.timeMs||0));
+  const metrics=socialMetrics(identity,app,posts),handle=socialHandle(identity,app),relationship=socialRelationship(identityId,app);
+  page.dataset.identityId=identityId;page.dataset.app=app;
+  const followButton = app==='instagram' && !mine
+    ? `<button type="button" data-ghsocial-follow="${esc(identityId)}" class="ghsocial-action primary">${relationship.following?'Following ▾':'Follow'}</button>`
+    : app==='facebook' && !mine
+      ? `<button type="button" data-ghsocial-facebook-connect="${esc(identityId)}" class="ghsocial-action primary">${relationship.friends?'Friends':relationship.outgoingRequest?'Request sent':relationship.incomingRequest?'Accept request':'Add friend'}</button>` : '';
+  const messageButton=!mine?`<button type="button" data-ghsocial-message="${esc(identityId)}" class="ghsocial-action">Message</button>`:'';
+  const stats=app==='instagram'
+    ? `<div class="ghsocial-profile-stats"><span><b>${metrics.posts.toLocaleString()}</b><small>posts</small></span><span><b>${metrics.followers.toLocaleString()}</b><small>followers</small></span><span><b>${metrics.following.toLocaleString()}</b><small>following</small></span></div>`
+    : `<div class="ghsocial-profile-stats"><span><b>${metrics.posts.toLocaleString()}</b><small>posts</small></span><span><b>${metrics.friends.toLocaleString()}</b><small>friends</small></span></div>`;
+  page.innerHTML=`<div class="ghsocial-native-screen ${esc(app)}">
+    <header class="ghsocial-native-header"><button type="button" data-ghsocial-back aria-label="Back"><i class="fa-solid fa-chevron-left"></i></button><b>${esc(handle?app==='instagram'?handle.replace(/^@/,''):handle:identity.name)}</b><button type="button" data-ghsocial-refresh="${esc(identityId)}" aria-label="Generate one new profile post" title="Refresh: generate one new post's metadata"><i class="fa-solid fa-rotate"></i></button></header>
+    <main class="ghsocial-native-main"><div class="ghsocial-account-head">${avatarHtml(identity,'hero')}${stats}</div><div class="ghsocial-bio"><b>${esc(identity.name)}</b>${handle&&app==='facebook'?`<small>${esc(handle)}</small>`:''}</div>
+    ${followButton||messageButton?`<div class="ghsocial-account-actions">${followButton}${messageButton}</div>`:''}
+    ${mine?`<button type="button" class="ghsocial-new-post" data-ghsocial-new-post="${esc(app)}"><i class="fa-solid fa-plus"></i> New ${app==='instagram'?'Instagram':'Facebook'} post</button>`:''}
+    <div class="ghsocial-gallery-title"><i class="${app==='instagram'?'fa-solid fa-table-cells':'fa-brands fa-facebook-f'}"></i> Posts</div>
+    <div class="ghsocial-profile-feed ${esc(app)}">${posts.length?posts.map(row=>profilePostCard(row,app,mine)).join(''):`<div class="ghsocial-empty"><i class="${app==='instagram'?'fa-brands fa-instagram':'fa-brands fa-facebook-f'}"></i><b>No posts yet</b><span>Posts will be shared across chats and groups.</span></div>`}</div></main></div>`;
+  hydrateProfileMedia(page);
   globalThis.GreyhavenPhoneImages?.invalidate?.();
 }
 function openProfile(identityId,app='instagram') {
-  let dialog=document.querySelector('#ghsocial-profile-dialog');
-  if(!dialog){dialog=document.createElement('dialog');dialog.id='ghsocial-profile-dialog';dialog.className='ghsocial-dialog';document.body.appendChild(dialog);}
-  renderProfileDialog(dialog,identityId,app);
-  if(!dialog.open)dialog.showModal();
+  // An app-local, full-page screen inside Greyhaven Phone, never a browser dialog.
+  if (!['instagram','facebook'].includes(app) || !phoneOpen()) return;
+  const host=document.querySelector('#ghp-overlay .ghp-device');if(!host)return;
+  let page=profileRoot();
+  if(!page){page=document.createElement('section');page.id='ghsocial-profile-page';page.className='ghsocial-profile-page';host.appendChild(page);}
+  renderProfilePage(page,identityId,app);
+}
+function refreshCurrentProfile() {
+  const page=profileRoot();if(page)renderProfilePage(page,page.dataset.identityId,page.dataset.app);
+}
+function parsePostResult(raw) {
+  const text=typeof raw==='string'?raw:JSON.stringify(raw||{});
+  const stripped=text.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+  try { return JSON.parse(stripped); } catch {}
+  const pos=stripped.indexOf('{'),end=stripped.lastIndexOf('}');
+  if(pos>=0&&end>pos)return JSON.parse(stripped.slice(pos,end+1));
+  throw new Error('The post creator did not return valid JSON. Try again.');
+}
+async function refreshSingleProfile(identityId,app,button) {
+  const identity=identityById(identityId),profile=profileFor(identityId,true),c=ctx();
+  if(!identity||!profile||typeof c?.generateRaw!=='function'){
+    globalThis.toastr?.error?.('An active Greyhaven chat and text model are required.');return;
+  }
+  const life=globalThis.GreyhavenLife,person=life?.getResolvedPerson?.(identity.name),scene=life?.getScene?.();
+  const knownLocation=clean([person?.location,person?.area].filter(Boolean).join(', ')) || clean(scene?.location||scene?.label||'');
+  const past=profile[app].posts.slice(0,5).map(x=>({visual:String(x.visual||'').slice(0,170),caption:String(x.caption||x.text||'').slice(0,90)}));
+  const systemPrompt=`Create exactly ONE new fictional ${app==='instagram'?'Instagram':'Facebook'} profile post for a known Greyhaven roleplay character. Return ONLY one JSON object, no markdown. The object must be {"visual":"one image description or empty for a Facebook text-only post","caption":"Instagram caption (if Instagram)","text":"Facebook post text (if Facebook)"}. Keep the account owner's established personality and history. Describe a candid photo of the OWNER when appropriate, focusing on subject and expression, not background architecture. For a photo identify the camera explicitly: raw front-camera phone selfie; front-camera selfie with a clearly described filter only if intentional; raw rear-camera phone shot by someone else; or justified professional photo. Default to unedited phone imagery and never add unexplained jewelry. Keep scene metadata compact (25–50 words), camera realistic and background limited to one location cue. Vary content versus previous posts. Preserve known setting/time when appropriate but do not force a photo inside an unrelated active scene.`;
+  const prompt=JSON.stringify({creator:{name:identity.name,identityId:identity.id,kind:identity.kind},location:knownLocation||'unknown',recentPosts:past,app});
+  const original=button?.innerHTML||'';
+  if(button){button.disabled=true;button.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i>';}
+  try {
+    const raw=await c.generateRaw({prompt,systemPrompt,responseLength:450,trimNames:false});
+    const parsed=parsePostResult(raw);
+    const visual=String(parsed.visual||'').trim();
+    const caption=String(app==='instagram'?parsed.caption||parsed.text||'':parsed.text||parsed.caption||'').trim();
+    if(!visual&&(app==='instagram'||!caption))throw new Error('The generated post was empty.');
+    const next=normalizePost({id:`ghsocial:${uid()}`,identityId:identity.id,author:identity.name,visual,caption:app==='instagram'?caption:'',text:app==='facebook'?caption:'',type:'photo',timeMs:Date.now()},app,identity);
+    profile[app].posts.unshift(next);profile.updatedAt=Date.now();saveSettings();syncGlobalIntoCurrentTimeline();
+    refreshCurrentProfile();document.dispatchEvent(new CustomEvent('greyhaven:social-changed'));
+    globalThis.toastr?.success?.('One new post created. Use Generate if you want its image.');
+  } catch(error){globalThis.toastr?.error?.(`Post refresh: ${error?.message||error}`);}
+  finally{if(button?.isConnected){button.disabled=false;button.innerHTML=original;}}
 }
 
 function postEditor(app,identityId,postId='') {
@@ -253,14 +340,14 @@ function postEditor(app,identityId,postId='') {
     if(app==='facebook'&&!visual&&!text){globalThis.toastr?.warning?.('Add text or image metadata.');return;}
     const next=normalizePost({...row,id:row?.id||`ghsocial:${uid()}`,visual,identityId:identity.id,author:identity.name,timeMs:row?.timeMs||Date.now(),...(app==='instagram'?{caption:text}:{text})},app,identity);
     const index=posts.findIndex(x=>String(x.id)===String(next.id));if(index>=0)posts[index]=next;else posts.unshift(next);
-    profile.updatedAt=Date.now();saveSettings();syncGlobalIntoCurrentTimeline();dialog.close();openProfile(identityId,app);document.dispatchEvent(new CustomEvent('greyhaven:social-changed'));globalThis.toastr?.success?.('Post saved globally.');
+    profile.updatedAt=Date.now();saveSettings();syncGlobalIntoCurrentTimeline();dialog.close();refreshCurrentProfile();document.dispatchEvent(new CustomEvent('greyhaven:social-changed'));globalThis.toastr?.success?.('Post saved globally.');
   };
   if(!dialog.open)dialog.showModal();
 }
 function deleteGlobalPost(identityId,app,postId) {
   const profile=profileFor(identityId,false);if(!profile)return;
   if(!confirm('Delete this post from the persistent Greyhaven profile?'))return;
-  profile[app].posts=profile[app].posts.filter(x=>String(x.id)!==String(postId));profile.updatedAt=Date.now();addDeletedId(postId);saveSettings();syncGlobalIntoCurrentTimeline();openProfile(identityId,app);document.dispatchEvent(new CustomEvent('greyhaven:social-changed'));
+  profile[app].posts=profile[app].posts.filter(x=>String(x.id)!==String(postId));profile.updatedAt=Date.now();addDeletedId(postId);saveSettings();syncGlobalIntoCurrentTimeline();refreshCurrentProfile();document.dispatchEvent(new CustomEvent('greyhaven:social-changed'));
 }
 
 function onlyFansAccount(identityId) { return settingsRoot()?.onlyFansAccounts?.[identityId] || null; }
@@ -285,8 +372,9 @@ function augmentOnlyFansControls() {
   const role=app.querySelector('.ghp-role-settings');
   if(role&&!app.querySelector('.ghsocial-of-guide')){
     const root=settingsRoot(),box=document.createElement('section');box.className='ghsocial-of-guide';
-    const captured=String(root?.socialStudio?.lastOnlyFansSystemPrompt||'').trim();
-    box.innerHTML=`<h3><i class="fa-solid fa-sliders"></i> Creator refresh prompt</h3><p>Your custom text is appended to Greyhaven's built-in creator-post prompt. This lets you make refreshes bolder, more casual, more explicit, more location-aware, or otherwise fit the creator — without breaking the JSON format the Phone expects.</p><details class="ghsocial-original-prompt"><summary>Built-in generator prompt ${captured?'· captured':'· capture after next refresh'}</summary>${captured?`<textarea readonly>${esc(captured)}</textarea>`:'<small>Run one OnlyFans refresh after installing this version and Greyhaven will save the exact built-in system prompt here for reference.</small>'}</details><label><span><b>Additional refresh direction</b><small>Appended after the built-in prompt on every OnlyFans refresh.</small></span><textarea data-ghsocial-of-guide placeholder="Example: Make new posts bolder, more adult, varied and story-connected. Use each creator’s current location and avoid repeating the same mirror selfie, pose or room…">${esc(root?.socialStudio?.onlyFansRefreshGuide||'')}</textarea></label><button type="button" data-ghsocial-save-of-guide class="ghp-wide-action primary"><i class="fa-solid fa-floppy-disk"></i> Save refresh direction</button>`;
+    const saved=String(root?.socialStudio?.onlyFansFullPrompt||'');
+    const captured=onlyFansDefaultPrompt();
+    box.innerHTML=`<h3><i class="fa-solid fa-sliders"></i> Main creator refresh prompt</h3><p>Edit the COMPLETE instructions sent to the AI when OnlyFans refresh generates posts. Keep the required JSON output structure and 18+ restrictions so Greyhaven Phone can parse them. This replaces the original prompt, not appends to it.</p><label><span><b>Full prompt</b><small>${saved?'Custom prompt is active':'Built-in prompt is active'} · reset restores the current default.</small></span><textarea data-ghsocial-of-main spellcheck="false">${esc(saved||captured)}</textarea></label><div class="ghsocial-of-controls"><button type="button" data-ghsocial-save-of-main class="ghp-wide-action primary"><i class="fa-solid fa-floppy-disk"></i> Save main prompt</button><button type="button" data-ghsocial-reset-of-main class="ghp-wide-action"><i class="fa-solid fa-rotate-left"></i> Reset to default</button></div>`;
     role.insertAdjacentElement('afterend',box);
   }
   const newPost=app.querySelector('[data-new-onlyfans-post]'),grid=newPost?.closest('main')?.querySelector('.ghp-of-grid');
@@ -356,23 +444,31 @@ function observeUi() {
 function bindEvents() {
   document.addEventListener('click',event=>{
     const target=event.target instanceof Element?event.target:null;if(!target)return;
+    if(target.closest('#ghp-overlay [data-close]')) closeProfile();
     const link=target.closest('[data-ghsocial-open-profile]');if(link){event.preventDefault();event.stopPropagation();openProfile(link.dataset.ghsocialOpenProfile,link.dataset.ghsocialOpenApp||'instagram');return;}
     const ownProfile=target.closest('[data-ghsocial-own-profile]');if(ownProfile){event.preventDefault();event.stopPropagation();const own=currentIdentity();if(own?.id)openProfile(own.id,ownProfile.dataset.ghsocialOwnProfile||'instagram');return;}
+    if(target.closest('[data-ghsocial-back]')){event.preventDefault();event.stopPropagation();closeProfile();return;}
     if(target.closest('[data-ghsocial-close]')){target.closest('dialog')?.close();return;}
-    const sw=target.closest('[data-ghsocial-switch]');if(sw){renderProfileDialog(sw.closest('dialog'),sw.closest('dialog').dataset.identityId,sw.dataset.ghsocialSwitch);return;}
-    const create=target.closest('[data-ghsocial-new-post]');if(create){const d=create.closest('dialog');postEditor(create.dataset.ghsocialNewPost,d.dataset.identityId,'');return;}
-    const edit=target.closest('[data-ghsocial-edit]');if(edit){const d=edit.closest('dialog');postEditor(edit.dataset.ghsocialEditApp,d.dataset.identityId,edit.dataset.ghsocialEdit);return;}
-    const del=target.closest('[data-ghsocial-delete]');if(del){const d=del.closest('dialog');deleteGlobalPost(d.dataset.identityId,del.dataset.ghsocialDeleteApp,del.dataset.ghsocialDelete);return;}
+    const follow=target.closest('[data-ghsocial-follow]');if(follow){event.preventDefault();event.stopPropagation();const mine=currentIdentity(),target=follow.dataset.ghsocialFollow;const on=!!socialRelationship(target,'instagram').following;globalThis.GreyhavenPhone?.apps?.followInstagram?.(mine?.id,target,!on);syncGlobalIntoCurrentTimeline();refreshCurrentProfile();return;}
+    const fbConnect=target.closest('[data-ghsocial-facebook-connect]');if(fbConnect){event.preventDefault();event.stopPropagation();const mine=currentIdentity(),target=fbConnect.dataset.ghsocialFacebookConnect,state=socialRelationship(target,'facebook');if(!state.friends&&!state.outgoingRequest){globalThis.GreyhavenPhone?.apps?.requestFacebook?.(mine?.id,target,state.incomingRequest?'accept':'request');refreshCurrentProfile();}return;}
+    const message=target.closest('[data-ghsocial-message]');if(message){event.preventDefault();event.stopPropagation();const id=message.dataset.ghsocialMessage,app=profileRoot()?.dataset.app;closeProfile();const overlay=document.querySelector('#ghp-overlay');if(overlay){const b=document.createElement('button');b.dataset.openSocialThread=app;b.dataset.socialIdentity=id;b.style.display='none';overlay.appendChild(b);b.click();b.remove();}return;}
+    const refresh=target.closest('[data-ghsocial-refresh]');if(refresh){event.preventDefault();event.stopPropagation();void refreshSingleProfile(refresh.dataset.ghsocialRefresh,profileRoot()?.dataset.app,refresh);return;}
+    const page=profileRoot();
+    const create=target.closest('[data-ghsocial-new-post]');if(create&&page){event.preventDefault();event.stopPropagation();postEditor(page.dataset.app,page.dataset.identityId,'');return;}
+    const edit=target.closest('[data-ghsocial-edit]');if(edit&&page){event.preventDefault();event.stopPropagation();postEditor(page.dataset.app,page.dataset.identityId,edit.dataset.ghsocialEdit);return;}
+    const del=target.closest('[data-ghsocial-delete]');if(del&&page){event.preventDefault();event.stopPropagation();deleteGlobalPost(page.dataset.identityId,page.dataset.app,del.dataset.ghsocialDelete);return;}
     const ofEdit=target.closest('[data-ghsocial-of-edit]');if(ofEdit){event.preventDefault();event.stopPropagation();onlyFansPostEditor(ofEdit.dataset.ghsocialOfEdit);return;}
     const ofDelete=target.closest('[data-ghsocial-of-delete]');if(ofDelete){event.preventDefault();event.stopPropagation();deleteOnlyFansPost(ofDelete.dataset.ghsocialOfDelete);return;}
-    const saveGuide=target.closest('[data-ghsocial-save-of-guide]');if(saveGuide){const root=settingsRoot(),value=saveGuide.closest('.ghsocial-of-guide')?.querySelector('[data-ghsocial-of-guide]')?.value||'';root.socialStudio.onlyFansRefreshGuide=value.trim();saveSettings();globalThis.toastr?.success?.('Creator refresh direction saved.');return;}
+    const savePrompt=target.closest('[data-ghsocial-save-of-main]');if(savePrompt){const root=settingsRoot(),value=savePrompt.closest('.ghsocial-of-guide')?.querySelector('[data-ghsocial-of-main]')?.value?.trim()||'';if(!value||!/JSON|\{/.test(value)){globalThis.toastr?.warning?.('Keep a non-empty prompt with JSON output instructions.');return;}root.socialStudio.onlyFansFullPrompt=value;saveSettings();globalThis.toastr?.success?.('Main OnlyFans refresh prompt saved.');return;}
+    const resetPrompt=target.closest('[data-ghsocial-reset-of-main]');if(resetPrompt){const root=settingsRoot();root.socialStudio.onlyFansFullPrompt='';saveSettings();const input=resetPrompt.closest('.ghsocial-of-guide')?.querySelector('[data-ghsocial-of-main]');if(input)input.value=onlyFansDefaultPrompt();globalThis.toastr?.success?.('Restored the built-in main prompt.');return;}
+
   },true);
   document.addEventListener('keydown',event=>{const target=event.target instanceof Element?event.target:null;if(!target||!target.matches('[data-ghsocial-open-profile]')||!['Enter',' '].includes(event.key))return;event.preventDefault();openProfile(target.dataset.ghsocialOpenProfile,target.dataset.ghsocialOpenApp||'instagram');},true);
-  const c=ctx();if(c?.eventSource&&c?.eventTypes){const bind=key=>{const name=c.eventTypes[key];if(name)c.eventSource.on(name,()=>{lastScreenSignature='';scheduleSync();scheduleAugment();});};for(const key of ['CHAT_CHANGED','CHAT_CREATED','PERSONA_CHANGED','MESSAGE_SENT','CHARACTER_MESSAGE_RENDERED'])bind(key);}
+  const c=ctx();if(c?.eventSource&&c?.eventTypes){const bind=key=>{const name=c.eventTypes[key];if(name)c.eventSource.on(name,()=>{lastScreenSignature='';scheduleSync();scheduleAugment();});};for(const key of ['CHAT_CHANGED','CHAT_CREATED','PERSONA_CHANGED','MESSAGE_SENT','CHARACTER_MESSAGE_RENDERED'])bind(key);const clear=key=>{const name=c.eventTypes[key];if(name)c.eventSource.on(name,closeProfile);};for(const key of ['CHAT_CHANGED','PERSONA_CHANGED'])clear(key);}
 }
 
 function expose() {
-  globalThis.GreyhavenSocialStudio={version:VERSION,openProfile,sync:syncNow,getProfile:identityId=>clone(profileFor(identityId,false)),getOnlyFansRefreshGuide:()=>settingsRoot()?.socialStudio?.onlyFansRefreshGuide||''};
+  globalThis.GreyhavenSocialStudio={version:VERSION,openProfile,sync:syncNow,getProfile:identityId=>clone(profileFor(identityId,false)),getOnlyFansMainPrompt:()=>settingsRoot()?.socialStudio?.onlyFansFullPrompt||onlyFansDefaultPrompt()};
 }
 async function waitReady(timeout=15000){const start=Date.now();while(Date.now()-start<timeout){if(globalThis.GreyhavenPhone&&ctx()?.extensionSettings&&document.body)return true;await new Promise(r=>setTimeout(r,100));}return false;}
 async function init(){if(initialized)return;if(!await waitReady()){console.warn(`[${MODULE}] Greyhaven Phone was not ready.`);return;}settingsRoot();bindEvents();observeUi();expose();scheduleSync();scheduleAugment();initialized=true;console.info(`[${MODULE}] v${VERSION} loaded`);}

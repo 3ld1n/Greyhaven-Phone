@@ -78,9 +78,6 @@ function phoneSettingsRoot() {
   return c.extensionSettings[SETTINGS_KEY];
 }
 
-function onlyFansRefreshGuide() {
-  return cleanText(phoneSettingsRoot()?.socialStudio?.onlyFansRefreshGuide || '');
-}
 
 function continuityForItem(item) {
   const life = globalThis.GreyhavenLife;
@@ -90,11 +87,13 @@ function continuityForItem(item) {
     const sender = item?.senderName ? life.getResolvedPerson?.(item.senderName) : null;
     const scene = life.getScene?.();
     const location = cleanText(sender?.location || sender?.area ? [sender?.location,sender?.area].filter(Boolean).join(', ') : '');
-    const sceneLocation = cleanText([scene?.label,scene?.location,scene?.area].filter(Boolean).join(' · '));
+    const sceneLocation = cleanText([scene?.location || scene?.label,scene?.area].filter(Boolean).join(', '));
     if (location) pieces.push(`${cleanText(item.senderName || 'Sender')}'s tracked location: ${location}.`);
     else if (sceneLocation) pieces.push(`Current roleplay scene: ${sceneLocation}.`);
-    const notes = cleanText(scene?.notes || '').slice(0,260);
-    if (notes) pieces.push(`Visible scene continuity: ${notes}.`);
+    // Scene notes describe the active RP location. Do not mix them into an
+    // off-screen sender's photo when Greyhaven Life tracks that sender elsewhere.
+    // Free-form scene notes often contain panoramic/set-dressing details that
+    // distract Seedream from the person. Location and time are sufficient.
     const time = life.getTime?.();
     const d = time ? new Date(time) : null;
     if (d && !Number.isNaN(d.getTime())) {
@@ -1101,7 +1100,7 @@ function inferGeneratedItemForContainer(container,maps) {
 }
 
 function augmentGeneratedTools(maps) {
-  const containers=[...document.querySelectorAll('#ghp-overlay .ghp-msg.has-media,#ghp-overlay .ghp-feed article,#ghp-overlay .ghp-of-post,#ghsocial-profile-dialog .ghsocial-post-card')];
+  const containers=[...document.querySelectorAll('#ghp-overlay .ghp-msg.has-media,#ghp-overlay .ghp-feed article,#ghp-overlay .ghp-of-post,#ghsocial-profile-page .ghsocial-post-card')];
   for (const container of containers) {
     if (container.querySelector(':scope > .ghimg-tools-chip')) continue;
     const item=inferGeneratedItemForContainer(container,maps);
@@ -1119,7 +1118,7 @@ function augmentMediaButtons(maps) {
     ...overlay.querySelectorAll('.ghp-media-visual:not(.has-local) .ghp-media-placeholder'),
     ...overlay.querySelectorAll('.ghp-fake-photo'),
     ...overlay.querySelectorAll('.ghp-photos > div:not(:has(img)):not(:has(video))'),
-    ...document.querySelectorAll('#ghsocial-profile-dialog[open] .ghp-fake-photo'),
+    ...document.querySelectorAll('#ghsocial-profile-page .ghp-fake-photo'),
   ];
 
   for (const node of nodes) {
@@ -1265,7 +1264,7 @@ function installPromptDetailHook() {
   const st = globalThis.SillyTavern;
   if (!st || typeof st.getContext !== 'function' || st.getContext.__ghimgDetailHook) return;
   const originalGetContext = st.getContext.bind(st);
-  const instruction = `\n\n[Greyhaven image metadata rule]\nWhenever this task creates a photo, visual, mediaDescription, social post image or image-bearing message for Greyhaven Phone, write the visual metadata as a compact generation-ready scene description, normally 2-4 natural sentences (about 45-90 words). Include: (1) the exact established name of every visible known character and a brief visible appearance cue when established, (2) pose/action and clearly visible facial expression or mood, (3) framing/camera position such as close selfie, mirror selfie, waist-up, full body, eye level or low angle, (4) the specific current physical location/room and concrete background details from the scenario or Greyhaven Life/World Snapshot, (5) time of day and believable lighting, and (6) a few important visible objects that belong in that location. Keep continuity with the current roleplay instead of inventing a generic bedroom, studio, hotel, office or outdoor background. If Greyhaven Life provides the sender's location or the current scene/time, use it unless the event explicitly establishes a different place or time. For selfies, say whether the phone is handheld, mirror-visible or outside the frame. First-person wording is allowed for the sender, but use exact names for other established people. Do not invent clothing when it is unknown; Greyhaven Wardrobe supplies authoritative clothing separately. Do not describe invisible thoughts, secrets or off-camera facts.`;
+  const instruction = `\n\n[Greyhaven image metadata rule]\nFor any Greyhaven Phone photo/post/message, produce a short photographic description (normally 25–55 words, 1–3 concise sentences), prioritizing WHO is in the photo, their visible pose/action, expression/mood, what part of the person is in frame, and a simple credible setting. State the exact established character name. Clearly choose ONE camera mode for each image: (A) unedited raw front-facing phone selfie (default for casual self-sent direct photos), (B) front-facing phone selfie with a specific Snapchat/AR filter and EXACT description of its visible effects, only when a filter is intentionally chosen, (C) unedited rear/back camera phone photo taken by another person, or (D) professional camera photograph, only when context justifies it. Mirror selfies are fine when the scene suggests one. State believable lighting/time in a few words; identify the relevant room or place with at most one unobtrusive backdrop cue. The PERSON, not the architecture or view, is always the subject. Never invent city skylines, skyscrapers, oversized windows, ornate décor, or extraneous scene props. Prefer candid composition, real phone image flaws and unretouched skin. No arbitrary accessory or jewelry mentions. Clothing should match the established RP/Wardrobe, never be guessed when unknown; Wardrobe is authoritative. No extraneous people, internal thoughts or secrets. Preserve already-established exact camera filters, garments and objects if they matter to the scene.`; Greyhaven Wardrobe supplies authoritative clothing separately. Do not describe invisible thoughts, secrets or off-camera facts.`;
   const wrapGenerate = context => {
     if (!context || typeof context.generateRaw !== 'function' || context.generateRaw.__ghimgDetailWrapped) return context;
     const originalGenerate = context.generateRaw.bind(context);
@@ -1275,20 +1274,22 @@ function installPromptDetailHook() {
       const phoneTask = /Greyhaven|Marketplace|OnlyFans|Snapchat|Instagram|Facebook|phone refresh|roleplay phone/i.test(system);
       let nextSystem = system;
       if (phoneTask && !nextSystem.includes('[Greyhaven image metadata rule]')) nextSystem += instruction;
-      const creatorGuide = onlyFansRefreshGuide();
-      const onlyFansTask = /OnlyFans|adults-only creator platform|creator posts/i.test(system);
+      const onlyFansTask = /adults-only creator platform|one manual content refresh for a fictional|one dedicated OnlyFans refresh/i.test(system);
       if (onlyFansTask) {
         const root = phoneSettingsRoot();
         if (root) {
           root.socialStudio ||= {};
+          // Capture the untouched built-in prompt, not a previously injected one.
           if (root.socialStudio.lastOnlyFansSystemPrompt !== system) {
             root.socialStudio.lastOnlyFansSystemPrompt = system;
             try { ctx()?.saveSettingsDebounced?.(); } catch {}
           }
+          // This is a FULL prompt override, not appended weak guidance.
+          const override = String(root.socialStudio.onlyFansFullPrompt || '').trim();
+          if (override) nextSystem = override;
+          // The photo metadata contract still applies after a full override.
+          if (!nextSystem.includes('[Greyhaven image metadata rule]')) nextSystem += instruction;
         }
-      }
-      if (onlyFansTask && creatorGuide && !nextSystem.includes('[Greyhaven OnlyFans custom guidance]')) {
-        nextSystem += `\n\n[Greyhaven OnlyFans custom guidance]\n${creatorGuide}\nUse this as additional creative direction for new creator posts. Preserve character personality, established relationships, current setting and age eligibility. Do not repeat the same pose, room or outfit every time unless continuity calls for it.`;
       }
       if (nextSystem === system) return originalGenerate(options);
       return originalGenerate({ ...options, systemPrompt:nextSystem });

@@ -132,50 +132,54 @@ export function selectReferenceAssignments({ subjects=[], packs={}, maxTotal=MAX
   return assignments;
 }
 
+// Seedream 4.5 does better with one coherent photographed moment than with long
+// keyword stacks. Never mention an accessory that the scene/wardrobe did not.
 export function buildImagePrompt({ description='', subjects=[], referenceAssignments=[], wardrobeLines=[], app='messages', scope='message', continuity='' }={}) {
   const scene = cleanText(description);
   const context = cleanText(continuity);
-  const socialPhonePhoto = ['snapchat','messages','instagram','facebook'].includes(app)
-    && ['message','dm','story','post'].includes(scope);
-  const appStyle = app === 'snapchat'
-    ? 'Make it feel like a spontaneous Snapchat phone photo, casual and immediate.'
-    : app === 'messages'
-      ? 'Make it feel like a believable private phone photo genuinely taken and sent in chat.'
-      : app === 'instagram'
-        ? 'Make it feel like a believable Instagram photo: intentional enough to post, still natural.'
-        : app === 'facebook'
-          ? 'Make it feel like an everyday Facebook photo, natural rather than staged.'
-          : app === 'onlyfans'
-            ? 'Make it feel like an authentic creator photo from a phone or ordinary camera unless the scene explicitly describes a professional shoot.'
-            : 'Use coherent real-world photography that matches the scene.';
+  const wardrobe = wardrobeLines.filter(Boolean);
+  const text = `${scene} ${wardrobe.join(' ')}`;
+  const socialPhoto = ['snapchat','messages','instagram','facebook','onlyfans'].includes(app);
+  const professional = /(?:professional (?:camera|photo|portrait|shoot)|studio (?:camera|photograph|shoot)|dslr|mirrorless camera)/i.test(scene);
+  const filter = /(?:snapchat|face|beauty|cat ears|dog ears|AR)\s+(?:filter|lens)|(?:filter|lens)\s+(?:on|with|showing)|filtered selfie/i.test(scene);
+  const mirror = /mirror selfie|selfie in (?:a|the) mirror/i.test(scene);
+  const front = /front[- ]facing|front camera|handheld selfie|selfie camera|selfie/i.test(scene);
+  const rear = /rear camera|back camera|taken by (?:a friend|someone)|third[- ]person (?:phone|photo)/i.test(scene);
+  const camera = professional
+    ? 'Use the specifically requested professional camera and lighting, without exaggerated retouching.'
+    : mirror ? 'Use an authentic handheld phone mirror selfie, with coherent mirror reflections and ordinary phone exposure.'
+    : front ? `Use a believable front-facing smartphone selfie with slight natural phone-lens perspective and handheld composition.${filter?' Apply only the specific camera filter described in the metadata; otherwise keep the image unfiltered.':' Keep it unfiltered unless a filter is explicitly described.'}`
+    : rear ? 'Use an authentic rear-camera phone snapshot taken by another person, with realistic framing and ordinary automatic exposure.'
+    : socialPhoto ? 'Unless specified otherwise, frame it like a casual unedited smartphone photo taken for this app, not an editorial shoot.'
+    : 'Use a plausible real camera angle and physically coherent lighting.';
 
-  const lines = ['Create exactly one photorealistic image.'];
-  if (scene) lines.push(`SCENE — follow this literally:\n${scene}`);
-  if (context) lines.push(`CONTINUITY — use only to fill scene details that are not specified above:\n${context}`);
-
+  const lines = [
+    'Create one genuine-looking photograph of the described person and moment. The person, pose, expression and framing are the priority; the setting is only quiet visual context.',
+  ];
+  if (scene) lines.push(`SCENE (follow the photographed action and camera type):\n${scene}`);
+  if (context) lines.push(`LOCATION/TIME CONTINUITY (use only where not contradicted by the scene; do not invent scenery):\n${context}`);
   if (referenceAssignments.length) {
     const grouped = new Map();
     referenceAssignments.forEach((assignment,index) => {
       const list = grouped.get(assignment.subject.id) || { subject: assignment.subject, refs: [] };
       list.refs.push(`[Image ${index + 1}]`);
-      grouped.set(assignment.subject.id, list);
+      grouped.set(assignment.subject.id,list);
     });
     lines.push('IDENTITY REFERENCES:');
     for (const {subject,refs} of grouped.values()) {
-      lines.push(`${cleanText(subject.name)} = ${refs.join(', ')}. Preserve this person’s face, hair, apparent age, build and stable distinguishing features. Use the references for identity only; use the current scene and wardrobe for pose, clothing, jewelry, background, lighting and camera.`);
+      lines.push(`${cleanText(subject.name)} = ${refs.join(', ')}. Maintain this person’s real facial proportions, hair, skin tone, apparent age and overall build. References establish identity, not the current outfit, scene, pose or camera.`);
     }
   }
-
-  const wardrobe = wardrobeLines.filter(Boolean);
-  if (wardrobe.length) {
-    lines.push(`WARDROBE — authoritative:\n${wardrobe.join('\n')}\nThis overrides clothing visible in references. If it says ONLY wearing or naked, add no other garments.`);
-  }
-
-  lines.push(appStyle);
-  lines.push(socialPhonePhoto
-    ? 'Use normal smartphone optics and exposure, natural depth, realistic skin pores and fine facial detail, subtle asymmetry and ordinary imperfections; no beauty-filter or glossy CGI look.'
-    : 'Use believable optics, natural skin/material texture and physically coherent lighting; keep retouching subtle and avoid glossy CGI skin.');
-  lines.push('Keep jewelry and piercings realistic and small: nose jewelry tiny, navel jewelry small, earrings proportionate, necklace chains fine and pendants modest. Character names are identity labels, not visible necklace/tattoo/logo text unless the scene explicitly asks for that text.');
-  lines.push('Keep hands, fingers, eyes, teeth, limbs, fabric contact, reflections, shadows and perspective physically coherent. Keep the stated location/background consistent and add no unrelated people or objects. No random text, watermark or signature.');
+  if (wardrobe.length) lines.push(`CURRENT WARDROBE (authoritative if explicitly known):\n${wardrobe.join('\n')}\nDo not copy clothing from reference photos over the current scene wardrobe.`);
+  lines.push(camera);
+  lines.push('Prioritize believable human photography: natural skin tone and modest skin texture, small real imperfections, facial asymmetry, naturally directed eyes, fine hair detail, consistent shadows, plausible depth of field and realistic fabric. Avoid plastic skin, excessive smoothing, fashion retouching, synthetic glow, HDR and artificial cinematic lighting unless the camera metadata specifically asks for it.');
+  // Deliberately do NOT list possible jewelry (nose rings, belly piercings etc.)
+  // in every prompt: Seedream can hallucinate those merely from the reminder.
+  const accessoryRegex = /\b(?:nose (?:ring|stud|piercing)|navel (?:ring|piercing)|belly (?:ring|piercing)|earrings?|necklaces?|pendants?|bracelets?|rings?|watches?|piercings?)\b/gi;
+  const explicitAccessories = [...new Set([...text.matchAll(accessoryRegex)]
+    .filter(match => !/(?:\b(?:no|without|remove|removed|absent|not wearing|isn't wearing|not wearing:)\s*(?:any\s+)?[\w,; ]{0,25})$/i.test(text.slice(Math.max(0,match.index-50),match.index)))
+    .map(match=>match[0].toLowerCase()))];
+  if (explicitAccessories.length) lines.push(`Only if actually described: render the specified ${explicitAccessories.join(', ')} at normal real-world scale, never oversized or duplicated. Do not introduce extra accessories.`);
+  lines.push('Keep attention on the subject; the background should be understated and consistent only with the named location, without elaborate invented scenery. Names identify characters; they are not instructions to print text. Natural hands, anatomy, perspective and reflections; no invented people, labels, watermarks or logos.');
   return lines.join('\n\n');
 }
