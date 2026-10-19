@@ -187,8 +187,10 @@ function currentTimelineBox() {
   const root = metadataRoot();
   const owner = currentIdentity();
   if (!root?.phones || !owner) return null;
+  const canonical=`phone-id:${encodeURIComponent(owner.id)}`;
+  if(root.phones[canonical])return{root,key:canonical,timeline:root.phones[canonical],owner};
   for (const [key,timeline] of Object.entries(root.phones)) {
-    if (timeline?.identityId === owner.id || lower(timeline?.ownerName) === lower(owner.name)) return { root, key, timeline, owner };
+    if (timeline?.identityId === owner.id) return { root, key, timeline, owner };
   }
   return null;
 }
@@ -601,8 +603,8 @@ function propagateGeneratedState(item, mediaKey, width, height) {
   saveImageSettings();
 }
 
-async function saveGeneratedBlob(blob, item) {
-  const key = `${currentChatKey()}|ghimg|${item.id}|${uuid()}`;
+async function saveGeneratedBlob(blob, item, chatKey = currentChatKey()) {
+  const key = `${chatKey}|ghimg|${item.id}|${uuid()}`;
   await dbPut(phoneMediaDb, PHONE_MEDIA_STORE, key, blob);
   return key;
 }
@@ -877,6 +879,8 @@ async function generateItem(item, reason='manual', options={}) {
   const force = options?.force === true;
   if (!item || (item.mediaKey && !force)) return item?.mediaKey || '';
   const oldMediaKey = item.mediaKey || '';
+  const originChatKey=currentChatKey(),originIdentityId=currentIdentity()?.id||'';
+  const stillInOrigin=()=>currentChatKey()===originChatKey&&(currentIdentity()?.id||'')===originIdentityId;
   try {
     if (!providerStatus?.configured) await refreshProviderStatus();
     if (!providerStatus?.configured) throw new Error('Wiro is not configured in Greyhaven Phone Settings.');
@@ -898,7 +902,16 @@ async function generateItem(item, reason='manual', options={}) {
     for (let i=0;i<bytes.length;i++) array[i]=bytes.charCodeAt(i);
     const blob = new Blob([array], { type:String(response.mime || 'image/jpeg') });
     const dimensions = await blobDimensions(blob);
-    const mediaKey = await saveGeneratedBlob(blob,item);
+    // The provider may charge even when the user changes chats mid-request.
+    // Track that usage, but never attach its result to a different timeline.
+    const usage = s.usage;
+    usage.images += 1;
+    usage.totalCost += Math.max(0, Number(response.task?.totalCost || 0));
+    usage.chargedCost += Math.max(0, Number(response.task?.chargedCost || 0));
+    saveImageSettings();
+    if(!stillInOrigin())return '';
+    const mediaKey = await saveGeneratedBlob(blob,item,originChatKey);
+    if(!stillInOrigin())return '';
     const target = item.getTarget?.();
     if (target) {
       target.mediaKey = mediaKey;
@@ -913,12 +926,6 @@ async function generateItem(item, reason='manual', options={}) {
       const oldUrl = mediaKeyUrls.get(oldMediaKey); if (oldUrl) { URL.revokeObjectURL(oldUrl); mediaKeyUrls.delete(oldMediaKey); }
     }
     invalidateRegistry();
-
-    const usage = s.usage;
-    usage.images += 1;
-    usage.totalCost += Math.max(0, Number(response.task?.totalCost || 0));
-    usage.chargedCost += Math.max(0, Number(response.task?.chargedCost || 0));
-    saveImageSettings();
 
     const url = URL.createObjectURL(blob);
     generatedUrls.set(item.key,url);

@@ -131,8 +131,10 @@ function mergePost(existing,incoming,app,identity) {
 function timelineRef() {
   const c=ctx(),root=c?.chatMetadata?.[META_KEY],owner=currentIdentity();
   if (!root?.phones || !owner) return null;
+  const canonical=`phone-id:${encodeURIComponent(owner.id)}`;
+  if(root.phones[canonical])return{root,key:canonical,timeline:root.phones[canonical],owner};
   for (const [key,t] of Object.entries(root.phones)) {
-    if (String(t?.identityId||'')===String(owner.id) || lower(t?.ownerName)===lower(owner.name)) return {root,key,timeline:t,owner};
+    if (String(t?.identityId||'')===String(owner.id)) return {root,key,timeline:t,owner};
   }
   return null;
 }

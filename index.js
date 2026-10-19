@@ -1,5 +1,7 @@
+import { phoneKeyForIdentity, reconcilePhoneIdentities } from './phone-identity.mjs';
+
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '2.3.0';
+const GHP_VERSION = '2.11.0';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -46,6 +48,7 @@ const DEFAULT_PROFILE = {
   notificationPreviews:true,
   refreshMode:'manual',
   staleAfterMessages:12,
+  staleAfterRoleplayMinutes:120,
   maxNewEvents:4,
   activityLevel:'normal',
   recentMessages:20,
@@ -79,6 +82,7 @@ let mediaDbPromise=null;
 const mediaObjectUrls=new Map();
 const mediaDimensionCache=new Map();
 const mediaMemoryFallback=new Map();
+const reconciledPhoneRoots = new WeakSet();
 
 function ctx(){try{return globalThis.SillyTavern?.getContext?.()||null}catch(e){console.warn(`[${GHP_MODULE}] context`,e);return null}}
 function clone(v){if(v===undefined)return undefined;try{return structuredClone(v)}catch{return JSON.parse(JSON.stringify(v))}}
@@ -89,6 +93,8 @@ function norm(v){return String(v||'').trim().replace(/\s+/g,' ')}
 function slug(v){return norm(v).toLowerCase().replace(/[’']/g,'').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-+|-+$/g,'')||'persona'}
 function hasChat(){const c=ctx();return !!(c&&(c.groupId||c.characterId!==undefined)&&(c.getCurrentChatId?.()||c.chatId))}
 function chatIdentity(){const c=ctx();if(!c)return'';const chat=c.getCurrentChatId?.()||c.chatId||'';return chat?(c.groupId?`g:${c.groupId}:${chat}`:`c:${c.characterId}:${chat}`):''}
+function operationOrigin(){return{chat:chatIdentity(),identityId:currentIdentity()?.id||''}}
+function originIsCurrent(origin){return !!origin?.chat&&origin.chat===chatIdentity()&&origin.identityId===(currentIdentity()?.id||'')}
 function now(){try{const d=globalThis.GreyhavenLife?.getTime?.();if(d){const x=new Date(d);if(!Number.isNaN(x.getTime()))return x}}catch{}return new Date()}
 function timeText(d=now()){return new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit',hour12:false}).format(d)}
 function dateText(d=now(),short=false){return new Intl.DateTimeFormat(undefined,short?{weekday:'short',month:'short',day:'numeric'}:{weekday:'long',month:'long',day:'numeric'}).format(d)}
@@ -327,6 +333,7 @@ function normalizeProfile(raw={}){
   return{...DEFAULT_PROFILE,...raw,apps:{...DEFAULT_PROFILE.apps,...migratedApps},
     wallpaper:WALLPAPERS[raw.wallpaper]?raw.wallpaper:'aurora',
     staleAfterMessages:Math.max(3,Math.min(100,Number(raw.staleAfterMessages||12))),
+    staleAfterRoleplayMinutes:Math.max(30,Math.min(1440,Number(raw.staleAfterRoleplayMinutes||120))),
     maxNewEvents:Math.max(1,Math.min(8,Number(raw.maxNewEvents||4))),
     recentMessages:Math.max(6,Math.min(50,Number(raw.recentMessages||20))),
     recentChars:Math.max(3000,Math.min(30000,Number(raw.recentChars||12000))),
@@ -390,7 +397,7 @@ function normalizeAppMessage(raw={}){
 }
 function normalizeAppThreads(store={}){
   store=store&&typeof store==='object'?store:{};if(!store.threads||typeof store.threads!=='object')store.threads={};if(!Array.isArray(store.threadOrder))store.threadOrder=[];
-  for(const [key,value] of Object.entries(store.threads)){const th=value&&typeof value==='object'?value:{};th.id=key;th.identityId=String(th.identityId||'');th.peerName=norm(th.peerName||'Unknown');th.peerAvatar=String(th.peerAvatar||'');th.messages=Array.isArray(th.messages)?th.messages.map(normalizeAppMessage):[];th.createdAt=Math.max(0,Number(th.createdAt||Date.now()));th.contextListingId=String(th.contextListingId||'');th.videoActive=th.videoActive===true;th.videoStartedAt=Math.max(0,Number(th.videoStartedAt||0));th.videoSessionId=String(th.videoSessionId||'');th.videoTranscript=Array.isArray(th.videoTranscript)?th.videoTranscript.map(normalizeAppMessage):[];th.videoCallHistory=Array.isArray(th.videoCallHistory)?th.videoCallHistory.filter(Boolean).slice(-12).map(call=>({id:String(call?.id||id()),startedAt:Math.max(0,Number(call?.startedAt||0)),endedAt:Math.max(0,Number(call?.endedAt||0)),transcript:Array.isArray(call?.transcript)?call.transcript.map(normalizeAppMessage):[]})):[];store.threads[key]=th}
+  for(const [key,value] of Object.entries(store.threads)){const th=value&&typeof value==='object'?value:{};th.id=key;th.identityId=String(th.identityId||'');th.peerName=norm(th.peerName||'Unknown');th.peerAvatar=String(th.peerAvatar||'');if(!Array.isArray(th.messages))th.messages=[];else th.messages.forEach(normalizeAppMessage);th.createdAt=Math.max(0,Number(th.createdAt||Date.now()));th.contextListingId=String(th.contextListingId||'');th.videoActive=th.videoActive===true;th.videoStartedAt=Math.max(0,Number(th.videoStartedAt||0));th.videoSessionId=String(th.videoSessionId||'');if(!Array.isArray(th.videoTranscript))th.videoTranscript=[];else th.videoTranscript.forEach(normalizeAppMessage);th.videoCallHistory=Array.isArray(th.videoCallHistory)?th.videoCallHistory.filter(Boolean).slice(-12).map(call=>({id:String(call?.id||id()),startedAt:Math.max(0,Number(call?.startedAt||0)),endedAt:Math.max(0,Number(call?.endedAt||0)),transcript:Array.isArray(call?.transcript)?call.transcript.map(normalizeAppMessage):[]})):[];store.threads[key]=th}
   store.threadOrder=store.threadOrder.filter(k=>store.threads[k]);for(const key of Object.keys(store.threads))if(!store.threadOrder.includes(key))store.threadOrder.push(key);return store;
 }
 function normalizeSocialEngagement(row={},viewerIdentityId=''){
@@ -415,7 +422,7 @@ function normalizeTimeline(t){
   for(const [key,value] of Object.entries(t.relationships)){const identity=identityById(key)||identityForName(value?.name,{create:false});t.relationships[key]=normalizeAppRelationship(value,identity)}
   for(const co of Object.values(t.contacts)){if(!co.identityId)continue;const identity=identityById(co.identityId);t.relationships[co.identityId]=normalizeAppRelationship(t.relationships[co.identityId],identity||co);t.relationships[co.identityId].knownContactInfo.phoneNumber=co.saved&&validPhoneNumber(co.phoneNumber);t.relationships[co.identityId].apps.messages.blocked=!!co.blocked;t.relationships[co.identityId].apps.messages.blockedBy=!!co.blockedByContact}
   if(!t.threads||typeof t.threads!=='object')t.threads={};if(!Array.isArray(t.threadOrder))t.threadOrder=[];
-  for(const [k,v] of Object.entries(t.threads)){v.id=k;v.type=v.type==='group'?'group':'direct';v.title||='';v.contactIds=Array.isArray(v.contactIds)?v.contactIds.filter(Boolean):[];v.messages=Array.isArray(v.messages)?v.messages.map(normalizeMessage):[];v.createdAt||=Date.now()}
+  for(const [k,v] of Object.entries(t.threads)){v.id=k;v.type=v.type==='group'?'group':'direct';v.title||='';v.contactIds=Array.isArray(v.contactIds)?v.contactIds.filter(Boolean):[];if(!Array.isArray(v.messages))v.messages=[];else v.messages.forEach(normalizeMessage);v.createdAt||=Date.now()}
   t.threadOrder=t.threadOrder.filter(k=>t.threads[k]);for(const k of Object.keys(t.threads))if(!t.threadOrder.includes(k))t.threadOrder.push(k);
   for(const k of ['calls','posts','stories','notifications','photos','notes','mail'])if(!Array.isArray(t[k]))t[k]=[];
   for(const n of t.notifications){if(n?.app==='social')n.app='instagram';if(n?.app==='snap')n.app='snapchat'}
@@ -427,7 +434,7 @@ function normalizeTimeline(t){
   t.uber=t.uber&&typeof t.uber==='object'?t.uber:defaultUber();t.uber.savedDestination=String(t.uber.savedDestination||'');
   t.onlyfans=normalizeAppThreads(t.onlyfans||{});if(!Array.isArray(t.onlyfans.notifications))t.onlyfans.notifications=[];
   t.darkweb=normalizeAppThreads(t.darkweb||{});if(!Array.isArray(t.darkweb.notifications))t.darkweb.notifications=[];
-  t.refresh=t.refresh&&typeof t.refresh==='object'?t.refresh:{};t.refresh.chatLength=Math.max(0,Number(t.refresh.chatLength||0));t.refresh.eventKeys=Array.isArray(t.refresh.eventKeys)?t.refresh.eventKeys.slice(-80):[];t.refresh.summary||='';
+  t.refresh=t.refresh&&typeof t.refresh==='object'?t.refresh:{};t.refresh.chatLength=Math.max(0,Number(t.refresh.chatLength||0));t.refresh.lastRoleplayMs=Math.max(0,Number(t.refresh.lastRoleplayMs||0));t.refresh.eventKeys=Array.isArray(t.refresh.eventKeys)?t.refresh.eventKeys.slice(-80):[];t.refresh.summary||='';
   return t;
 }
 function normalizeContinuity(c={}){
@@ -443,7 +450,16 @@ function normalizeContinuity(c={}){
 function metadataRoot(){
   const c=ctx();if(!c?.chatMetadata||!hasChat())return null;let r=c.chatMetadata[GHP_META_KEY];
   if(!r||typeof r!=='object'){r={version:5,phones:{},continuity:normalizeContinuity()};c.chatMetadata[GHP_META_KEY]=r}
-  r.version=Math.max(5,Number(r.version||1));if(!r.phones||typeof r.phones!=='object')r.phones={};r.continuity=normalizeContinuity(r.continuity);if(!r.services||typeof r.services!=='object')r.services={};if(!r.onlyFans||typeof r.onlyFans!=='object')r.onlyFans={};if(!r.darkWeb||typeof r.darkWeb!=='object')r.darkWeb={};return r
+  r.version=Math.max(5,Number(r.version||1));if(!r.phones||typeof r.phones!=='object')r.phones={};r.continuity=normalizeContinuity(r.continuity);if(!r.services||typeof r.services!=='object')r.services={};if(!r.onlyFans||typeof r.onlyFans!=='object')r.onlyFans={};if(!r.darkWeb||typeof r.darkWeb!=='object')r.darkWeb={};
+  if(!reconciledPhoneRoots.has(r)){
+    // A chat reload creates a new root; reconcile its legacy persona/latent keys
+    // before ANY reader can append to another copy. Never drop divergent history.
+    const changed=reconcilePhoneIdentities(r.phones,name=>identityForName(name,{create:false})?.id||
+      (lc(name)===lc(persona().name)?personaIdentityId():''));
+    reconciledPhoneRoots.add(r);
+    if(changed)saveMetadataRoot(r);
+  }
+  return r
 }
 
 function continuityRoot(){const r=metadataRoot();return r?{root:r,state:r.continuity}:null}
@@ -495,17 +511,13 @@ function continuitySnapshot(){
 function saveMetadataRoot(r){const c=ctx();if(!c||!r)return;c.chatMetadata[GHP_META_KEY]=r;c.updateChatMetadata?.({[GHP_META_KEY]:r});c.saveMetadataDebounced?.()}
 function timeline(create=true){
   const r=metadataRoot();if(!r)return create?defaultTimeline(persona().name,persona().avatar):null;
-  const p=persona();let t=r.phones[p.key],oldKey='';
-  if(!t){
-    const hit=Object.entries(r.phones).find(([,v])=>lc(v?.ownerName)===lc(p.name));
-    if(hit){oldKey=hit[0];t=hit[1];r.phones[p.key]=t;if(oldKey!==p.key&&oldKey.startsWith('latent:'))delete r.phones[oldKey]}
-  }
-  if(!t&&create){t=defaultTimeline(p.name,p.avatar);r.phones[p.key]=t;saveMetadataRoot(r)}
-  if(t){t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';t.identityId=currentIdentity()?.id||t.identityId||'';r.phones[p.key]=t;if(oldKey)saveMetadataRoot(r)}
+  const p=persona(),identity=currentIdentity(),key=phoneKeyForIdentity(identity.id);let t=r.phones[key];
+  if(!t&&create){t=defaultTimeline(p.name,p.avatar);t.identityId=identity.id;r.phones[key]=t;saveMetadataRoot(r)}
+  if(t){t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';t.identityId=identity.id;r.phones[key]=t}
   return t||null;
 }
 function persist(t,doRender=true){
-  const r=metadataRoot();if(!r)return;const p=persona();t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';t.identityId=currentIdentity()?.id||t.identityId||'';t.updatedAt=Date.now();r.phones[p.key]=t;saveMetadataRoot(r);updatePrompt();if(doRender)render()
+  const r=metadataRoot();if(!r)return;const p=persona(),identity=currentIdentity();t=normalizeTimeline(t);t.ownerName=p.name;t.ownerAvatar=p.avatar||t.ownerAvatar||'';t.identityId=identity.id;t.updatedAt=Date.now();r.phones[phoneKeyForIdentity(identity.id)]=t;saveMetadataRoot(r);updatePrompt();if(doRender)render()
 }
 function mutate(fn,doRender=true){const t=timeline();fn(t);persist(t,doRender);return t}
 
@@ -571,18 +583,17 @@ function directThread(cid){
 }
 
 function phoneForOwner(ownerName,ownerAvatar='',create=true){
-  const r=metadataRoot();if(!r)return null;const name=norm(ownerName);if(!name)return null;
-  let hit=Object.entries(r.phones).find(([,v])=>lc(v?.ownerName)===lc(name));
-  if(hit){const t=normalizeTimeline(hit[1]),identity=identityForName(name,{create:true});t.ownerName=name;t.ownerAvatar=ownerAvatar||identity?.avatar||t.ownerAvatar||'';t.identityId=identity?.id||t.identityId||'';return{root:r,key:hit[0],timeline:t}}
-  if(!create)return null;
-  const identity=identityForName(name,{create:true}),key=`latent:${slug(name)}`;const t=defaultTimeline(name,ownerAvatar||identity?.avatar||'');t.identityId=identity?.id||'';r.phones[key]=t;return{root:r,key,timeline:t};
+  const name=norm(ownerName);if(!name)return null;
+  const identity=identityForName(name,{create});if(!identity)return null;
+  return phoneForIdentity(identity,create);
 }
 function phoneForIdentity(identity,create=true){
   if(!identity?.id)return null;const r=metadataRoot();if(!r)return null;
-  let hit=Object.entries(r.phones).find(([,value])=>String(value?.identityId||'')===identity.id);
-  if(!hit&&identity.kind!=='provisional')hit=Object.entries(r.phones).find(([,value])=>lc(value?.ownerName)===lc(identity.name));
-  if(hit){const t=normalizeTimeline(hit[1]);t.ownerName=identity.name;t.ownerAvatar=identity.avatar||t.ownerAvatar||'';t.identityId=identity.id;return{root:r,key:hit[0],timeline:t}}
-  if(!create)return null;const key=`latent-id:${encodeURIComponent(identity.id)}`,t=defaultTimeline(identity.name,identity.avatar||'');t.identityId=identity.id;r.phones[key]=t;return{root:r,key,timeline:t};
+  const key=phoneKeyForIdentity(identity.id);let t=r.phones[key];
+  if(!t&&!create)return null;
+  if(!t){t=defaultTimeline(identity.name,identity.avatar||'');t.identityId=identity.id;r.phones[key]=t;}
+  t=normalizeTimeline(t);t.ownerName=identity.name;t.ownerAvatar=identity.avatar||t.ownerAvatar||'';t.identityId=identity.id;
+  return{root:r,key,timeline:t};
 }
 function seedSavedContactSocials(owner,ownerTimeline,contactRow,target){
   if(!owner?.id||!target?.id||owner.id===target.id||!ownerTimeline||contactRow?.socialSeedVersion>=1)return false;
@@ -651,6 +662,7 @@ function darkWebProviderContext(identity){
 }
 async function generateAppReply(appName,threadKey){
   if(appReplyBusy)return;let t=timeline(),th=appThread(appName,threadKey,t),peer=appPeer(th);if(!th||!peer||socialActionBlocked(t,peer,appName))return;
+  const origin=operationOrigin();
   const owner=persona(),ownerIdentity=currentIdentity(),videoMode=appName==='onlyfans'&&th.videoActive,conversation=videoMode?th.videoTranscript:th.messages,last=conversation.at(-1);if(!last||lc(last.sender)!==lc(owner.name))return;
   appReplyBusy=true;islandText=`${peer.name}…`;islandIcon=APPS[appName]?.icon||'fa-solid fa-ellipsis';render();
   try{
@@ -687,6 +699,7 @@ Choose ${peer.name}'s one bounded response now. ACTION: IGNORE is valid.`;
     if(requested&&!hasExplicitMediaPacket(packet.items,requested)&&!packet.action&&!mediaRefusalText(raw)&&mediaSendClaim(raw,requested)){
       raw=await generate({prompt:`${prompt}\n\nDELIVERY CORRECTION: The previous draft claimed to send a ${requested} without attaching it. If ${peer.name} is still willing, return optional TEXT: plus a concrete ${requested.toUpperCase()}: line now. Otherwise return a clear in-character TEXT refusal or boundary. Do not claim delivery without the media protocol.`,systemPrompt,responseLength:520});packet=parseDirectPacket(raw,requested);
     }
+    if(!originIsCurrent(origin))return; // Discard an obsolete response after switching chat/persona.
     for(const row of packet.items.slice(0,3)){if(videoMode){const spoken=String(row.text||'').trim(),shown=String(row.mediaDescription||'').trim(),text=[spoken,shown?`*shows ${shown}*`:''].filter(Boolean).join(' ');if(text)appendOnlyFansVideoTurn(peer,ownerIdentity,text)}else mirrorAppMessage({appName,fromName:peer.name,toName:owner.name,fromIdentityId:peer.id,toIdentityId:ownerIdentity.id,type:row.type,text:row.text||'',mediaDescription:row.mediaDescription||'',timeMs:now().getTime(),unread:false})}
     if(packet.actions?.length)dispatchGeneratedPhoneActions(packet.actions,peer.name,`app:${appName}:${last.mirrorId||last.id}`);
   }catch(e){console.error(`[${GHP_MODULE}] ${appName} reply`,e);globalThis.toastr?.error?.(`${APPS[appName]?.label||'App'} reply failed: ${e?.message||e}`)}
@@ -694,7 +707,7 @@ Choose ${peer.name}'s one bounded response now. ACTION: IGNORE is valid.`;
 }
 function sendAppMessage(appName,threadKey,{type='text',text='',mediaDescription='',mediaKey='',mediaWidth=0,mediaHeight=0,requestMedia=''}={}){
   const t=timeline(),th=appThread(appName,threadKey,t),peer=appPeer(th),owner=currentIdentity();text=String(text||'').trim();mediaDescription=String(mediaDescription||'').trim();if(!th||!peer||!owner||socialActionBlocked(t,peer,appName))return false;if(type==='text'&&!text||type!=='text'&&!mediaDescription)return false;
-  const result=mirrorAppMessage({appName,fromName:owner.name,toName:peer.name,fromIdentityId:owner.id,toIdentityId:peer.id,type,text,mediaDescription,mediaKey,mediaWidth,mediaHeight,requestMedia,timeMs:now().getTime(),unread:true});render();if(result?.delivered)setTimeout(()=>generateAppReply(appName,threadKey),180);return !!result?.delivered;
+  const result=mirrorAppMessage({appName,fromName:owner.name,toName:peer.name,fromIdentityId:owner.id,toIdentityId:peer.id,type,text,mediaDescription,mediaKey,mediaWidth,mediaHeight,requestMedia,timeMs:now().getTime(),unread:true});render();if(result?.delivered){const origin=operationOrigin();setTimeout(()=>{if(originIsCurrent(origin))generateAppReply(appName,threadKey)},180)}return !!result?.delivered;
 }
 function publishAppItem(appName,kind,row){
   const root=metadataRoot(),owner=currentIdentity();if(!root||!owner)return;const shared=row.sharedEventId||`${appName}-${kind}:${id()}`,source={...row,sharedEventId:shared,identityId:owner.id,author:owner.name,ownerPost:true};
@@ -704,7 +717,7 @@ function publishAppItem(appName,kind,row){
     const phone=normalizeTimeline(raw),phoneIdentity=identityById(phone.identityId)||identityForName(phone.ownerName,{create:false});if(phone===own||phone.identityId===owner.id||phoneIdentity&&!identityAppEnabled(phoneIdentity,appName))continue;const reln=phone.relationships?.[owner.id]?.apps?.[appName],visible=appName==='instagram'?reln?.following:appName==='snapchat'?reln?.friends:reln?.friends;if(!visible||reln?.blocked||reln?.blockedBy)continue;
     const list=kind==='story'?appStore(phone,appName).stories:appStore(phone,appName).posts;if(!list.some(x=>x.sharedEventId===shared))list.unshift({...clone(source),ownerPost:false});root.phones[key]=phone;
   }
-  root.phones[persona().key]=own;saveMetadataRoot(root);render();
+  root.phones[phoneKeyForIdentity(currentIdentity().id)]=own;saveMetadataRoot(root);render();
 }
 function socialItemKey(row={}){return String(row.sharedEventId||row.id||'')}
 function copyOwnedSocialContent(sourceIdentity,sourceTimeline,targetTimeline,appName,kinds=['post','story']){
@@ -868,15 +881,15 @@ function messageContext(m){
 function messagePreview(m){if(!m)return'';if(m.type==='photo')return`Photo${m.text?` · ${m.text}`:''}`;if(m.type==='video')return`Video${m.text?` · ${m.text}`:''}`;return m.text||''}
 function notificationTextForMessage(m){if(m.type==='photo')return m.text||'Photo';if(m.type==='video')return m.text||'Video';return m.text||'New message'}
 function recentPhone(enabledApps=profile().apps){
-  const t=timeline(),a=[],addThreads=(store,label)=>{for(const th of Object.values(store?.threads||{}))for(const m of(th.messages||[]).slice(-4))a.push({ms:m.timeMs,text:`${label} · ${th.peerName} | ${messageContext(m).slice(0,180)}`})};
-  if(enabledApps.messages)for(const th of Object.values(t.threads))for(const m of(th.messages||[]).slice(-4))a.push({ms:m.timeMs,text:`Messages · ${threadTitle(th,t)} | ${messageContext(m).slice(0,180)}`});
+  const t=timeline(),a=[],addThreads=(store,label)=>{for(const th of Object.values(store?.threads||{}))for(const m of(th.messages||[]).slice(-4))a.push({ms:m.timeMs,realMs:m.realMs||0,text:`${label} · ${th.peerName} | ${messageContext(m).slice(0,180)}`})};
+  if(enabledApps.messages)for(const th of Object.values(t.threads))for(const m of(th.messages||[]).slice(-4))a.push({ms:m.timeMs,realMs:m.realMs||0,text:`Messages · ${threadTitle(th,t)} | ${messageContext(m).slice(0,180)}`});
   if(enabledApps.phone)for(const x of t.calls.slice(-6))a.push({ms:x.timeMs,text:`Call ${x.contactName}: ${x.status}`});
   if(enabledApps.instagram){for(const x of t.instagram.posts.slice(-6))a.push({ms:x.timeMs,text:`Instagram post ${x.author}: ${x.caption}`});for(const x of t.instagram.stories.slice(-6))a.push({ms:x.timeMs,text:`Instagram story ${x.author}: ${x.caption}`});addThreads(t.instagram,'Instagram DM')}
   if(enabledApps.snapchat){for(const x of t.snapchat.stories.slice(-6))a.push({ms:x.timeMs,text:`Snapchat story ${x.author}: ${x.caption}`});addThreads(t.snapchat,'Snapchat')}
   if(enabledApps.facebook){for(const x of t.facebook.posts.slice(-6))a.push({ms:x.timeMs,text:`Facebook post ${x.author}: ${x.text||x.caption}`});addThreads(t.facebook,'Facebook Messenger')}
   if(enabledApps.onlyfans){for(const {identity,account} of onlyFansCreators())for(const x of account.posts.slice(0,3))a.push({ms:x.timeMs,text:`OnlyFans post ${identity.name}: ${x.caption||x.visual}`});addThreads(t.onlyfans,'OnlyFans')}
   if(enabledApps.mail)for(const x of t.mail.slice(-6))a.push({ms:x.timeMs,text:`Mail ${x.from}: ${x.subject}`});
-  return a.sort((a,b)=>a.ms-b.ms).slice(-36).map(x=>x.text);
+  return a.sort((a,b)=>Number(a.ms||0)-Number(b.ms||0)||Number(a.realMs||0)-Number(b.realMs||0)).slice(-36).map(x=>x.text);
 }
 function recentMentions(name,limit=5){
   const q=lc(name),lines=recentChat().split('\n').filter(Boolean).filter(line=>lc(line).includes(q));
@@ -935,6 +948,7 @@ function buildInstalledAppContext(t,p,candidates){
 
 async function refreshPhone(){
   if(refreshBusy)return;if(!hasChat()){globalThis.toastr?.warning?.('Open a chat first.');return}
+  const origin=operationOrigin();
   refreshBusy=true;islandText='Refreshing phone…';islandIcon='fa-solid fa-satellite-dish';render();
   try{
     seedContacts(true);
@@ -981,6 +995,9 @@ ${JSON.stringify(socialProfileFor(currentIdentity()))}
 ACTIVITY LEVEL:
 ${p.activityLevel}
 
+ELAPSED FICTIONAL TIME SINCE THIS PHONE'S PREVIOUS REFRESH:
+${Math.max(0,Math.floor((now().getTime()-Number(t.refresh?.lastRoleplayMs||now().getTime()))/60000))} minutes. A long interval may justify normal follow-ups, changed routines and a different topic; do not treat old messages as if sent just now, and do not invent major unplayed events.
+
 MINIMUM DESIRED EVENTS:
 ${minEvents}
 
@@ -1006,7 +1023,8 @@ RECENT PHONE HISTORY TO AVOID REPEATING:
 ${JSON.stringify(recentPhone(p.apps))}
 
 Generate plausible NEW activity now. Respect each person's own location evidence.`;
-    const raw=await generate({prompt,systemPrompt,responseLength:p.responseTokens}),result=normalizeRefreshResult(raw),after=applyRefresh(result);
+    const raw=await generate({prompt,systemPrompt,responseLength:p.responseTokens});if(!originIsCurrent(origin))return;
+    const result=normalizeRefreshResult(raw),after=applyRefresh(result);
     globalThis.toastr?.success?.(after?`Phone refreshed · ${after} new event${after===1?'':'s'}`:'Phone refreshed · nothing new this time');
   }catch(e){
     console.error(`[${GHP_MODULE}] refresh`,e);
@@ -1066,6 +1084,7 @@ function applyMarketplaceRefresh(result){
 }
 async function refreshMarketplace(){
   if(marketplaceRefreshBusy||refreshBusy)return;if(!hasChat()){globalThis.toastr?.warning?.('Open a chat first.');return}if(!profile().apps.facebook){globalThis.toastr?.warning?.('Facebook is not installed on this phone.');return}
+  const origin=operationOrigin();
   marketplaceRefreshBusy=true;islandText='Refreshing Marketplace…';islandIcon='fa-solid fa-store';render();
   try{
     const owner=currentIdentity(),w=world(),candidates=marketplaceCandidateContext(),market=sharedMarketplace(),existing=market.listings.slice(0,MAX_MARKETPLACE_LISTINGS).map(x=>({id:x.id,seller:x.sellerName,title:x.title,price:x.price,area:x.area,status:x.status,ownerListing:x.ownerListing})),ownerListings=market.listings.filter(x=>x.ownerListing&&x.status==='available').map(x=>({id:x.id,sellerIdentityId:x.sellerIdentityId,seller:x.sellerName,title:x.title,description:x.description,price:x.price,area:x.area}));
@@ -1079,7 +1098,8 @@ If PERSONA-OWNED LISTINGS exist, you may also create 0 to 2 buyerMessages from a
 Required JSON:
 {"summary":"short note","listings":[{"sellerType":"existing|provisional","seller":"Exact Name or one first name","sellerIdentityId":"optional exact allowed id","title":"","description":"","price":"€0","area":"","visual":"what the listing photo shows"}],"buyerMessages":[{"buyerType":"existing|provisional","buyer":"Exact Name or one first name","buyerIdentityId":"optional","listingId":"exact owner listing id","text":"natural Marketplace message"}]}`;
     const prompt=`ROLEPLAY TIME:\n${w.time}\n\nREFRESH INITIATOR:\n${JSON.stringify({id:owner.id,name:owner.name,character:compactCard({name:owner.name}),socialProfile:socialProfileFor(owner)})}\n\nALLOWED EXISTING IDENTITIES:\n${JSON.stringify(candidates)}\n\nGREYHAVEN LIFE:\n${JSON.stringify({scene:w.scene,people:w.people.slice(0,24),snapshot:w.snapshot})}\n\nSHARED EXISTING LISTINGS — DO NOT REPLACE OR DUPLICATE:\n${JSON.stringify(existing)}\n\nPERSONA-OWNED LISTINGS THAT MAY ATTRACT BUYERS:\n${JSON.stringify(ownerListings)}\n\nGenerate the next append-only Marketplace batch now.`;
-    const raw=await generate({prompt,systemPrompt,responseLength:Math.max(1700,profile().responseTokens)}),result=normalizeMarketplaceRefreshResult(raw),added=applyMarketplaceRefresh(result);globalThis.toastr?.success?.(added?`Marketplace refreshed · ${added} new event${added===1?'':'s'}`:'Marketplace refreshed · no new activity');
+    const raw=await generate({prompt,systemPrompt,responseLength:Math.max(1700,profile().responseTokens)});if(!originIsCurrent(origin))return;
+    const result=normalizeMarketplaceRefreshResult(raw),added=applyMarketplaceRefresh(result);globalThis.toastr?.success?.(added?`Marketplace refreshed · ${added} new event${added===1?'':'s'}`:'Marketplace refreshed · no new activity');
   }catch(e){console.error(`[${GHP_MODULE}] marketplace refresh`,e);globalThis.toastr?.error?.(`Marketplace refresh failed: ${e?.message||e}`)}finally{marketplaceRefreshBusy=false;islandText='';islandIcon='';render()}
 }
 
@@ -1156,13 +1176,16 @@ function normalizeOnlyFansRefreshResult(raw){let value=raw;if(typeof raw==='stri
 function applyOnlyFansRefresh(result){const state=sharedOnlyFans(),keys=new Set(state.refresh.eventKeys||[]),creators=onlyFansCreators(),allowedById=new Map(creators.map(x=>[x.identity.id,x.identity])),allowedByName=new Map(creators.map(x=>[lc(x.identity.name),x.identity]));let added=0;for(const data of result.posts){const creator=allowedById.get(String(data.creatorIdentityId||''))||allowedByName.get(lc(data.creator));if(!creator)continue;const signature=onlyFansPostSignature(creator.id,data),account=onlyFansAccount(creator,false);if(keys.has(signature)||(account?.posts||[]).some(row=>onlyFansPostSignature(creator.id,row)===signature))continue;keys.add(signature);if(publishOnlyFansPostFor(creator,{type:data.type,visual:data.visual||data.mediaDescription,caption:data.caption,likes:Math.max(0,Number(data.likes||0)),comments:Math.max(0,Number(data.comments||0)),timeMs:now().getTime()},true))added++}state.refresh.lastAt=Date.now();state.refresh.summary=String(result.summary||'');state.refresh.eventKeys=[...keys].slice(-180);saveSharedOnlyFans(state);return added}
 async function refreshOnlyFans(){
   if(onlyFansRefreshBusy||refreshBusy)return;if(!profile().apps.onlyfans){globalThis.toastr?.warning?.('OnlyFans is not installed on this phone.');return}const creators=onlyFansCreators();if(!creators.length){globalThis.toastr?.warning?.('Assign at least one creator first.');return}onlyFansRefreshBusy=true;islandText='Refreshing OnlyFans…';islandIcon=APPS.onlyfans.icon;render();
+  const origin=operationOrigin();
   try{const creatorContext=creators.map(({identity,account})=>({identityId:identity.id,name:identity.name,character:compactCard({name:identity.name,characterId:findCharacter(identity.name)?.index??null}),creatorProfile:{subscriptionPrice:account.subscriptionPrice,economicTier:account.economicTier,recentPosts:account.posts.slice(0,8).map(x=>({type:x.type,visual:x.visual,caption:x.caption}))},life:scopedWorld(world(),[identity.name])})),systemPrompt=`You generate one manual content refresh for a fictional adults-only creator platform inside an ongoing Greyhaven roleplay. Return only valid JSON, no markdown.
 Every listed creator is confirmed age 18 or older. Use only ASSIGNED CREATORS and preserve each exact first/full name as supplied; never invent or expand a surname.
 Create 1 to 4 fresh posts total, distributed naturally rather than forcing every creator to post. Match the creator card, confidence, public image, mood, relationships, current situation, and established content style. Avoid repeating recent posts.
 Posts may range from ordinary lifestyle/behind-the-scenes material to sexually explicit consensual adult content when that genuinely fits the creator and their brand. Do not make every post the same lingerie mirror selfie. Do not include minors, coercion, incest, or non-consensual material.
 The visual field must concretely describe what subscribers see so downstream AI understands the media. Captions should sound like the creator rather than generic promotional copy.
 Required JSON: {"summary":"","posts":[{"creatorIdentityId":"exact assigned id","creator":"exact assigned name","type":"photo|video","visual":"concrete media description","caption":"in-character caption","likes":0,"comments":0}]}`,
-    prompt=`ROLEPLAY TIME:\n${now().toISOString()}\n\nASSIGNED CREATORS:\n${JSON.stringify(creatorContext)}\n\nGenerate a fresh bounded batch now.`,raw=await generate({prompt,systemPrompt,responseLength:Math.max(1400,profile().responseTokens)}),added=applyOnlyFansRefresh(normalizeOnlyFansRefreshResult(raw));globalThis.toastr?.success?.(added?`OnlyFans refreshed · ${added} new post${added===1?'':'s'}`:'OnlyFans refreshed · no new posts')}
+    prompt=`ROLEPLAY TIME:\n${now().toISOString()}\n\nASSIGNED CREATORS:\n${JSON.stringify(creatorContext)}\n\nGenerate a fresh bounded batch now.`,raw=await generate({prompt,systemPrompt,responseLength:Math.max(1400,profile().responseTokens)});
+    if(!originIsCurrent(origin))return;
+    const added=applyOnlyFansRefresh(normalizeOnlyFansRefreshResult(raw));globalThis.toastr?.success?.(added?`OnlyFans refreshed · ${added} new post${added===1?'':'s'}`:'OnlyFans refreshed · no new posts')}
   catch(e){console.error(`[${GHP_MODULE}] OnlyFans refresh`,e);globalThis.toastr?.error?.(`OnlyFans refresh failed: ${e?.message||e}`)}finally{onlyFansRefreshBusy=false;islandText='';islandIcon='';render()}
 }
 
@@ -1189,6 +1212,7 @@ function applyDarkWebRefresh(result){
 }
 async function refreshDarkWeb(){
   if(darkWebRefreshBusy||refreshBusy)return;if(!profile().apps.darkweb){globalThis.toastr?.warning?.('Dark Web is not installed on this phone.');return}darkWebRefreshBusy=true;islandText='Refreshing Dark Web…';islandIcon=APPS.darkweb.icon;render();
+  const origin=operationOrigin();
   try{
     const providers=[];for(const section of ['drugs','escorts','crime','intel'])for(const {identity,config} of darkWebAssigned(section))providers.push({section,identityId:identity.id,name:identity.name,character:compactCard({name:identity.name,characterId:findCharacter(identity.name)?.index??null}),profile:config});const state=sharedDarkWeb(),existing=state.listings.map(x=>({id:x.id,section:x.section,provider:x.providerName,title:x.title,price:x.price,duration:x.duration,ownerListing:x.ownerListing})),ownerListings=state.listings.filter(x=>x.ownerListing&&x.providerType==='existing').map(x=>({id:x.id,section:x.section,ownerIdentityId:x.providerIdentityId,owner:x.providerName,title:x.title,description:x.description,price:x.price,duration:x.duration,area:x.area,existingInquiries:x.inquiries.slice(-5)})),buyerCandidates=identityDirectory().slice(0,30).map(x=>({identityId:x.id,name:x.name}));
     const systemPrompt=`You generate one manual refresh for a FICTIONAL Dark Web app inside Greyhaven roleplay. Return only valid JSON. No markdown.
@@ -1198,7 +1222,9 @@ Every escort is age 18 or older and every encounter is consensual. Include a fix
 Crime and drug listings are fictional story hooks. Do not provide real vendor contacts, sourcing, manufacturing, evasion, weapon construction, or operational instructions. Keep descriptions high-level and narrative.
 OWNER LISTINGS were manually published by assigned characters. Optionally create 0 to 3 plausible clientMessages showing genuine interest in one of them. Use an exact BUYER CANDIDATE identity or a provisional account with one first name. The message should reference the listing naturally and may ask a question, negotiate, or request a fictional meeting. Do not message removed listings.
 Use fixed whole-euro prices, never ranges. Required JSON: {"summary":"","listings":[{"section":"drugs|escorts|crime|intel","providerType":"existing|provisional","provider":"Exact assigned name or one first name","providerIdentityId":"optional assigned id","title":"","description":"","price":"€0","duration":"","area":"","visual":"listing image description"}],"clientMessages":[{"listingId":"exact owner listing id","buyerType":"existing|provisional","buyer":"exact candidate name or one first name","buyerIdentityId":"optional exact candidate id","text":"natural private inquiry"}]}`;
-    const prompt=`ROLEPLAY TIME:\n${now().toISOString()}\n\nASSIGNED PROVIDERS — exact allowlist:\n${JSON.stringify(providers)}\n\nOWNER LISTINGS AVAILABLE FOR INQUIRIES:\n${JSON.stringify(ownerListings)}\n\nBUYER CANDIDATES:\n${JSON.stringify(buyerCandidates)}\n\nGREYHAVEN LIFE:\n${JSON.stringify(scopedWorld(world(),providers.map(x=>x.name)))}\n\nEXISTING LISTINGS TO AVOID:\n${JSON.stringify(existing)}\n\nGenerate a balanced new batch now.`,raw=await generate({prompt,systemPrompt,responseLength:Math.max(1900,profile().responseTokens)}),result=applyDarkWebRefresh(normalizeDarkWebRefreshResult(raw)),parts=[];if(result.listings)parts.push(`${result.listings} new listing${result.listings===1?'':'s'}`);if(result.inquiries)parts.push(`${result.inquiries} client message${result.inquiries===1?'':'s'}`);globalThis.toastr?.success?.(`Dark Web refreshed · ${parts.join(' · ')||'nothing new'}`)
+    const prompt=`ROLEPLAY TIME:\n${now().toISOString()}\n\nASSIGNED PROVIDERS — exact allowlist:\n${JSON.stringify(providers)}\n\nOWNER LISTINGS AVAILABLE FOR INQUIRIES:\n${JSON.stringify(ownerListings)}\n\nBUYER CANDIDATES:\n${JSON.stringify(buyerCandidates)}\n\nGREYHAVEN LIFE:\n${JSON.stringify(scopedWorld(world(),providers.map(x=>x.name)))}\n\nEXISTING LISTINGS TO AVOID:\n${JSON.stringify(existing)}\n\nGenerate a balanced new batch now.`,raw=await generate({prompt,systemPrompt,responseLength:Math.max(1900,profile().responseTokens)});
+    if(!originIsCurrent(origin))return;
+    const result=applyDarkWebRefresh(normalizeDarkWebRefreshResult(raw)),parts=[];if(result.listings)parts.push(`${result.listings} new listing${result.listings===1?'':'s'}`);if(result.inquiries)parts.push(`${result.inquiries} client message${result.inquiries===1?'':'s'}`);globalThis.toastr?.success?.(`Dark Web refreshed · ${parts.join(' · ')||'nothing new'}`)
   }catch(e){console.error(`[${GHP_MODULE}] dark web refresh`,e);globalThis.toastr?.error?.(`Dark Web refresh failed: ${e?.message||e}`)}finally{darkWebRefreshBusy=false;islandText='';islandIcon='';render()}
 }
 
@@ -1271,7 +1297,7 @@ function applyRefresh(r){
     }else continue;
     addKey(key);count++;
   }
-  t.refresh.lastAt=Date.now();t.refresh.chatLength=Array.isArray(ctx()?.chat)?ctx().chat.length:0;t.refresh.summary=String(r?.summary||'').trim();persist(t,false);
+  t.refresh.lastAt=Date.now();t.refresh.lastRoleplayMs=now().getTime();t.refresh.chatLength=Array.isArray(ctx()?.chat)?ctx().chat.length:0;t.refresh.summary=String(r?.summary||'').trim();persist(t,false);
   for(const e of continuityEntries)recordMessageContinuity(e.th,t,e.msg,e.ownerName);
   return count;
 }
@@ -1463,6 +1489,7 @@ function boundaryReplyClaimsBlock(replies=[]){
 
 async function generateReply(th,mode='text'){
   const t=timeline(),owner=persona(),contacts=th.contactIds.map(k=>t.contacts[k]).filter(Boolean);if(!contacts.length)return;
+  const origin=operationOrigin();
   const preBoundary=th.type==='direct'&&mode==='text'?boundaryPreflight(contacts[0],owner,th.messages):{action:'',reason:'',state:null};
   const boundaryQuiet=th.type==='direct'&&(contacts[0]?.ignoringOwner===true||preBoundary.action==='ignore'||preBoundary.action==='block');
   if(th.type==='direct'&&contacts[0]?.blockedByContact)return;
@@ -1638,6 +1665,7 @@ ${conversation.slice(-28).map(messageContext).join('\n')}
 Continue naturally without swapping identities.`;
       replies=parseGroupReply(await generate({prompt,systemPrompt,responseLength:760}),contacts);
     }
+    if(!originIsCurrent(origin))return;
     if(!replies.length&&!directAction&&!secondaryActions.length)throw new Error('The model returned no usable phone reply.');
     const allowed=new Map(contacts.map(c=>[lc(c.name),c])),stamp=now().getTime();
     mutate(cur=>{
@@ -1710,7 +1738,12 @@ function sendMediaMessage(tid,kind,description,caption='',mediaKey='',meta=null)
 }
 
 
-function stale(){const t=timeline(false),n=Array.isArray(ctx()?.chat)?ctx().chat.length:0,d=Math.max(0,n-Number(t?.refresh?.chatLength||0));return{stale:!t?.refresh?.lastAt||d>=profile().staleAfterMessages,newMessages:d}}
+function stale(){
+  const t=timeline(false),n=Array.isArray(ctx()?.chat)?ctx().chat.length:0,d=Math.max(0,n-Number(t?.refresh?.chatLength||0));
+  const last=Number(t?.refresh?.lastRoleplayMs||0),elapsed=last?Math.max(0,(now().getTime()-last)/60000):0;
+  const timeStale=!!last&&elapsed>=profile().staleAfterRoleplayMinutes;
+  return{stale:!t?.refresh?.lastAt||d>=profile().staleAfterMessages||timeStale,newMessages:d,elapsedRoleplayMinutes:Math.floor(elapsed)};
+}
 function wallpaper(){const p=profile();if(p.wallpaperUrl)return`background-image:linear-gradient(rgba(5,6,10,.12),rgba(5,6,10,.28)),url("${String(p.wallpaperUrl).replace(/["'()]/g,'')}");`;return`background:${WALLPAPERS[p.wallpaper]||WALLPAPERS.aurora};`}
 function appUnread(a){const t=timeline(false);if(!t)return 0;if(a==='messages')return Object.values(t.threads).reduce((s,th)=>s+unread(th),0);if(a==='mail')return t.mail.filter(x=>!x.read).length;return t.notifications.filter(x=>x.app===a&&!x.read).length}
 function icon(a,dock=false){const x=APPS[a],b=appUnread(a);return`<button class="ghp-app-icon ${dock?'is-dock':''}" data-open-app="${a}"><span class="ghp-app-square" style="--t:${x.tint}"><i class="${x.icon}"></i>${b?`<b class="ghp-badge">${b>99?'99+':b}</b>`:''}</span>${dock?'':`<small>${esc(x.label)}</small>`}</button>`}
@@ -2285,7 +2318,7 @@ function click(e){
   if(x.dataset.threadMenu)return threadMenuPopup(x.dataset.threadMenu);if(x.dataset.mediaMenu)return mediaMenuPopup(x.dataset.mediaMenu);if(x.dataset.linkMedia)return attachExistingMediaPopup(x.dataset.linkThread,x.dataset.linkMedia,x.dataset.linkKind||'photo');if(x.matches('[data-cancel-media-request]')){composeRequest={threadId:'',kind:'',appName:''};return render()}
   if(x.dataset.call)return startCall(x.dataset.call);if(x.matches('[data-end-call]'))return endCall();if(x.dataset.story){itemId=x.dataset.story;app='instagram';appView='story';return render()}
   if(x.matches('[data-new-post]'))return postPopup();if(x.matches('[data-new-note]'))return notePopup();if(x.dataset.note)return notePopup(x.dataset.note);if(x.dataset.mail)return openMail(x.dataset.mail);if(x.matches('[data-save-settings]'))return saveSettings();
-  if(x.matches('[data-reset-phone]')){if(confirm(`Reset ${persona().name}'s phone timeline in this chat?`)){const r=metadataRoot();r.phones[persona().key]=defaultTimeline(persona().name,persona().avatar);saveMetadataRoot(r);app='';threadId='';contactId='';composeRequest={threadId:'',kind:''};render();globalThis.toastr?.success?.('Phone timeline reset.')}return}
+  if(x.matches('[data-reset-phone]')){if(confirm(`Reset ${persona().name}'s phone timeline in this chat?`)){const r=metadataRoot(),identity=currentIdentity();r.phones[phoneKeyForIdentity(identity.id)]=defaultTimeline(persona().name,persona().avatar);r.phones[phoneKeyForIdentity(identity.id)].identityId=identity.id;saveMetadataRoot(r);app='';threadId='';contactId='';composeRequest={threadId:'',kind:''};render();globalThis.toastr?.success?.('Phone timeline reset.')}return}
   if(x.dataset.notif)return notification(x.dataset.notif);
 }
 function change(e){

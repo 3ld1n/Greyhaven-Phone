@@ -1,3 +1,5 @@
+import { phoneKeyForIdentity, reconcilePhoneIdentities } from './phone-identity.mjs';
+
 /*
  * Greyhaven Phone Life Assets v2.4.0
  *
@@ -98,10 +100,11 @@ function clockState() {
     return {
       mode: time.mode || 'real',
       manualRunning: time.manualRunning !== false,
+      manualRateDivisor: Number(time.manualRateDivisor || 1),
       now: rpNow().toISOString(),
     };
   } catch {
-    return { mode:'real', manualRunning:true, now:rpNow().toISOString() };
+    return { mode:'real', manualRunning:true, manualRateDivisor:1, now:rpNow().toISOString() };
   }
 }
 
@@ -157,6 +160,11 @@ function renderClockNow() {
     <form class="ghla-clock-set" data-ghla-clock-set>
       <label><span>Set date & time</span><input name="when" type="datetime-local" value="${esc(toDateTimeLocal(d))}"></label>
       <label class="ghla-check-row"><input name="running" type="checkbox" ${running?'checked':''}><span>Keep clock running after setting it</span></label>
+      <label><span>Clock speed</span><select name="speed">
+        <option value="1" ${Number(cstate.manualRateDivisor||1)===1?'selected':''}>Normal (1 RP min / 1 real min)</option>
+        <option value="5" ${Number(cstate.manualRateDivisor||1)===5?'selected':''}>Slow (1 RP min / 5 real min)</option>
+        <option value="10" ${Number(cstate.manualRateDivisor||1)===10?'selected':''}>Very slow (1 RP min / 10 real min)</option>
+      </select></label>
       <button class="primary" type="submit">Set RP time</button>
     </form>
     <section class="ghla-info-card">
@@ -1648,6 +1656,8 @@ function findPhoneTimeline(identityId, name = '') {
   const root = phoneMetadataRoot();
   if (!root?.phones) return null;
 
+  const key = phoneKeyForIdentity(identityId);
+  if (root.phones[key]) return [key, root.phones[key]];
   const entries = Object.entries(root.phones);
   return entries.find(([, t]) => String(t?.identityId || '') === String(identityId)) ||
     entries.find(([, t]) => lc(t?.ownerName) === lc(name)) ||
@@ -1879,6 +1889,7 @@ function defaultPhoneTimeline(identity) {
 function phoneRecords() {
   const root = phoneMetadataRoot();
   if (!root?.phones) return [];
+  if (reconcilePhoneIdentities(root.phones, name => phoneApi()?.getIdentityByName?.(name)?.id || '')) savePhoneMetadata(root);
   return Object.entries(root.phones).map(([key, timeline]) => ({ key, timeline }));
 }
 
@@ -1901,11 +1912,12 @@ function createPhoneRecord(identityId) {
   if (!who || !root) throw new Error('Open a chat and select a valid identity.');
   root.phones ||= {};
 
+  phoneRecords();
   if (Object.values(root.phones).some(t => String(t?.identityId || '') === String(who.id))) {
     throw new Error(`${who.name} already has a phone record in this chat.`);
   }
 
-  const key = `latent-id:${encodeURIComponent(who.id)}`;
+  const key = phoneKeyForIdentity(who.id);
   root.phones[key] = defaultPhoneTimeline(who);
   savePhoneMetadata(root);
   return key;
@@ -1948,7 +1960,7 @@ function reassignPhoneRecord(key, targetIdentityId) {
   timeline.ownerAvatar = target.avatar || timeline.ownerAvatar || '';
   timeline.updatedAt = Date.now();
 
-  const newKey = `latent-id:${encodeURIComponent(target.id)}`;
+  const newKey = phoneKeyForIdentity(target.id);
   delete root.phones[key];
   root.phones[newKey] = timeline;
   savePhoneMetadata(root);
@@ -2023,6 +2035,7 @@ function repairPhoneBindings() {
     }
   }
 
+  if (reconcilePhoneIdentities(refreshedRoot.phones, name => phoneApi()?.getIdentityByName?.(name)?.id || '')) changed++;
   if (changed) savePhoneMetadata(refreshedRoot);
   return changed;
 }
@@ -3428,6 +3441,7 @@ async function handleLifeSubmit(event) {
     const d = parseDateTimeLocal(fd.get('when'));
     if (!d) return globalThis.toastr?.error?.('Choose a valid date and time.');
     clockApi()?.setManualTime?.(d, fd.get('running') === 'on');
+    clockApi()?.setManualRateDivisor?.(Number(fd.get('speed') || 1));
     renderLife();
     return;
   }
@@ -3855,7 +3869,13 @@ function observeUi() {
   if (uiObserver || !document.body) return;
 
   let queued = false;
-  uiObserver = new MutationObserver(() => {
+  uiObserver = new MutationObserver(mutations => {
+    if (!mutations.some(mutation => {
+      const target = mutation.target instanceof Element ? mutation.target : mutation.target?.parentElement;
+      if (target?.closest?.('#ghp-overlay')) return true;
+      return [...mutation.addedNodes].some(node => node instanceof Element &&
+        (node.id === 'ghp-overlay' || node.querySelector?.('#ghp-overlay')));
+    })) return;
     if (queued) return;
     queued = true;
     requestAnimationFrame(() => {

@@ -1,4 +1,5 @@
 import './index.js';
+import { phoneKeyForIdentity, reconcilePhoneIdentities } from './phone-identity.mjs';
 
 /*
  * Greyhaven Phone v2.3.0 bridge layer
@@ -9,8 +10,8 @@ import './index.js';
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '2.3.0';
-const CORE_VERSION = '2.3.0';
+const BRIDGE_VERSION = '2.11.0';
+const CORE_VERSION = '2.11.0';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
 const DEFAULT_RELAY_TOKENS = 420;
@@ -40,6 +41,13 @@ const uid = () => {
 const ctx = () => {
     try { return globalThis.SillyTavern?.getContext?.() ?? null; }
     catch { return null; }
+};
+const originSnapshot = () => {
+    const c=ctx(),chat=c?.getCurrentChatId?.()||c?.chatId||'';
+    return {chat:chat?(c?.groupId?`g:${c.groupId}:${chat}`:`c:${c?.characterId}:${chat}`):'',persona:norm(c?.name1)};
+};
+const sameOrigin = origin => {
+    const now=originSnapshot();return !!origin?.chat&&now.chat===origin.chat&&lc(now.persona)===lc(origin.persona);
 };
 const hasChat = () => {
     const c = ctx();
@@ -252,17 +260,23 @@ function normalizeTimelineLite(t, ownerName='') {
 function phoneForOwner(ownerName, ownerAvatar='', create=true) {
     const root = phoneRoot(create), name = norm(ownerName);
     if (!root || !name) return null;
-    let hit = Object.entries(root.phones).find(([,t]) => lc(t?.ownerName) === lc(name));
+    const identity = globalThis.GreyhavenPhone?.getIdentityByName?.(name);
+    if (Object.keys(root.phones).some(key => !key.startsWith('phone-id:')))
+        reconcilePhoneIdentities(root.phones, n => globalThis.GreyhavenPhone?.getIdentityByName?.(n)?.id || '');
+    const key = identity?.id ? phoneKeyForIdentity(identity.id) : `latent:${slug(name)}`;
+    let hit = root.phones[key] ? [key, root.phones[key]] :
+        Object.entries(root.phones).find(([,t]) => lc(t?.ownerName) === lc(name));
     if (hit) {
         const timeline = normalizeTimelineLite(hit[1], name);
         timeline.ownerName = name;
         timeline.ownerAvatar = ownerAvatar || timeline.ownerAvatar || '';
+        if (identity?.id) timeline.identityId = identity.id;
         root.phones[hit[0]] = timeline;
         return {root,key:hit[0],timeline};
     }
     if (!create) return null;
-    const key = `latent:${slug(name)}`;
     const timeline = defaultTimeline(name, ownerAvatar || charAvatar(name));
+    if (identity?.id) timeline.identityId = identity.id;
     root.phones[key] = timeline;
     return {root,key,timeline};
 }
@@ -595,8 +609,9 @@ async function materializeWorldEvent(event,{allowRelay=true}={}) {
     scheduleCalendarInjection();
 
     if (allowRelay && relayCandidate) {
+        const origin=originSnapshot();
         relayQueue = relayQueue
-            .then(() => maybeGenerateOneHopReply(event))
+            .then(() => sameOrigin(origin)?maybeGenerateOneHopReply(event,origin):null)
             .catch(e => console.error('[greyhaven-phone-bridge] hidden relay',e));
     }
 }
@@ -676,7 +691,7 @@ function parseRelay(raw) {
     if (s.length > 1600) s = s.slice(0,1600).trim();
     return s ? {kind:'TEXT',text:s} : {kind:'IGNORE',text:''};
 }
-async function maybeGenerateOneHopReply(event) {
+async function maybeGenerateOneHopReply(event,origin=originSnapshot()) {
     const settings = relaySettings();
     if (!settings.enabled || settings.mode === 'economy') return;
 
@@ -776,6 +791,7 @@ Decide whether ${to} naturally texts once, leaves it unanswered, or blocks.`;
     const raw = await c.generateRaw({
         prompt,systemPrompt,responseLength:settings.tokens,trimNames:false,
     });
+    if (!sameOrigin(origin)) return;
     const parsed = parseRelay(raw);
 
     if (parsed.kind === 'BLOCK') {

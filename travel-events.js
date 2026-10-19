@@ -2901,7 +2901,13 @@ function observeUi() {
   if (observer || !document.body) return;
 
   let queued = false;
-  observer = new MutationObserver(() => {
+  observer = new MutationObserver(mutations => {
+    if (!mutations.some(mutation => {
+      const target = mutation.target instanceof Element ? mutation.target : mutation.target?.parentElement;
+      if (target?.closest?.('#ghp-overlay')) return true;
+      return [...mutation.addedNodes].some(node => node instanceof Element &&
+        (node.id === 'ghp-overlay' || node.querySelector?.('#ghp-overlay')));
+    })) return;
     if (queued) return;
     queued = true;
     requestAnimationFrame(() => {
