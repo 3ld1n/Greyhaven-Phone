@@ -7,12 +7,13 @@ import {
   describeWardrobeForImage,
   selectReferenceAssignments,
   buildImagePrompt,
+  DEFAULT_IMAGE_PROMPT_TEMPLATE,
   cleanText,
   lower,
 } from './image-gen-core.js';
 
 const MODULE = 'greyhaven-phone-imagegen';
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const SETTINGS_KEY = 'greyhavenPhone';
 const META_KEY = 'greyhavenPhone';
 const REF_DB_NAME = 'GreyhavenPhoneImageGen';
@@ -117,6 +118,7 @@ function imageSettings() {
   const s = root.imageGeneration;
   s.version = Math.max(1, Number(s.version || 1));
   s.model = GHIMG_MODELS[s.model] ? s.model : DEFAULT_IMAGE_MODEL;
+  if(typeof s.finalPromptTemplate!=='string')s.finalPromptTemplate=DEFAULT_IMAGE_PROMPT_TEMPLATE;
   s.referencePacks = s.referencePacks && typeof s.referencePacks === 'object' && !Array.isArray(s.referencePacks) ? s.referencePacks : {};
   s.autoByPhone = s.autoByPhone && typeof s.autoByPhone === 'object' && !Array.isArray(s.autoByPhone) ? s.autoByPhone : {};
   s.seenByPhone = s.seenByPhone && typeof s.seenByPhone === 'object' && !Array.isArray(s.seenByPhone) ? s.seenByPhone : {};
@@ -891,7 +893,7 @@ async function generateItem(item, reason='manual', options={}) {
     const subjects = resolveImageSubjects({ description:item.description, sender, identities:allIdentities });
     const maxRefs = Number(GHIMG_MODELS[imageSettings().model]?.maxReferences || MAX_WIRO_REFERENCES);
     const { payload:references, assignments } = await loadReferencePayload(subjects,maxRefs);
-    const prompt = buildImagePrompt({ description:item.description, subjects, referenceAssignments:assignments, app:item.app, scope:item.scope, continuity:continuityForItem(item) });
+    const prompt = buildImagePrompt({ description:item.description, subjects, referenceAssignments:assignments, app:item.app, scope:item.scope, continuity:continuityForItem(item), promptTemplate:imageSettings().finalPromptTemplate });
     const s = imageSettings();
     const response = await pluginRequest('/generate', {
       method:'POST',
@@ -1212,6 +1214,10 @@ function settingsSectionHtml() {
     <label class="stack"><span><b>Wiro API secret <em>(if your project uses Signature Based auth)</em></b><small>If Wiro gave you a secret, paste it here. Leave blank only for an API Key Only project.</small></span><input data-ghimg-api-secret type="password" autocomplete="off" placeholder="Paste Wiro secret (optional for key-only projects)"></label>
     <div class="ghimg-inline-actions"><button type="button" class="primary" data-ghimg-save-provider>Save Wiro Settings</button><button type="button" data-ghimg-clear-provider>Remove Credentials</button></div>
     <div class="ghimg-usage"><span><b>${usage.images}</b><small>generated</small></span><span><b>${usage.totalCost?`$${usage.totalCost.toFixed(3)}`:'—'}</b><small>Wiro reported cost</small></span></div>
+    <div class="ghimg-final-prompt"><h4>Final image-generation prompt</h4><p>This is the original prompt sent to the Wiro model. Edit every part of it. Curly-brace fields insert the current photo's description, location/time, face references, camera, and explicit accessories. Your changes affect the final prompt, not just the character's photo metadata.</p>
+      <textarea data-ghimg-final-prompt rows="13" spellcheck="false">${esc(s.finalPromptTemplate)}</textarea>
+      <div class="ghimg-inline-actions"><button type="button" class="primary" data-ghimg-save-prompt>Save Final Prompt</button><button type="button" data-ghimg-reset-prompt>Restore Original</button></div>
+    </div>
     <button type="button" class="ghimg-wide" data-ghimg-open-references><i class="fa-regular fa-images"></i><span><b>Character Reference Packs</b><small>Manage every character from any phone.</small></span><i class="fa-solid fa-chevron-right"></i></button>
     <div class="ghimg-auto"><h4>Automatic generation · ${esc(owner?.name || 'this phone')}</h4><p>All switches start OFF. Automatic image checks run only when Refresh Phone finishes. New direct photo messages can generate automatically; opening apps, scrolling, feed posts, stories, listings and old photos never trigger paid generation scans.</p>
       ${apps.map(app=>`<details><summary><span><i class="${app==='messages'?'fa-solid fa-comment':app==='snapchat'?'fa-brands fa-snapchat':app==='instagram'?'fa-brands fa-instagram':'fa-brands fa-facebook-f'}"></i> ${appLabels[app]}</span><small>${appCandidates(app).filter(x=>auto?.[app]?.[x.id]).length} enabled</small></summary><div>${appCandidates(app).map(identity=>`<label class="ghimg-auto-row"><span>${avatarHtml(identity)}<b>${esc(identity.name)}</b></span><input type="checkbox" data-ghimg-auto-app="${esc(app)}" data-ghimg-auto-identity="${esc(identity.id)}" ${auto?.[app]?.[identity.id]?'checked':''}></label>`).join('')||'<small class="ghimg-muted">No eligible contacts/friends in this app yet.</small>'}</div></details>`).join('')}
@@ -1325,6 +1331,15 @@ function augmentPhoneDom() {
 function bindDomEvents() {
   document.addEventListener('click', async event => {
     const target = event.target instanceof Element ? event.target : null; if (!target) return;
+    if (target.closest('[data-ghimg-save-prompt]')) {
+      event.preventDefault();const input=document.querySelector('[data-ghimg-final-prompt]');if(!input)return;
+      const next=String(input.value||'').trim();if(!next){globalThis.toastr?.warning?.('The final image prompt cannot be blank.');return;}
+      imageSettings().finalPromptTemplate=next;saveImageSettings();globalThis.toastr?.success?.('Final image prompt saved.');return;
+    }
+    if (target.closest('[data-ghimg-reset-prompt]')) {
+      event.preventDefault();const input=document.querySelector('[data-ghimg-final-prompt]');if(input)input.value=DEFAULT_IMAGE_PROMPT_TEMPLATE;
+      imageSettings().finalPromptTemplate=DEFAULT_IMAGE_PROMPT_TEMPLATE;saveImageSettings();globalThis.toastr?.success?.('Original image prompt restored.');return;
+    }
     if (target.closest('[data-ghimg-save-provider]')) { event.preventDefault();await saveProviderConfig();return; }
     if (target.closest('[data-ghimg-clear-provider]')) { event.preventDefault();await clearProviderKey();return; }
     if (target.closest('[data-ghimg-open-references]')) { event.preventDefault();openReferenceManager();return; }

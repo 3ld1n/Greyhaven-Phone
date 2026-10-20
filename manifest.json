@@ -4,7 +4,7 @@
   "js": "entry.js",
   "css": "entry.css",
   "author": "Eldin + ChatGPT",
-  "version": "2.11.0",
+  "version": "2.12.0",
   "auto_update": false,
   "minimum_client_version": "1.13.3"
 }

@@ -134,7 +134,21 @@ export function selectReferenceAssignments({ subjects=[], packs={}, maxTotal=MAX
 
 // Seedream 4.5 does better with one coherent photographed moment than with long
 // keyword stacks. Never mention an accessory that the scene/wardrobe did not.
-export function buildImagePrompt({ description='', subjects=[], referenceAssignments=[], wardrobeLines=[], app='messages', scope='message', continuity='' }={}) {
+// This is the EXACT original prompt structure, now user-editable in Settings.
+// Dynamic fields in braces are populated separately for every photographed moment.
+export const DEFAULT_IMAGE_PROMPT_TEMPLATE = [
+  'Create one genuine-looking photograph of the described person and moment. The person, pose, expression and framing are the priority; the setting is only quiet visual context.',
+  '{scene}',
+  '{continuity}',
+  '{identity_references}',
+  '{camera}',
+  "Follow age, clothing, accessories and props only when they are explicitly stated in the scene metadata. Do not import outfit details from reference photos or from a character's general style.",
+  'Prioritize believable human photography: natural skin tone and modest skin texture, small real imperfections, facial asymmetry, naturally directed eyes, fine hair detail, consistent shadows, plausible depth of field and realistic fabric. Avoid plastic skin, excessive smoothing, fashion retouching, synthetic glow, HDR and artificial cinematic lighting unless the camera metadata specifically asks for it.',
+  '{accessories}',
+  'Keep attention on the subject; the background should be understated and consistent only with the named location, without elaborate invented scenery. Names identify characters; they are not instructions to print text. Natural hands, anatomy, perspective and reflections; no invented people, labels, watermarks or logos.',
+].join('\n\n');
+
+export function buildImagePrompt({ description='', subjects=[], referenceAssignments=[], wardrobeLines=[], app='messages', scope='message', continuity='', promptTemplate=DEFAULT_IMAGE_PROMPT_TEMPLATE }={}) {
   const scene = cleanText(description);
   const context = cleanText(continuity);
   const text = scene;
@@ -152,11 +166,7 @@ export function buildImagePrompt({ description='', subjects=[], referenceAssignm
     : socialPhoto ? 'Unless specified otherwise, frame it like a casual unedited smartphone photo taken for this app, not an editorial shoot.'
     : 'Use a plausible real camera angle and physically coherent lighting.';
 
-  const lines = [
-    'Create one genuine-looking photograph of the described person and moment. The person, pose, expression and framing are the priority; the setting is only quiet visual context.',
-  ];
-  if (scene) lines.push(`SCENE (follow the photographed action and camera type):\n${scene}`);
-  if (context) lines.push(`LOCATION/TIME CONTINUITY (use only where not contradicted by the scene; do not invent scenery):\n${context}`);
+  let identityReferences='';
   if (referenceAssignments.length) {
     const grouped = new Map();
     referenceAssignments.forEach((assignment,index) => {
@@ -164,21 +174,26 @@ export function buildImagePrompt({ description='', subjects=[], referenceAssignm
       list.refs.push(`[Image ${index + 1}]`);
       grouped.set(assignment.subject.id,list);
     });
-    lines.push('IDENTITY REFERENCES:');
+    const lines=['IDENTITY REFERENCES:'];
     for (const {subject,refs} of grouped.values()) {
       lines.push(`${cleanText(subject.name)} = ${refs.join(', ')}. Maintain this person’s real facial proportions, hair, skin tone, apparent age and overall build. References establish identity, not the current outfit, scene, pose or camera.`);
     }
+    identityReferences=lines.join('\n\n');
   }
-  lines.push(camera);
-  lines.push('Follow age, clothing, accessories and props only when they are explicitly stated in the scene metadata. Do not import outfit details from reference photos or from a character\'s general style.');
-  lines.push('Prioritize believable human photography: natural skin tone and modest skin texture, small real imperfections, facial asymmetry, naturally directed eyes, fine hair detail, consistent shadows, plausible depth of field and realistic fabric. Avoid plastic skin, excessive smoothing, fashion retouching, synthetic glow, HDR and artificial cinematic lighting unless the camera metadata specifically asks for it.');
   // Deliberately do NOT list possible jewelry (nose rings, belly piercings etc.)
   // in every prompt: Seedream can hallucinate those merely from the reminder.
   const accessoryRegex = /\b(?:nose (?:ring|stud|piercing)|navel (?:ring|piercing)|belly (?:ring|piercing)|earrings?|necklaces?|pendants?|bracelets?|rings?|watches?|piercings?)\b/gi;
   const explicitAccessories = [...new Set([...text.matchAll(accessoryRegex)]
     .filter(match => !/(?:\b(?:no|without|remove|removed|absent|not wearing|isn't wearing|not wearing:)\s*(?:any\s+)?[\w,; ]{0,25})$/i.test(text.slice(Math.max(0,match.index-50),match.index)))
     .map(match=>match[0].toLowerCase()))];
-  if (explicitAccessories.length) lines.push(`Only if actually described: render the specified ${explicitAccessories.join(', ')} at normal real-world scale, never oversized or duplicated. Do not introduce extra accessories.`);
-  lines.push('Keep attention on the subject; the background should be understated and consistent only with the named location, without elaborate invented scenery. Names identify characters; they are not instructions to print text. Natural hands, anatomy, perspective and reflections; no invented people, labels, watermarks or logos.');
-  return lines.join('\n\n');
+  const fields={
+    scene:scene?`SCENE (follow the photographed action and camera type):\n${scene}`:'',
+    continuity:context?`LOCATION/TIME CONTINUITY (use only where not contradicted by the scene; do not invent scenery):\n${context}`:'',
+    identity_references:identityReferences,
+    camera,
+    accessories:explicitAccessories.length?`Only if actually described: render the specified ${explicitAccessories.join(', ')} at normal real-world scale, never oversized or duplicated. Do not introduce extra accessories.`:'',
+  };
+  return String(promptTemplate||DEFAULT_IMAGE_PROMPT_TEMPLATE)
+    .replace(/\{(scene|continuity|identity_references|camera|accessories)\}/g,(_,key)=>fields[key])
+    .split(/\n{2,}/).map(line=>line.trim()).filter(Boolean).join('\n\n');
 }

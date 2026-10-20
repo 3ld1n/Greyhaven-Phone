@@ -1,4 +1,7 @@
 #ghimg-settings-section h3{display:flex;align-items:center;gap:8px}
+.ghimg-final-prompt{margin:16px 0;padding:12px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)}
+.ghimg-final-prompt h4{margin:0 0 4px}.ghimg-final-prompt p{margin:0 0 10px;font-size:.82rem;opacity:.72;line-height:1.4}
+.ghimg-final-prompt textarea{box-sizing:border-box;width:100%;min-height:240px;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.15);background:#101116;color:#fff;font:12px/1.5 monospace;resize:vertical}
 .ghimg-provider-status{display:flex;align-items:center;gap:10px;padding:11px 12px;margin:6px 0 10px;border-radius:12px;background:rgba(255,255,255,.06)}
 .ghimg-provider-status>i{width:22px;text-align:center}.ghimg-provider-status span{display:flex;flex-direction:column;min-width:0}.ghimg-provider-status small{opacity:.72}.ghimg-provider-status.good>i{color:#53d769}.ghimg-provider-status.warn>i{color:#f0c64d}.ghimg-provider-status.bad>i{color:#ff6b6b}
 .ghimg-inline-actions{display:flex;gap:8px;margin:8px 0 10px}.ghimg-inline-actions button{flex:1}

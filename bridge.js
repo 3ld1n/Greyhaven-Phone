@@ -1,5 +1,7 @@
 import './index.js';
 import { phoneKeyForIdentity, reconcilePhoneIdentities } from './phone-identity.mjs';
+import { collectPairMemory } from './phone-shared-memory.mjs';
+import { tidyPhoneText } from './phone-reply-format.mjs';
 
 /*
  * Greyhaven Phone v2.3.0 bridge layer
@@ -10,8 +12,8 @@ import { phoneKeyForIdentity, reconcilePhoneIdentities } from './phone-identity.
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '2.11.0';
-const CORE_VERSION = '2.11.0';
+const BRIDGE_VERSION = '2.12.0';
+const CORE_VERSION = '2.12.0';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
 const DEFAULT_RELAY_TOKENS = 420;
@@ -689,6 +691,7 @@ function parseRelay(raw) {
     s = s.replace(/^TEXT\s*:\s*/i,'').trim();
     // One hidden relay is one message, not a novella.
     if (s.length > 1600) s = s.slice(0,1600).trim();
+    s = tidyPhoneText(s);
     return s ? {kind:'TEXT',text:s} : {kind:'IGNORE',text:''};
 }
 async function maybeGenerateOneHopReply(event,origin=originSnapshot()) {
@@ -720,6 +723,12 @@ async function maybeGenerateOneHopReply(event,origin=originSnapshot()) {
     const targetCard = cardData(to);
     if (!targetCard) return;
     const targetIdentity = globalThis.GreyhavenPhone?.getIdentityByName?.(to) || null;
+    const fromIdentity = globalThis.GreyhavenPhone?.getIdentityByName?.(from) || null;
+    const phoneProfile=globalThis.GreyhavenPhone?.getProfile?.();
+    const phones=ctx()?.chatMetadata?.[PHONE_META_KEY]?.phones||{};
+    const pairHistory=phoneProfile?.crossAppMemoryEnabled!==false && fromIdentity?.id && targetIdentity?.id
+        ? collectPairMemory(phones[phoneKeyForIdentity(fromIdentity.id)],fromIdentity.id,targetIdentity.id,{excludeApp:'messages'}).join('\n')
+        : '';
 
     const targetState = phoneBlockState(to,from);
     if (targetState.blocked) return;
@@ -750,6 +759,7 @@ IDENTITY LOCK:
 - If ${to} is angry, hurt, busy, ignoring ${from}, or the relationship makes silence more realistic, IGNORE is valid.
 - BLOCK is only for a genuinely block-worthy escalation or an already-established decision to block.
 - This relay may create AT MOST ONE response. Never simulate ${from}'s next reply and never continue the conversation yourself.
+- Write only the message ${to} literally types. No *actions*, stage directions, or forced word-by-word line breaks.
 - Do not send a photo/video in this hidden relay; media remains an interactive Phone action.
 
 OUTPUT EXACTLY ONE:
@@ -780,6 +790,9 @@ ${life.recentRoleplay || '(none)'}
 
 PRIVATE ${to} ↔ ${from} THREAD, OLDEST TO NEWEST:
 ${thread.length ? thread.map(x=>`[${roleplayTimeText(x.timeMs)}] ${x.sender}: ${x.text}`).join('\n') : '(no earlier thread messages)'}
+
+OTHER APP MESSAGES PRIVATELY SHARED BETWEEN THIS SAME PAIR (iMessage/Instagram/Snapchat/Facebook etc.; never expose to outsiders):
+${pairHistory || '(none)'}
 
 NEWEST PRIVATE PHONE ACTION FROM ${from}:
 ${isMedia ? `${from} sent a ${mediaType || 'media item'} showing: ${mediaDescription || '(description unavailable)'}${mediaCaption ? `\nCaption: ${mediaCaption}` : ''}` : text}

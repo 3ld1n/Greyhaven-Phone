@@ -1,7 +1,9 @@
 import { phoneKeyForIdentity, reconcilePhoneIdentities } from './phone-identity.mjs';
+import { collectPairMemory } from './phone-shared-memory.mjs';
+import { tidyPhoneText, limitPhonePackets } from './phone-reply-format.mjs';
 
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '2.11.0';
+const GHP_VERSION = '2.12.0';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -54,6 +56,7 @@ const DEFAULT_PROFILE = {
   recentMessages:20,
   recentChars:12000,
   responseTokens:1600,
+  crossAppMemoryEnabled:true,
   apps:{messages:true,phone:true,contacts:true,instagram:true,snapchat:true,facebook:true,dominos:false,uber:false,onlyfans:false,darkweb:false,calendar:true,photos:true,notes:true,mail:false,settings:true}
 };
 
@@ -338,6 +341,7 @@ function normalizeProfile(raw={}){
     recentMessages:Math.max(6,Math.min(50,Number(raw.recentMessages||20))),
     recentChars:Math.max(3000,Math.min(30000,Number(raw.recentChars||12000))),
     responseTokens:Math.max(600,Math.min(3000,Number(raw.responseTokens||1600))),
+    crossAppMemoryEnabled:raw.crossAppMemoryEnabled!==false,
     activityLevel:['quiet','normal','busy'].includes(raw.activityLevel)?raw.activityLevel:'normal',
     refreshMode:['manual','stale-open'].includes(raw.refreshMode)?raw.refreshMode:'manual'
   };
@@ -673,7 +677,10 @@ Sound like ${peer.name}: preserve the character card, personality, relationship,
 The identity phoneNumber is authoritative. ${peer.name} knows their own number and must use that exact value if directly asked, never invent another.
 Use Greyhaven Life as current context. Do not invent a location or claim to be with ${owner.name} without evidence.
 You may refuse, tease, leave the message unanswered, or block when that is genuinely in character. Do not force compliance.
-Return up to 3 protocol items using only TEXT:, PHOTO:, VIDEO:, or ACTION: IGNORE. If media is sent, PHOTO/VIDEO must be a concrete description of what the other person sees.
+TEXTING FORMAT — this is a PHONE SCREEN, not the main roleplay:
+Default: exactly ONE natural TEXT: bubble. Occasionally use TWO TEXT: bubbles only for a genuinely separate afterthought. Never three or four messages, one-word-per-line poetry, or unnatural line breaks.
+Text bubbles contain only characters they would literally type. Never narrate *I type*, *she laughs*, gestures, thoughts, camera directions, or other roleplay actions inside TEXT. Don't use asterisks for actions. Keep rich scene narration in the MAIN roleplay, not here.
+Return at most two TEXT: items, or a TEXT: plus one PHOTO:/VIDEO: attachment, or ACTION: IGNORE. If media is sent, PHOTO/VIDEO must be a concrete description of what the other person sees.
 ${requested&&appName!=='onlyfans'?`The latest message explicitly requests a ${requested}. Decide naturally from relationship, trust, mood and boundaries. If ${peer.name} sends it now, include an actual ${requested.toUpperCase()}: line; never merely claim it was sent.`:''}
 ${videoMode?'This is a live fictional video call. TEXT may combine one brief *visible action* with natural spoken dialogue. Keep it as one bounded turn.':''}
 ${appName==='onlyfans'?`Every creator and subscriber in this app is confirmed age 18 or older. Keep the response consensual and consistent with the creator’s actual boundaries; subscription never erases consent. This is a paid creator context, so flirting, dirty talk, intimate performance, and requested private media are normal possibilities when they fit ${peer.name}'s creator persona and the conversation. Do not default to a generic "I'm not like that" response or moral lecture merely because the request is sexual. A creator may still tease, negotiate, redirect, or refuse something outside their own boundaries.${requested?` The latest message explicitly requests a ${requested}. If ${peer.name} sends it now, include an actual ${requested.toUpperCase()}: protocol line with a concrete visual description; never merely claim it was sent.`:''}`:''}
@@ -691,11 +698,14 @@ ${JSON.stringify({time:w.time,scene:w.scene,snapshot:w.snapshot})}
 RECENT MAIN RP:
 ${recentChat()}
 
-${videoMode?'THIS PRIVATE VIDEO-CALL TRANSCRIPT (kept out of DMs)':'THIS APP THREAD (independent from iMessage and other apps)'}:
+SHARED PRIVATE HISTORY OF ${owner.name} AND ${peer.name} ACROSS APPS (in time order; accessible to both participants only, never to outsiders):
+${privatePairMemory(ownerIdentity,peer,videoMode?'onlyfans':appName)}
+
+${videoMode?'THIS PRIVATE VIDEO-CALL TRANSCRIPT (kept out of DMs)':'THIS CURRENT APP THREAD (recent turns here take priority)'}:
 ${JSON.stringify(conversation.slice(-24).map(messageContext))}
 
 Choose ${peer.name}'s one bounded response now. ACTION: IGNORE is valid.`;
-    let raw=await generate({prompt,systemPrompt,responseLength:680}),packet=parseDirectPacket(raw,requested);
+    let raw=await generate({prompt,systemPrompt,responseLength:480}),packet=parseDirectPacket(raw,requested);
     if(requested&&!hasExplicitMediaPacket(packet.items,requested)&&!packet.action&&!mediaRefusalText(raw)&&mediaSendClaim(raw,requested)){
       raw=await generate({prompt:`${prompt}\n\nDELIVERY CORRECTION: The previous draft claimed to send a ${requested} without attaching it. If ${peer.name} is still willing, return optional TEXT: plus a concrete ${requested.toUpperCase()}: line now. Otherwise return a clear in-character TEXT refusal or boundary. Do not claim delivery without the media protocol.`,systemPrompt,responseLength:520});packet=parseDirectPacket(raw,requested);
     }
@@ -877,6 +887,12 @@ function messageContext(m){
   if(m.type==='video')return`${who} sent a video containing: ${m.mediaDescription||'unspecified video'}${m.text?` | caption/message: ${m.text}`:''}`;
   if(m.requestMedia)return`${who} requested a ${m.requestMedia} and wrote: ${m.text}`;
   return`${who}: ${m.text}`;
+}
+function privatePairMemory(owner, peer, excludeApp='') {
+  if(!profile().crossAppMemoryEnabled)return'Cross-app private memory disabled.';
+  const ownerId=owner?.id||currentIdentity()?.id,peerId=peer?.id||identityForName(peer?.name,{create:false})?.id;
+  const rows=collectPairMemory(timeline(),ownerId,peerId,{excludeApp});
+  return rows.length?rows.join('\n'):'No earlier private conversation across these apps.';
 }
 function messagePreview(m){if(!m)return'';if(m.type==='photo')return`Photo${m.text?` · ${m.text}`:''}`;if(m.type==='video')return`Video${m.text?` · ${m.text}`:''}`;return m.text||''}
 function notificationTextForMessage(m){if(m.type==='photo')return m.text||'Photo';if(m.type==='video')return m.text||'Video';return m.text||'New message'}
@@ -1230,7 +1246,7 @@ Use fixed whole-euro prices, never ranges. Required JSON: {"summary":"","listing
 
 function appendIncomingMessage(t,th,c,{text='',mediaType='',mediaDescription=''},stamp,unreadFlag=true){
   const items=[],created=[];
-  if(String(text||'').trim())items.push({type:'text',text:String(text).trim()});
+  if(tidyPhoneText(text))items.push({type:'text',text:tidyPhoneText(text)});
   if(['photo','video'].includes(mediaType)&&String(mediaDescription||'').trim())items.push({type:mediaType,text:'',mediaDescription:String(mediaDescription).trim()});
   if(!items.length)return created;
   for(const item of items){
@@ -1247,7 +1263,9 @@ function applyRefresh(r){
   const t=timeline(),installed=profile().apps,w=world(),candidateList=refreshIdentityCandidates(t,w,installed),allowedById=new Map(candidateList.map(x=>[x.identityId,identityById(x.identityId)])),allowedByName=new Map(candidateList.map(x=>[lc(x.name),identityById(x.identityId)])),contactsByName=new Map(Object.values(t.contacts).map(c=>[lc(c.name),c])),keys=new Set(t.refresh.eventKeys||[]),stamp=now().getTime(),max=profile().maxNewEvents,continuityEntries=[];let count=0;
   const addKey=k=>{keys.add(k);t.refresh.eventKeys=[...keys].slice(-80)};
   const owner=persona(),ownerIdentity=currentIdentity(),events=Array.isArray(r?.events)?r.events:[];
-  for(const x of events){
+  for(const event of events){
+    const x={...event};
+    if(['message.receive','instagram.dm','facebook.messenger','onlyfans.dm','snapchat.snap'].includes(x.type))x.text=tidyPhoneText(x.text);
     if(count>=max)break;const type=norm(x.type),identity=allowedById.get(String(x.identityId||x.fromIdentityId||''))||allowedByName.get(lc(x.from||x.actor||x.author||x.contact||x.seller));
     const appName=type.startsWith('instagram.')?'instagram':type.startsWith('snapchat.')?'snapchat':type.startsWith('facebook.')||type.startsWith('marketplace.')?'facebook':type.startsWith('onlyfans.')?'onlyfans':type.startsWith('message.')?'messages':type.startsWith('phone.')?'phone':type.startsWith('mail.')?'mail':'';
     if(!appName||!installed[appName]||type.startsWith('marketplace.'))continue;if(!['mail.receive','snapchat.npc.request','onlyfans.npc.subscribe'].includes(type)&&!identity)continue;
@@ -1337,10 +1355,10 @@ function parseDirectPacket(raw,requested=''){
       if(kind==='action'){const a=value.match(/^(IGNORE|BLOCK)\b/i)?.[1]?.toLowerCase();if(a)action=a;continue}
       if(kind==='text')items.push({type:'text',text:value});else items.push({type:kind,mediaDescription:value,text:''});
     }
-    if(items.length||action)return{items:items.slice(0,4),action,actions:extracted.actions};
+    if(items.length||action)return{items:limitPhonePackets(items),action,actions:extracted.actions};
   }
   const inferred=inferMediaFromText(text,requested);
-  return{items:inferred?[inferred]:[{type:'text',text}],action:'',actions:extracted.actions};
+  return{items:inferred?[inferred]:limitPhonePackets([{type:'text',text}]),action:'',actions:extracted.actions};
 }
 function parseDirectReply(raw,requested=''){return parseDirectPacket(raw,requested).items}
 function extractDirectAction(raw){return parseDirectPacket(raw,'').action}
@@ -1508,7 +1526,7 @@ You are ${c.name}. You are speaking to ${owner.name}. Never become ${owner.name}
 Facts under CONTACT are about YOU. Facts under PHONE OWNER are about the other person.
 
 You are ${c.name} on a private phone call inside an ongoing fictional roleplay.
-Reply ONLY with what ${c.name} says aloud. No JSON, speaker label, narration or stage directions.
+Reply with one natural spoken turn. A rare brief *laugh* or *pause* is fine on calls, but avoid long scene descriptions. No JSON or speaker labels.
 ${c.name}'s authoritative stored 9-digit phone number is ${identityForName(c.name,{create:true})?.phoneNumber||'unavailable'}. If directly asked for their own number, use that exact value and never invent another.
 Preserve ${c.name}'s actual personality and relationship. Speak like a real person, not a formal assistant or therapist.
 Use slang, teasing, profanity, warmth, hesitation, laughter, emojis-as-words only if they genuinely fit ${c.name}; do not force any one style.
@@ -1529,6 +1547,9 @@ ${JSON.stringify(scopedWorld(w,[c.name,owner.name]))}
 RECENT MAIN RP:
 ${recentChat()}
 
+PAST PRIVATE MESSAGES BETWEEN ${owner.name} AND ${c.name} ACROSS APPS (in their shared chronology):
+${privatePairMemory(currentIdentity(),identityForName(c.name,{create:false}))}
+
 CALL TRANSCRIPT:
 ${JSON.stringify((activeCall?.transcript||[]).slice(-24).map(x=>`${x.sender}: ${x.text}`))}
 
@@ -1546,7 +1567,9 @@ CONTACT CARD facts are about YOU. PHONE OWNER context is only background about t
 You are ${c.name}, texting privately with ${owner.name} inside an ongoing fictional roleplay.
 Write like ${c.name} actually texts — emotionally alive, personal and character-specific. Do NOT default to polished formal prose, customer-service language, therapy-speak, or repetitive "I'm not sure / can we talk about it" phrasing unless that genuinely matches ${c.name}.
 ${c.name}'s authoritative stored 9-digit phone number is ${identityForName(c.name,{create:true})?.phoneNumber||'unavailable'}. ${c.name} knows their own number; if directly asked, use that exact value and never invent another.
-Use the CONTACT VOICE EVIDENCE and existing thread as the strongest style reference. Short messages, multiple texts, lowercase, abbreviations, slang, emojis, teasing, dry humor, profanity, typos or expressive punctuation are all allowed when they fit this character. More mature/formal characters may naturally text differently.
+Use the CONTACT VOICE EVIDENCE and existing thread as the strongest style reference. Natural short texts, lowercase, abbreviations, slang, emojis, teasing, dry humor, profanity, typos or expressive punctuation are all allowed when they fit this character. More mature/formal characters may naturally text differently.
+IMPORTANT PHONE BUBBLE FORMAT: Usually send exactly ONE coherent TEXT: message. Only occasionally send a SECOND separate TEXT: message if it genuinely reads like a distinct afterthought. NEVER send 3 or 4 text bubbles. Never split a sentence into many lines or text each word separately. Do not add forced line breaks for drama.
+PHONE TEXT IS NOT STAGE ROLEPLAY: Only show words ${c.name} actually types. Never write *I type this*, *I laugh*, *looks at screen*, physical gestures, internal thoughts, or narration in TEXT. Asterisks for actions belong in the main real-life SillyTavern roleplay; keep that behavior there. Avoid Markdown formatting for phone texts.
 Preserve established personality, relationship, knowledge and current mood.
 Use Greyhaven Life as authoritative current world/time context when available.
 You may reply with text, a fictional photo, a fictional video, or text plus one media item.
@@ -1586,7 +1609,7 @@ A credible threat, forced-entry threat, coercive sexual threat, or severe harass
 For ordinary disagreement, one awkward message, or behavior this specific character would genuinely tolerate, do not overreact or block.
 If currently ignoring ${owner.name}, the newest message does NOT automatically earn a response: keep ignoring, block, or re-engage only if there is a believable in-character reason such as a real apology or important new information.
 
-Return up to 4 protocol items using ONLY:
+Return ONE TEXT: by default, at most TWO TEXT: for a genuinely separate afterthought, or TEXT: plus ONE media item. Use ONLY:
 TEXT: message text
 PHOTO: concise visual description of the photo
 VIDEO: concise visual description of the video
@@ -1606,6 +1629,9 @@ ${JSON.stringify({name:owner.name,relationshipContext:owner.description.slice(0,
 GREYHAVEN LIFE:
 ${JSON.stringify(scopedWorld(w,[c.name,owner.name]))}
 
+SHARED PRIVATE HISTORY OF ${owner.name} AND ${c.name} ACROSS iMESSAGE, INSTAGRAM, SNAPCHAT, FACEBOOK AND OTHER APPS (only their conversation; latest current-thread turns below take priority):
+${privatePairMemory(currentIdentity(),identityForName(c.name,{create:false}),'messages')}
+
 RECENT MAIN RP:
 ${recentChat()}
 
@@ -1621,8 +1647,8 @@ ${c.ignoringOwner?`${c.name} has been intentionally ignoring ${owner.name} after
 ${preBoundary?.state?.boundaryKind?`Recent explicit boundary: ${preBoundary.state.boundaryKind}. Previous boundary text: "${String(preBoundary.state.boundaryText||'').slice(0,280)}". Continued owner messages after it: ${preBoundary.state.violations}.`:''}
 
 Continue the conversation naturally in ${c.name}'s own texting voice.`;
-        let raw=await generate({prompt,systemPrompt,responseLength:760});
-        if(replyIdentityConflict(raw,c,owner))raw=await generate({prompt:`${prompt}\n\nIDENTITY CORRECTION: The last draft swapped identities. You are ${c.name}; ${owner.name} is the phone owner. Keep ${c.name}'s own personality and texting style and answer again.`,systemPrompt,responseLength:760});
+        let raw=await generate({prompt,systemPrompt,responseLength:480});
+        if(replyIdentityConflict(raw,c,owner))raw=await generate({prompt:`${prompt}\n\nIDENTITY CORRECTION: The last draft swapped identities. You are ${c.name}; ${owner.name} is the phone owner. Keep ${c.name}'s own personality and texting style and answer again.`,systemPrompt,responseLength:480});
         let packet=parseDirectPacket(raw,requested||''),items=packet.items;directAction=packet.action||'';secondaryActions=packet.actions||[];
         const hasRequestedMedia=requested&&hasExplicitMediaPacket(items,requested);
         const needsMediaRepair=requested&&!hasRequestedMedia&&!directAction&&!mediaRefusalText(raw)&&(pendingMedia||mediaSendClaim(raw,requested));
@@ -1655,15 +1681,15 @@ Only these contacts may speak: ${contacts.map(c=>c.name).join(', ')}.
 Each sender MUST remain themselves. Never make a sender adopt the phone owner's identity or another member's name/history.
 Match each person's established personality and their existing texting style. Do not flatten everyone into formal, polite prose. Emojis, slang, abbreviations, teasing and different punctuation are welcome when character-appropriate.
 Each contact's provided phoneNumber is authoritative and known to that contact. If directly asked for their own number, use that exact value; never invent another number or surname.
-Return 1-4 lines only. Every line MUST use exactly: Sender Name: message
-No JSON, markdown or narration.`;
+Return 1-2 natural text lines total unless a third person naturally needs to answer. Every line MUST use exactly: Sender Name: message
+No JSON, markdown, *stage actions*, or narration. Never split words vertically.`;
       const prompt=`PHONE OWNER (not an allowed generated speaker unless listed above): ${owner.name}
 CONTACT DATA: ${JSON.stringify(contacts.map(c=>({name:c.name,phoneNumber:identityForName(c.name,{create:true})?.phoneNumber||'',character:compactCard(c),voice:textingVoiceEvidence(c,conversation),life:w.people.find(p=>lc(p.name)===lc(c.name))||null})))}
 GREYHAVEN LIFE: ${JSON.stringify(scopedWorld(w,[owner.name,...contacts.map(c=>c.name)]))}
 THREAD:
 ${conversation.slice(-28).map(messageContext).join('\n')}
 Continue naturally without swapping identities.`;
-      replies=parseGroupReply(await generate({prompt,systemPrompt,responseLength:760}),contacts);
+      replies=parseGroupReply(await generate({prompt,systemPrompt,responseLength:480}),contacts).map(x=>({...x,text:tidyPhoneText(x.text)}));
     }
     if(!originIsCurrent(origin))return;
     if(!replies.length&&!directAction&&!secondaryActions.length)throw new Error('The model returned no usable phone reply.');
@@ -1966,8 +1992,16 @@ function renderApp(){
 function buildOverlay(){
   if(document.querySelector('#ghp-overlay'))return;const o=document.createElement('div');o.id='ghp-overlay';o.hidden=true;o.innerHTML=`<div class="ghp-backdrop" data-close></div><section class="ghp-device"><button class="ghp-close" data-close><i class="fa-solid fa-xmark"></i></button><div class="ghp-content"></div></section>`;o.addEventListener('click',click);o.addEventListener('change',change);o.addEventListener('submit',submit);o.addEventListener('pointerdown',messagePressStart);o.addEventListener('pointermove',messagePressMove);o.addEventListener('pointerup',messagePressEnd);o.addEventListener('pointercancel',messagePressEnd);o.addEventListener('contextmenu',messageContextMenu);document.body.appendChild(o);
 }
+function injectPrivateMemorySettings(){
+  const settings=document.querySelector('#ghp-overlay .ghp-settings');if(!settings||settings.querySelector('#ghp-cross-app-memory'))return;
+  const section=document.createElement('section');
+  section.innerHTML=`<h3>Private conversation memory</h3><label><span><b>Remember chats across apps</b><small>When ${esc(persona().name)} texts someone, the AI can recall only that same pair's private iMessage, Instagram, Snapchat, Facebook and other app messages in this roleplay. Nobody else's private threads are exposed.</small></span><input id="ghp-cross-app-memory" type="checkbox" ${profile().crossAppMemoryEnabled?'checked':''}></label>`;
+  const timeline=[...settings.querySelectorAll(':scope > section')].find(x=>x.querySelector('h3')?.textContent==='Timeline');
+  if(timeline)timeline.before(section);else settings.appendChild(section);
+}
 function render(){
   const o=document.querySelector('#ghp-overlay');if(!o||o.hidden)return;seedContacts(false);o.querySelector('.ghp-content').innerHTML=!unlocked&&profile().lockScreen?renderLock():(app?renderApp():renderHome());
+  injectPrivateMemorySettings();
   requestAnimationFrame(()=>{const scrollLatest=()=>{for(const s of o.querySelectorAll('[data-conversation-scroll]'))s.scrollTop=s.scrollHeight};scrollLatest();Promise.resolve(hydrateMediaPreviews()).finally(()=>requestAnimationFrame(scrollLatest))});
 }
 function goBack(){
@@ -2269,7 +2303,7 @@ function notification(nid){
 }
 function saveSettings(){
   const o=document.querySelector('#ghp-overlay'),apps={...profile().apps,settings:true};o.querySelectorAll('[data-app-setting]').forEach(x=>apps[x.dataset.appSetting]=x.checked);
-  saveProfile({wallpaper:o.querySelector('#ghp-wall')?.value||'aurora',wallpaperUrl:o.querySelector('#ghp-wall-url')?.value.trim()||'',lockScreen:o.querySelector('#ghp-lock-setting')?.checked??true,notificationPreviews:o.querySelector('#ghp-preview-setting')?.checked??true,refreshMode:o.querySelector('#ghp-refresh-mode')?.value||'manual',staleAfterMessages:Number(o.querySelector('#ghp-stale')?.value||12),maxNewEvents:Number(o.querySelector('#ghp-max-events')?.value||4),activityLevel:o.querySelector('#ghp-activity')?.value||'normal',apps});globalThis.toastr?.success?.('Phone settings saved.');
+  saveProfile({wallpaper:o.querySelector('#ghp-wall')?.value||'aurora',wallpaperUrl:o.querySelector('#ghp-wall-url')?.value.trim()||'',lockScreen:o.querySelector('#ghp-lock-setting')?.checked??true,notificationPreviews:o.querySelector('#ghp-preview-setting')?.checked??true,refreshMode:o.querySelector('#ghp-refresh-mode')?.value||'manual',staleAfterMessages:Number(o.querySelector('#ghp-stale')?.value||12),maxNewEvents:Number(o.querySelector('#ghp-max-events')?.value||4),activityLevel:o.querySelector('#ghp-activity')?.value||'normal',crossAppMemoryEnabled:o.querySelector('#ghp-cross-app-memory')?.checked??true,apps});globalThis.toastr?.success?.('Phone settings saved.');
 }
 function click(e){
   const x=e.target.closest('button,[data-thread],[data-contact],[data-story],[data-note],[data-mail]');if(!x)return;
