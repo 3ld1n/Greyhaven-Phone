@@ -269,7 +269,7 @@ function socialHandle(identity,app) {
   return candidates.find(x=>typeof x==='string'&&x.trim())?.trim()||'';
 }
 function profileRoot() { return document.querySelector('#ghsocial-profile-page'); }
-function closeProfile() { profileRoot()?.remove(); }
+function closeProfile() { const page=profileRoot(),mine=page?.dataset.identityId===currentIdentity()?.id,app=page?.dataset.app;page?.remove();if(mine&&(app==='instagram'||app==='facebook')){const feed=document.querySelector(`#ghp-overlay .ghp-${app} [data-app-view="feed"]`);feed?.click()}}
 function renderProfilePage(page,identityId,app='instagram') {
   if (!page) return;
   const identity=identityById(identityId); if(!identity){closeProfile();return;}
@@ -340,6 +340,13 @@ async function refreshSingleProfile(identityId,app,button) {
   finally{if(button?.isConnected){button.disabled=false;button.innerHTML=original;}}
 }
 
+function publishProfilePost(actor,app,{visual='',caption='',text=''}={}){
+  if(!['instagram','facebook'].includes(app))return false;const identity=identityByName(actor);if(!identity?.id)return false;
+  const profile=profileFor(identity.id,true),copy=app==='instagram'?caption:text;
+  if(app==='instagram'&&!visual||app==='facebook'&&!visual&&!copy)return false;
+  const post=normalizePost({id:`ghsocial:${uid()}`,identityId:identity.id,author:identity.name,visual,caption:app==='instagram'?caption:'',text:app==='facebook'?text:'',type:'photo',timeMs:Number(new Date(globalThis.GreyhavenLife?.getTime?.()||Date.now()))},app,identity);
+  profile[app].posts.unshift(post);profile.updatedAt=Date.now();saveSettings();syncGlobalIntoCurrentTimeline();refreshCurrentProfile();document.dispatchEvent(new CustomEvent('greyhaven:social-changed'));return true;
+}
 function postEditor(app,identityId,postId='') {
   const identity=identityById(identityId);if(!identity)return;
   const profile=profileFor(identityId,true),posts=profile[app].posts,row=postId?posts.find(x=>String(x.id)===String(postId)):null;
@@ -403,13 +410,10 @@ function augmentOwnProfileLaunchers() {
   const overlay=document.querySelector('#ghp-overlay');if(!overlay||overlay.hidden)return;
   const own=currentIdentity();if(!own?.id)return;
   const igProfile=overlay.querySelector('.ghp-instagram .ghp-social-profile');
-  if(igProfile&&!igProfile.querySelector('[data-ghsocial-own-profile]')){
-    const button=document.createElement('button');button.type='button';button.className='ghsocial-open-own';button.dataset.ghsocialOwnProfile='instagram';button.innerHTML='<i class="fa-brands fa-instagram"></i><span><b>Persistent profile & posts</b><small>Add, edit or delete posts shared across chats</small></span><i class="fa-solid fa-chevron-right"></i>';igProfile.appendChild(button);
-  }
-  const fbMain=overlay.querySelector('.ghp-facebook > main');
-  if(fbMain&&!fbMain.querySelector('[data-ghsocial-own-profile]')){
-    const button=document.createElement('button');button.type='button';button.className='ghsocial-open-own';button.dataset.ghsocialOwnProfile='facebook';button.innerHTML='<i class="fa-brands fa-facebook-f"></i><span><b>My persistent profile</b><small>Add, edit or delete Facebook posts shared across chats</small></span><i class="fa-solid fa-chevron-right"></i>';fbMain.prepend(button);
-  }
+  // The native Instagram profile tab IS the persistent profile. Do not add a redundant launcher.
+  if(igProfile&&!profileRoot())openProfile(own.id,'instagram');
+  const fbProfile=overlay.querySelector('.ghp-facebook .ghp-social-profile');
+  if(fbProfile&&!profileRoot())openProfile(own.id,'facebook');
 }
 
 function makeNameClickable(node,app) {
@@ -425,6 +429,8 @@ function augmentProfileLinks() {
   for(const header of overlay.querySelectorAll('.ghp-facebook-thread .ghp-app-header>div b'))makeNameClickable(header,'facebook');
   for(const row of overlay.querySelectorAll('.ghp-instagram .ghp-row.static>span>b'))makeNameClickable(row,'instagram');
   for(const row of overlay.querySelectorAll('.ghp-facebook .ghp-row.static>span>b'))makeNameClickable(row,'facebook');
+  for(const row of overlay.querySelectorAll('.ghp-instagram .ghp-social-section .ghp-row>span>b'))makeNameClickable(row,'instagram');
+  for(const row of overlay.querySelectorAll('.ghp-facebook .ghp-social-section .ghp-row>span>b'))makeNameClickable(row,'facebook');
   const story=overlay.querySelector('.ghp-story-view header b');if(story)makeNameClickable(story,'instagram');
 }
 
@@ -458,7 +464,7 @@ function bindEvents() {
   document.addEventListener('click',event=>{
     const target=event.target instanceof Element?event.target:null;if(!target)return;
     if(target.closest('#ghp-overlay [data-close]')) closeProfile();
-    const link=target.closest('[data-ghsocial-open-profile]');if(link){event.preventDefault();event.stopPropagation();openProfile(link.dataset.ghsocialOpenProfile,link.dataset.ghsocialOpenApp||'instagram');return;}
+    const link=target.closest('[data-ghsocial-open-profile]');if(link){event.preventDefault();event.stopPropagation();link.closest('dialog')?.close();openProfile(link.dataset.ghsocialOpenProfile,link.dataset.ghsocialOpenApp||'instagram');return;}
     const ownProfile=target.closest('[data-ghsocial-own-profile]');if(ownProfile){event.preventDefault();event.stopPropagation();const own=currentIdentity();if(own?.id)openProfile(own.id,ownProfile.dataset.ghsocialOwnProfile||'instagram');return;}
     if(target.closest('[data-ghsocial-back]')){event.preventDefault();event.stopPropagation();closeProfile();return;}
     if(target.closest('[data-ghsocial-close]')){target.closest('dialog')?.close();return;}
@@ -481,7 +487,7 @@ function bindEvents() {
 }
 
 function expose() {
-  globalThis.GreyhavenSocialStudio={version:VERSION,openProfile,sync:syncNow,getProfile:identityId=>clone(profileFor(identityId,false)),getOnlyFansMainPrompt:()=>onlyFansSavedPrompt()||onlyFansDefaultPrompt()};
+  globalThis.GreyhavenSocialStudio={version:VERSION,openProfile,publishPost:publishProfilePost,sync:syncNow,getProfile:identityId=>clone(profileFor(identityId,false)),getOnlyFansMainPrompt:()=>onlyFansSavedPrompt()||onlyFansDefaultPrompt()};
 }
 async function waitReady(timeout=15000){const start=Date.now();while(Date.now()-start<timeout){if(globalThis.GreyhavenPhone&&ctx()?.extensionSettings&&document.body)return true;await new Promise(r=>setTimeout(r,100));}return false;}
 async function init(){if(initialized)return;if(!await waitReady()){console.warn(`[${MODULE}] Greyhaven Phone was not ready.`);return;}settingsRoot();bindEvents();observeUi();expose();scheduleSync();scheduleAugment();initialized=true;console.info(`[${MODULE}] v${VERSION} loaded`);}

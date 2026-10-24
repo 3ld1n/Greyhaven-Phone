@@ -1,9 +1,10 @@
 import { phoneKeyForIdentity, reconcilePhoneIdentities } from './phone-identity.mjs';
 import { collectPairMemory } from './phone-shared-memory.mjs';
+import { identifyReplySpeaker, ownedPhone, collectOwnedChronology, scopeContinuityEvents } from './phone-chronology.mjs';
 import { tidyPhoneText, limitPhonePackets } from './phone-reply-format.mjs';
 
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '2.12.0';
+const GHP_VERSION = '2.13.0';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -341,7 +342,7 @@ function normalizeProfile(raw={}){
     recentMessages:Math.max(6,Math.min(50,Number(raw.recentMessages||20))),
     recentChars:Math.max(3000,Math.min(30000,Number(raw.recentChars||12000))),
     responseTokens:Math.max(600,Math.min(3000,Number(raw.responseTokens||1600))),
-    crossAppMemoryEnabled:raw.crossAppMemoryEnabled!==false,
+    crossAppMemoryEnabled:true,
     activityLevel:['quiet','normal','busy'].includes(raw.activityLevel)?raw.activityLevel:'normal',
     refreshMode:['manual','stale-open'].includes(raw.refreshMode)?raw.refreshMode:'manual'
   };
@@ -502,8 +503,9 @@ function markRoleplayCheckpoint(){
 }
 function continuityTime(ms){if(!ms)return'unknown RP time';try{return new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(ms))}catch{return new Date(ms).toISOString()}}
 function continuitySnapshot(){
-  const box=continuityRoot();if(!box)return{fresh:[],plans:[],history:[],checkpoint:{},nowMs:now().getTime()};const state=box.state,cp=state.rpCheckpoint||{},nowMs=now().getTime(),relevant=relevantPhoneNames(true),matches=e=>!relevant.size||e.participants.some(n=>relevant.has(lc(n)));
-  const all=state.events.filter(matches),fresh=[],history=[];
+  const box=continuityRoot();if(!box)return{fresh:[],plans:[],history:[],checkpoint:{},nowMs:now().getTime()};const state=box.state,cp=state.rpCheckpoint||{},nowMs=now().getTime(),speaker=identifyReplySpeaker(ctx());
+  // Never include unrelated group members, even if the latest user text mentions them.
+  const all=scopeContinuityEvents(state.events,speaker,180),fresh=[],history=[];
   for(const e of all){
     const afterCheckpoint=e.seq>Number(cp.seq||0),backdated=cp.roleplayMs&&e.roleplayMs&&e.roleplayMs<cp.roleplayMs-5*60000,age=e.roleplayMs?nowMs-e.roleplayMs:0,staleTransient=e.transient&&age>120*60000;
     if(afterCheckpoint&&!backdated&&!staleTransient)fresh.push(e);else history.push(e);
@@ -685,7 +687,7 @@ ${requested&&appName!=='onlyfans'?`The latest message explicitly requests a ${re
 ${videoMode?'This is a live fictional video call. TEXT may combine one brief *visible action* with natural spoken dialogue. Keep it as one bounded turn.':''}
 ${appName==='onlyfans'?`Every creator and subscriber in this app is confirmed age 18 or older. Keep the response consensual and consistent with the creator’s actual boundaries; subscription never erases consent. This is a paid creator context, so flirting, dirty talk, intimate performance, and requested private media are normal possibilities when they fit ${peer.name}'s creator persona and the conversation. Do not default to a generic "I'm not like that" response or moral lecture merely because the request is sexual. A creator may still tease, negotiate, redirect, or refuse something outside their own boundaries.${requested?` The latest message explicitly requests a ${requested}. If ${peer.name} sends it now, include an actual ${requested.toUpperCase()}: protocol line with a concrete visual description; never merely claim it was sent.`:''}`:''}
 ${appName==='darkweb'?`Keep everything inside fictional Greyhaven. Do not provide real vendor details, real-world sourcing, manufacturing, evasion, or operational instructions. DARK WEB PROVIDER CONTEXT below is authoritative. If ${peer.name} is explicitly assigned as an escort/dealer/provider, they know that role, their exact price, duration, description and boundaries even when no generated listing exists. Do not deny the assigned role or say "I'm not like that" simply because this chat was opened directly. The character can negotiate, refuse requests outside the listed boundaries, or arrange a fictional RP meeting.`:''}
-If ${peer.name} genuinely completes a separate phone action now, you may append the same hidden <!--GH_ACTION {...}--> marker used by roleplay. This includes message.send, media.send, call.place, contact block/unblock/add/exchange, instagram.follow/unfollow, snapchat.add/accept/decline, and facebook.friend.request/accept/decline. The from field must be ${peer.name}, targets must be exact existing names, and no action marker is allowed for a request, refusal, hesitation, or promise for later. Never generate the target's response.`;
+If ${peer.name} genuinely completes a separate phone action now, you may append the same hidden <!--GH_ACTION {...}--> marker used by roleplay. This includes message.send, media.send, call.place, contact block/unblock/add/exchange, instagram.follow/unfollow/post/story/like/comment, snapchat.add/accept/decline/remove/story, and facebook.friend.request/accept/decline/post/like/comment. The from field must be ${peer.name}, targets must be exact existing names, and no action marker is allowed for a request, refusal, hesitation, or promise for later. Never generate the target's response.`;
     const prompt=`PERSON REPLYING:
 ${JSON.stringify({identity:{id:peer.id,name:peer.name,kind:peer.kind,phoneNumber:peer.phoneNumber||'',metadata:peer.metadata},character:found?cardData({name:peer.name,characterId:found.index}):{},life,sharedRelationship:reln,marketplaceListing:listing,darkWebListing:darkListing,darkWebProvider:darkProvider,onlyFansCreator:creatorAccount?{subscriptionPrice:creatorAccount.subscriptionPrice,subscribers:creatorAccount.subscribersBase,posts:creatorAccount.historicalPostCount,economicTier:creatorAccount.economicTier}:null,videoMode})}
 
@@ -719,15 +721,15 @@ function sendAppMessage(appName,threadKey,{type='text',text='',mediaDescription=
   const t=timeline(),th=appThread(appName,threadKey,t),peer=appPeer(th),owner=currentIdentity();text=String(text||'').trim();mediaDescription=String(mediaDescription||'').trim();if(!th||!peer||!owner||socialActionBlocked(t,peer,appName))return false;if(type==='text'&&!text||type!=='text'&&!mediaDescription)return false;
   const result=mirrorAppMessage({appName,fromName:owner.name,toName:peer.name,fromIdentityId:owner.id,toIdentityId:peer.id,type,text,mediaDescription,mediaKey,mediaWidth,mediaHeight,requestMedia,timeMs:now().getTime(),unread:true});render();if(result?.delivered){const origin=operationOrigin();setTimeout(()=>{if(originIsCurrent(origin))generateAppReply(appName,threadKey)},180)}return !!result?.delivered;
 }
-function publishAppItem(appName,kind,row){
-  const root=metadataRoot(),owner=currentIdentity();if(!root||!owner)return;const shared=row.sharedEventId||`${appName}-${kind}:${id()}`,source={...row,sharedEventId:shared,identityId:owner.id,author:owner.name,ownerPost:true};
+function publishAppItem(appName,kind,row,ownerReference=null){
+  const root=metadataRoot(),owner=ownerReference?resolveIdentityRef(ownerReference,false):currentIdentity();if(!root||!owner)return;const shared=row.sharedEventId||`${appName}-${kind}:${id()}`,source={...row,sharedEventId:shared,identityId:owner.id,author:owner.name,ownerPost:true};
   if(kind==='post')normalizeSocialEngagement(source,owner.id);
-  const own=timeline(),ownStore=appStore(own,appName),ownList=kind==='story'?ownStore.stories:ownStore.posts;if(!ownList.some(x=>x.sharedEventId===shared))ownList.unshift(source);
+  const own=ownerReference?phoneForIdentity(owner,true)?.timeline:timeline(),ownStore=appStore(own,appName),ownList=kind==='story'?ownStore.stories:ownStore.posts;if(!ownList.some(x=>x.sharedEventId===shared))ownList.unshift(source);
   for(const [key,raw] of Object.entries(root.phones||{})){
     const phone=normalizeTimeline(raw),phoneIdentity=identityById(phone.identityId)||identityForName(phone.ownerName,{create:false});if(phone===own||phone.identityId===owner.id||phoneIdentity&&!identityAppEnabled(phoneIdentity,appName))continue;const reln=phone.relationships?.[owner.id]?.apps?.[appName],visible=appName==='instagram'?reln?.following:appName==='snapchat'?reln?.friends:reln?.friends;if(!visible||reln?.blocked||reln?.blockedBy)continue;
     const list=kind==='story'?appStore(phone,appName).stories:appStore(phone,appName).posts;if(!list.some(x=>x.sharedEventId===shared))list.unshift({...clone(source),ownerPost:false});root.phones[key]=phone;
   }
-  root.phones[phoneKeyForIdentity(currentIdentity().id)]=own;saveMetadataRoot(root);render();
+  root.phones[phoneKeyForIdentity(owner.id)]=own;saveMetadataRoot(root);render();
 }
 function socialItemKey(row={}){return String(row.sharedEventId||row.id||'')}
 function copyOwnedSocialContent(sourceIdentity,sourceTimeline,targetTimeline,appName,kinds=['post','story']){
@@ -889,7 +891,7 @@ function messageContext(m){
   return`${who}: ${m.text}`;
 }
 function privatePairMemory(owner, peer, excludeApp='') {
-  if(!profile().crossAppMemoryEnabled)return'Cross-app private memory disabled.';
+  // Shared pair history is now an always-on capability.
   const ownerId=owner?.id||currentIdentity()?.id,peerId=peer?.id||identityForName(peer?.name,{create:false})?.id;
   const rows=collectPairMemory(timeline(),ownerId,peerId,{excludeApp});
   return rows.length?rows.join('\n'):'No earlier private conversation across these apps.';
@@ -1363,10 +1365,10 @@ function parseDirectPacket(raw,requested=''){
 function parseDirectReply(raw,requested=''){return parseDirectPacket(raw,requested).items}
 function extractDirectAction(raw){return parseDirectPacket(raw,'').action}
 function dispatchGeneratedPhoneActions(actions=[],actorName='',parentKey=''){
-  const allowed=new Set(['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange','instagram.follow','instagram.unfollow','snapchat.add','snapchat.accept','snapchat.decline','facebook.friend.request','facebook.friend.accept','facebook.friend.decline']),actor=norm(actorName);
+  const allowed=new Set(['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange','instagram.follow','instagram.unfollow','snapchat.add','snapchat.accept','snapchat.decline','facebook.friend.request','facebook.friend.accept','facebook.friend.decline','snapchat.remove','instagram.like','instagram.comment','facebook.like','facebook.comment','instagram.post','instagram.story','snapchat.story','facebook.post']),actor=norm(actorName);
   for(let index=0;index<actions.length;index++){
-    const data=actions[index]&&typeof actions[index]==='object'?clone(actions[index]):{},type=norm(data.type),from=norm(data.from||actor),to=norm(data.to||data.target);if(!allowed.has(type)||lc(from)!==lc(actor)||!to||lc(to)===lc(actor))continue;
-    const target=identityForName(to,{create:false});if(!target)continue;data.from=actor;data.to=target.name;const sourceKey=`phone-ai:${chatIdentity()}:${parentKey}:${index}:${hashString(JSON.stringify([type,lc(actor),target.id,data.text||'',data.mediaType||'',data.description||data.mediaDescription||'']))}`;
+    const data=actions[index]&&typeof actions[index]==='object'?clone(actions[index]):{},type=norm(data.type),from=norm(data.from||actor),to=norm(data.to||data.target);const broadcast=['instagram.post','instagram.story','snapchat.story','facebook.post'].includes(type);if(!allowed.has(type)||lc(from)!==lc(actor)||(!broadcast&&!to)||to&&lc(to)===lc(actor))continue;
+    const target=to?identityForName(to,{create:false}):null;if(!broadcast&&!target)continue;data.from=actor;data.to=target?.name||'';const sourceKey=`phone-ai:${chatIdentity()}:${parentKey}:${index}:${hashString(JSON.stringify([type,lc(actor),target?.id||'',data.text||'',data.mediaType||'',data.description||data.mediaDescription||'']))}`;
     if(typeof globalThis.GreyhavenLife?.dispatchWorldAction==='function')globalThis.GreyhavenLife.dispatchWorldAction(data,{source:'greyhaven-phone-ai',sourceKey,roleplayMs:now().getTime()});
     else window.dispatchEvent(new CustomEvent('greyhaven-world-action',{detail:{id:sourceKey,type,actor,from:actor,target:target.name,to:target.name,text:data.text||'',roleplayMs:now().getTime(),realMs:Date.now(),source:'greyhaven-phone-ai',sourceKey,data:{...data,mediaDescription:data.description||data.mediaDescription||'',caption:data.caption||'',expectsReply:data.expectsReply===true}}}));
   }
@@ -1414,6 +1416,9 @@ function boundaryMessageText(m){
 }
 function boundaryStatementKind(text=''){
   const s=String(text||'');
+  // A teasing, hypothetical or quoted 'I'll block you 😂' is not an actual
+  // no-contact boundary, and must never accumulate automatic violations.
+  if(/\b(?:block|blocking|blocked)\b/i.test(s)&&/\b(?:if|would|could|might|hypothetically|just kidding|joking|jk|lmao|lol|haha|hehe)\b|[😂🤣😅]/i.test(s)&&!/\b(?:stop (?:texting|messaging|contacting)|don't contact|leave me alone)\b/i.test(s))return '';
   if(/\b(?:i(?:'m| am) (?:going to )?block(?:ing)? you|i(?:'ll| will) block you|don't contact me again|do not contact me again|never (?:text|message|call|contact) me again|leave me alone|stay away from me|stop (?:texting|messaging|contacting|calling) me|don't (?:text|message|call|contact) me|do not (?:text|message|call|contact) me|back off|don't speak to me|do not speak to me)\b/i.test(s))return'hard';
   if(/\b(?:give me (?:some )?space|i need (?:some )?space|don't talk to me(?: right now)?|do not talk to me(?: right now)?|i don't want to talk(?: to you)?(?: right now)?|i do not want to talk(?: to you)?(?: right now)?|i(?:'m| am) not talking to you(?: right now)?|i(?:'m| am) done (?:talking|with this conversation|with this)|let me cool off|i(?:'m| am) too mad to talk)\b/i.test(s))return'temporary';
   return'';
@@ -1596,6 +1601,10 @@ Supported examples:
 <!--GH_ACTION {"type":"snapchat.accept","from":"${c.name}","to":"Exact Existing Name"}-->
 <!--GH_ACTION {"type":"facebook.friend.request","from":"${c.name}","to":"Exact Existing Name"}-->
 <!--GH_ACTION {"type":"facebook.friend.accept","from":"${c.name}","to":"Exact Existing Name"}-->
+<!--GH_ACTION {"type":"snapchat.remove","from":"${c.name}","to":"Exact Existing Name"}-->
+<!--GH_ACTION {"type":"instagram.post","from":"${c.name}","visual":"exact new photo description","caption":"caption text"}-->
+<!--GH_ACTION {"type":"instagram.story","from":"${c.name}","visual":"photo of current scene","caption":"short caption"}-->
+<!--GH_ACTION {"type":"facebook.post","from":"${c.name}","text":"written post","visual":"optional photo"}-->
 Use only exact known names and never invent/expand a surname. The from field MUST be ${c.name}. Only emit an action after ${c.name} actually agrees and performs it now; requests, promises for later, hesitation and refusal create no marker. Do not force compliance. Keep an exact third-party private message body out of the visible TEXT reply; the hidden marker owns it. Do not generate the third person's response.
 
 SOCIAL BOUNDARIES:
@@ -1604,7 +1613,7 @@ If ${owner.name} is insulting, demeaning, creepy, hostile, or ignores a clearly 
 Distinguish consensual teasing/flirting between close people from genuinely unwelcome behavior.
 
 Silence is a NORMAL character choice. If ${c.name} is genuinely angry with ${owner.name}, has said they need space, is not speaking to them, or has clearly ended the conversation, ACTION: IGNORE can be more realistic than inventing another reply.
-Do not repeat the same "leave me alone / stop messaging me" warning four or five times. After a clear boundary, the next pushy/disrespectful message should usually be ACTION: IGNORE. If ${owner.name} keeps contacting ${c.name} after being ignored, or violates the same boundary again, ACTION: BLOCK becomes normal.
+Do not repeat the same "leave me alone / stop messaging me" warning four or five times. After a clear boundary, the next pushy/disrespectful message should usually be ACTION: IGNORE. Repeated unmistakably unwanted contact MAY justify ACTION: BLOCK, but never because the pair merely discussed or joked about blocking, or had a single ordinary disagreement.
 A credible threat, forced-entry threat, coercive sexual threat, or severe harassment does NOT require several warnings. ${c.name} may ACTION: BLOCK immediately when that fits the situation.
 For ordinary disagreement, one awkward message, or behavior this specific character would genuinely tolerate, do not overreact or block.
 If currently ignoring ${owner.name}, the newest message does NOT automatically earn a response: keep ignoring, block, or re-engage only if there is a believable in-character reason such as a real apology or important new information.
@@ -1672,7 +1681,8 @@ Return protocol lines only.`;
         }
         if(!items.length&&!directAction&&!secondaryActions.length){raw=await generate({prompt:`Reply as ${c.name} to the latest phone message. You are ${c.name}, not ${owner.name}. Match ${c.name}'s natural texting voice. Return TEXT: followed by the reply, ACTION: IGNORE if ${c.name} chooses silence, or ACTION: BLOCK if ${c.name} is done with unwanted contact.`,systemPrompt:`You are ${c.name}. ${owner.name} is the other person. Never swap identities. Silence and blocking are valid in-character outcomes.`,responseLength:350});packet=parseDirectPacket(raw,requested||'');items=packet.items;directAction=packet.action||'';secondaryActions=packet.actions||[]}
         replies=items.map(x=>({sender:c.name,...x}));
-        if(!directAction&&boundaryReplyClaimsBlock(replies))directAction='block';
+        // Never turn an offhand discussion of blocking into an actual block.
+        // Only an explicit ACTION: BLOCK can set the blocked state.
         if(directAction==='ignore')replies=[];
       }
     }else{
@@ -1911,7 +1921,7 @@ function renderFacebook(){
   if(view==='listing'){
     const row=market.listings.find(x=>x.id===itemId);if(!row){appView='marketplace';itemId='';return renderFacebook()}const seller=identityById(row.sellerIdentityId)||{id:row.sellerIdentityId,name:row.sellerName},mine=row.sellerIdentityId===own.id;return`<div class="ghp-app ghp-social-app ghp-facebook">${header(row.title,'Marketplace')}<main class="ghp-market-detail">${socialMediaCard(row,'Marketplace listing')}<h2>${esc(row.title)}</h2><h3>${esc(row.price)}</h3><p>${esc(row.description||'')}</p><small><i class="fa-solid fa-location-dot"></i> ${esc(row.area||'Area not specified')}</small><div class="ghp-market-seller">${avatarHtml(seller)}<span><b>${esc(seller.name)}</b><small>${mine?'Your listing':row.sellerType==='provisional'?'Provisional Marketplace identity':'Existing Greyhaven identity'}${row.inquiries?.length?` · ${row.inquiries.length} interested`:''}</small></span></div>${mine?'<div class="ghp-market-owner-note"><i class="fa-solid fa-inbox"></i> Interested buyers will appear in Messenger after a Marketplace refresh.</div><div class="ghp-market-owner-actions"><button data-market-mark-sold><i class="fa-solid fa-circle-check"></i> Mark as sold</button><button data-market-remove-listing><i class="fa-solid fa-trash"></i> Remove listing</button></div>':`<button class="ghp-wide-action primary" data-market-message="${esc(row.id)}"><i class="fa-brands fa-facebook-messenger"></i> Message seller</button><div class="ghp-market-actions"><button data-market-action="question" data-market-action-listing="${esc(row.id)}">Ask</button><button data-market-action="offer" data-market-action-listing="${esc(row.id)}">Make offer</button><button data-market-action="buy" data-market-action-listing="${esc(row.id)}">Buy</button><button data-market-action="pickup" data-market-action-listing="${esc(row.id)}">Pickup</button></div>`}${row.sellerType==='provisional'?`<button class="ghp-wide-action" data-market-link="${esc(row.id)}"><i class="fa-solid fa-link"></i> Manually link to a character</button><small class="ghp-muted">Never linked automatically by matching a name.</small>`:''}</main></div>`;
   }
-  const tabs=[['feed','fa-solid fa-house','Feed'],['friends','fa-solid fa-user-group','Friends'],['messenger','fa-brands fa-facebook-messenger','Messenger'],['marketplace','fa-solid fa-store','Marketplace'],['notifications','fa-solid fa-bell','Alerts']];let body='';
+  const tabs=[['feed','fa-solid fa-house','Feed'],['friends','fa-solid fa-user-group','Friends'],['messenger','fa-brands fa-facebook-messenger','Messenger'],['marketplace','fa-solid fa-store','Marketplace'],['notifications','fa-solid fa-bell','Alerts'],['profile','fa-solid fa-user','Profile']];let body='';
   if(view==='feed')body=`<div class="ghp-feed">${store.posts.length?store.posts.map(p=>{const who=socialIdentity(p.identityId,p.author),comments=Array.isArray(p.comments)?p.comments:[],liked=Array.isArray(p.likedBy)&&p.likedBy.includes(own.id);return`<article><header>${avatarHtml(who,'small')}<span><b>${esc(who.name)}</b><small>${esc(rel(p.timeMs))}</small></span></header><p>${esc(p.text||'')}</p>${p.visual?socialMediaCard(p,'Facebook post'):''}<small>${Number(p.likes||0).toLocaleString()} likes · ${Number(p.commentCount||comments.length).toLocaleString()} comments</small>${comments.slice(-3).map(c=>`<p class="ghp-comment"><strong>${esc(c.author||'Someone')}</strong> ${esc(c.text||c)}</p>`).join('')}<div class="ghp-social-icons"><button data-facebook-like="${esc(p.id)}"><i class="${liked?'fa-solid':'fa-regular'} fa-thumbs-up"></i> Like</button><button data-facebook-comment="${esc(p.id)}"><i class="fa-regular fa-comment"></i> Comment</button></div></article>`}).join(''):empty('fa-brands fa-facebook','Your Feed is quiet','Friends and Refresh Phone can add natural activity.')}</div>`;
   else if(view==='friends'){
     const rows=identityDirectory().map(who=>({who,state:appRelationship(t,who,'facebook',false)}));body=`<div class="ghp-social-section"><button class="ghp-wide-action" data-find-social="facebook"><i class="fa-solid fa-user-plus"></i> Find an exact character</button><h3>Friend requests</h3>${rows.filter(x=>x.state?.incomingRequest).map(({who})=>`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>Sent you a request</small></span><button data-facebook-accept="${esc(who.id)}">Accept</button><button data-facebook-decline="${esc(who.id)}">Delete</button></div>`).join('')||'<small class="ghp-muted">No incoming requests.</small>'}<h3>Friends & pending</h3>${rows.filter(x=>x.state&&(x.state.friends||x.state.outgoingRequest)).map(({who,state})=>`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>${state.friends?'Friends':'Request pending'}</small></span>${state.friends?`<button data-open-social-thread="facebook" data-social-identity="${esc(who.id)}"><i class="fa-brands fa-facebook-messenger"></i></button>`:''}</div>`).join('')||'<small class="ghp-muted">No friends or sent requests yet.</small>'}</div>`;
@@ -2001,7 +2011,7 @@ function injectPrivateMemorySettings(){
 }
 function render(){
   const o=document.querySelector('#ghp-overlay');if(!o||o.hidden)return;seedContacts(false);o.querySelector('.ghp-content').innerHTML=!unlocked&&profile().lockScreen?renderLock():(app?renderApp():renderHome());
-  injectPrivateMemorySettings();
+  // Cross-app character memory is always enabled; no per-persona checkbox.
   requestAnimationFrame(()=>{const scrollLatest=()=>{for(const s of o.querySelectorAll('[data-conversation-scroll]'))s.scrollTop=s.scrollHeight};scrollLatest();Promise.resolve(hydrateMediaPreviews()).finally(()=>requestAnimationFrame(scrollLatest))});
 }
 function goBack(){
@@ -2154,10 +2164,26 @@ function editMessagePopup(tid,mid){
   const d=popup(`<form method="dialog" class="ghp-message-edit"><header><b>Edit Message</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header>${fields}<button type="button" class="primary" data-save-message-edit>Save</button></form>`);
   d.querySelector('[data-save-message-edit]').onclick=()=>{const text=d.querySelector('.msg-edit-text')?.value??'',mediaDescription=d.querySelector('.msg-media-desc')?.value??m.mediaDescription;if((!media&&!String(text).trim())||(media&&!String(mediaDescription).trim())){globalThis.toastr?.warning?.(media?'Media description cannot be empty.':'Message cannot be empty.');return}if(editMirroredMessage(tid,mid,{text,mediaDescription}))d.close()};
 }
+async function savePhoneImageToPhotos(message){
+  if(!message?.mediaKey){globalThis.toastr?.warning?.('Generate or attach the photo first.');return}
+  const blob=await mediaBlob(message.mediaKey);
+  if(!blob){globalThis.toastr?.warning?.('Image is not stored on this device.');return}
+  const ext=blob.type?.includes('jpeg')?'jpg':blob.type?.includes('webp')?'webp':'png';const file=new File([blob],`greyhaven-${Date.now()}.${ext}`,{type:blob.type||'image/png'});
+  try{
+    if(navigator.canShare?.({files:[file]})&&navigator.share){await navigator.share({files:[file],title:'Greyhaven photo'});return}
+  }catch(e){if(e?.name==='AbortError')return}
+  const href=URL.createObjectURL(blob),a=document.createElement('a');a.href=href;a.download=file.name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),60000);
+  globalThis.toastr?.info?.('Image downloaded. On iPhone, use Share → Save Image if needed.');
+}
+function ghImagePopupButton(message){return message?.type==='photo'&&message?.mediaKey?'<button class="ghp-popup-action" data-ghp-save-photo><i class="fa-solid fa-download"></i><span><b>Save to Photos</b><small>Export to the iPhone Photos app or Files.</small></span></button><button class="ghp-popup-action" data-ghp-edit-ai><i class="fa-solid fa-wand-magic-sparkles"></i><span><b>Image tools</b><small>Edit metadata or regenerate the image.</small></span></button>':''}
+function ghBindImageActions(dialog,message){
+  dialog.querySelector('[data-ghp-save-photo]')?.addEventListener('click',()=>{dialog.close();void savePhoneImageToPhotos(message)});
+  dialog.querySelector('[data-ghp-edit-ai]')?.addEventListener('click',()=>{dialog.close();globalThis.GreyhavenPhoneImages?.openToolsForMessage?.(message)});
+}
 function messageActionPopup(tid,mid){
   const hit=findThreadMessage(tid,mid);if(!hit)return;const {m}=hit,owner=persona(),mine=lc(m.sender)===lc(owner.name),canUnsend=mine&&!!m.mirrorId;
-  const d=popup(`<div class="ghp-message-actions"><header><b>Message</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><small class="ghp-action-sender">${esc(m.sender)} · ${esc(timeText(new Date(m.timeMs)))}</small>${mine?`<button class="ghp-popup-action" data-edit-message><i class="fa-solid fa-pen"></i><span><b>Edit</b><small>Updates the mirrored message on both phones.</small></span></button>`:''}${canUnsend?`<button class="ghp-popup-action danger" data-unsend-message><i class="fa-solid fa-delete-left"></i><span><b>Unsend for everyone</b><small>Removes this mirrored message from both phones.</small></span></button>`:''}<button class="ghp-popup-action danger subtle" data-delete-local-message><i class="fa-solid fa-trash"></i><span><b>Delete from this phone</b><small>${mine?'Leaves the other phone copy intact.':`To edit or unsend, switch to ${esc(m.sender)}'s persona.`}</small></span></button></div>`);
-  d.querySelector('[data-popup-close]').onclick=()=>d.close();
+  const d=popup(`<div class="ghp-message-actions"><header><b>Message</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><small class="ghp-action-sender">${esc(m.sender)} · ${esc(timeText(new Date(m.timeMs)))}</small>${mine?`<button class="ghp-popup-action" data-edit-message><i class="fa-solid fa-pen"></i><span><b>Edit</b><small>Updates the mirrored message on both phones.</small></span></button>`:''}${canUnsend?`<button class="ghp-popup-action danger" data-unsend-message><i class="fa-solid fa-delete-left"></i><span><b>Unsend for everyone</b><small>Removes this mirrored message from both phones.</small></span></button>`:''}${ghImagePopupButton(m)}<button class="ghp-popup-action danger subtle" data-delete-local-message><i class="fa-solid fa-trash"></i><span><b>Delete from this phone</b><small>${mine?'Leaves the other phone copy intact.':`To edit or unsend, switch to ${esc(m.sender)}'s persona.`}</small></span></button></div>`);
+  d.querySelector('[data-popup-close]').onclick=()=>d.close();ghBindImageActions(d,m);
   d.querySelector('[data-edit-message]')?.addEventListener('click',()=>{d.close();editMessagePopup(tid,mid)});
   d.querySelector('[data-unsend-message]')?.addEventListener('click',()=>{if(confirm('Unsend this message for everyone?')){d.close();unsendMessageEverywhere(tid,mid)}});
   d.querySelector('[data-delete-local-message]').onclick=()=>{d.close();deleteMessageLocal(tid,mid)};
@@ -2180,16 +2206,30 @@ function editAppMessagePopup(appName,tid,mid){
   const hit=findAppThreadMessage(appName,tid,mid);if(!hit)return;const {m}=hit,owner=persona();if(lc(m.sender)!==lc(owner.name)){globalThis.toastr?.warning?.(`Switch to ${m.sender}'s persona to edit this message.`);return}const media=m.type!=='text',fields=media?`<label><span><b>${m.type==='video'?'Video':'Photo'} description</b><small>This remains the AI-visible description.</small></span><textarea class="msg-media-desc">${esc(m.mediaDescription)}</textarea></label><label><span><b>Caption / message</b></span><textarea class="msg-edit-text">${esc(m.text)}</textarea></label>`:`<label><span><b>Message</b></span><textarea class="msg-edit-text">${esc(m.text)}</textarea></label>`,d=popup(`<form method="dialog" class="ghp-message-edit"><header><b>Edit ${esc(APPS[appName].label)} Message</b><button value="cancel"><i class="fa-solid fa-xmark"></i></button></header>${fields}<button type="button" class="primary" data-save-app-message-edit>Save</button></form>`);d.querySelector('[data-save-app-message-edit]').onclick=()=>{const text=d.querySelector('.msg-edit-text')?.value??'',mediaDescription=d.querySelector('.msg-media-desc')?.value??m.mediaDescription;if((!media&&!String(text).trim())||(media&&!String(mediaDescription).trim())){globalThis.toastr?.warning?.(media?'Media description cannot be empty.':'Message cannot be empty.');return}if(editMirroredAppMessage(appName,tid,mid,{text,mediaDescription}))d.close()};
 }
 function appMessageActionPopup(appName,tid,mid){
-  const hit=findAppThreadMessage(appName,tid,mid);if(!hit)return;const {m}=hit,owner=persona(),mine=lc(m.sender)===lc(owner.name),canUnsend=mine&&!!m.mirrorId,d=popup(`<div class="ghp-message-actions"><header><b>${esc(APPS[appName].label)} Message</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><small class="ghp-action-sender">${esc(m.sender)} · ${esc(timeText(new Date(m.timeMs)))}</small>${mine?'<button class="ghp-popup-action" data-edit-app-message><i class="fa-solid fa-pen"></i><span><b>Edit</b><small>Updates the mirrored app message on both phones.</small></span></button>':''}${canUnsend?'<button class="ghp-popup-action danger" data-unsend-app-message><i class="fa-solid fa-delete-left"></i><span><b>Unsend for everyone</b><small>Removes this message from both app conversations.</small></span></button>':''}<button class="ghp-popup-action danger subtle" data-delete-local-app-message><i class="fa-solid fa-trash"></i><span><b>Delete from this phone</b><small>${mine?'Leaves the other phone copy intact.':`To edit or unsend, switch to ${esc(m.sender)}'s persona.`}</small></span></button></div>`);d.querySelector('[data-popup-close]').onclick=()=>d.close();d.querySelector('[data-edit-app-message]')?.addEventListener('click',()=>{d.close();editAppMessagePopup(appName,tid,mid)});d.querySelector('[data-unsend-app-message]')?.addEventListener('click',()=>{if(confirm('Unsend this message for everyone?')){d.close();unsendAppMessageEverywhere(appName,tid,mid)}});d.querySelector('[data-delete-local-app-message]').onclick=()=>{d.close();deleteAppMessageLocal(appName,tid,mid)};
+  const hit=findAppThreadMessage(appName,tid,mid);if(!hit)return;const {m}=hit,owner=persona(),mine=lc(m.sender)===lc(owner.name),canUnsend=mine&&!!m.mirrorId,d=popup(`<div class="ghp-message-actions"><header><b>${esc(APPS[appName].label)} Message</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><small class="ghp-action-sender">${esc(m.sender)} · ${esc(timeText(new Date(m.timeMs)))}</small>${mine?'<button class="ghp-popup-action" data-edit-app-message><i class="fa-solid fa-pen"></i><span><b>Edit</b><small>Updates the mirrored app message on both phones.</small></span></button>':''}${canUnsend?'<button class="ghp-popup-action danger" data-unsend-app-message><i class="fa-solid fa-delete-left"></i><span><b>Unsend for everyone</b><small>Removes this message from both app conversations.</small></span></button>':''}${ghImagePopupButton(m)}<button class="ghp-popup-action danger subtle" data-delete-local-app-message><i class="fa-solid fa-trash"></i><span><b>Delete from this phone</b><small>${mine?'Leaves the other phone copy intact.':`To edit or unsend, switch to ${esc(m.sender)}'s persona.`}</small></span></button></div>`);d.querySelector('[data-popup-close]').onclick=()=>d.close();ghBindImageActions(d,m);d.querySelector('[data-edit-app-message]')?.addEventListener('click',()=>{d.close();editAppMessagePopup(appName,tid,mid)});d.querySelector('[data-unsend-app-message]')?.addEventListener('click',()=>{if(confirm('Unsend this message for everyone?')){d.close();unsendAppMessageEverywhere(appName,tid,mid)}});d.querySelector('[data-delete-local-app-message]').onclick=()=>{d.close();deleteAppMessageLocal(appName,tid,mid)};
 }
 function cancelMessageLongPress(){if(longPressTimer)clearTimeout(longPressTimer);longPressTimer=null;longPressTarget=null;longPressPoint=null}
+function socialPhotoMenu(target){
+  const image=target?.closest?.('img.ghp-social-media,img[data-media-key],.ghp-photos img');
+  if(!image)return false;
+  const key=image.dataset.mediaKey||'';
+  const dialog=popup(`<div class="ghp-message-actions"><header><b>Photo</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><button class="ghp-popup-action" data-save-photo><i class="fa-solid fa-download"></i><span><b>Save to Photos</b><small>Share to Photos on iPhone, or download</small></span></button><button class="ghp-popup-action" data-image-tools><i class="fa-solid fa-wand-magic-sparkles"></i><span><b>Image tools</b><small>Edit metadata / regenerate</small></span></button></div>`);
+  dialog.querySelector('[data-popup-close]').onclick=()=>dialog.close();
+  dialog.querySelector('[data-save-photo]').onclick=async()=>{
+    dialog.close();if(key)await savePhoneImageToPhotos({type:'photo',mediaKey:key});
+    else if(image.currentSrc){try{const blob=await (await fetch(image.currentSrc)).blob();const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='greyhaven-photo.png';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000)}catch{globalThis.toastr?.warning?.('Image unavailable for export on this device.')}}
+  };
+  dialog.querySelector('[data-image-tools]').onclick=()=>{dialog.close();globalThis.GreyhavenPhoneImages?.openToolsForElement?.(image)};
+  return true;
+}
 function messagePressStart(e){
-  if(e.button!==undefined&&e.button!==0)return;const bubble=e.target.closest?.('.ghp-msg[data-message-id]');if(!bubble||e.target.closest?.('button,video,a,input,textarea,select'))return;cancelMessageLongPress();
+  if(e.button!==undefined&&e.button!==0)return;const bubble=e.target.closest?.('.ghp-msg[data-message-id]'),photo=e.target.closest?.('img.ghp-social-media,img[data-media-key],.ghp-photos img');if(!bubble&&!photo||e.target.closest?.('button,video,a,input,textarea,select'))return;cancelMessageLongPress();
+  if(!bubble&&photo){longPressPoint={x:Number(e.clientX||0),y:Number(e.clientY||0)};longPressTimer=setTimeout(()=>{cancelMessageLongPress();socialPhotoMenu(photo)},560);return}
   longPressTarget=bubble;longPressPoint={x:Number(e.clientX||0),y:Number(e.clientY||0)};longPressTimer=setTimeout(()=>{const b=longPressTarget;cancelMessageLongPress();if(b){const appName=b.dataset.messageApp;appName?appMessageActionPopup(appName,b.dataset.threadId,b.dataset.messageId):messageActionPopup(b.dataset.threadId,b.dataset.messageId)}},560);
 }
 function messagePressMove(e){if(!longPressTimer||!longPressPoint)return;const dx=Number(e.clientX||0)-longPressPoint.x,dy=Number(e.clientY||0)-longPressPoint.y;if(Math.hypot(dx,dy)>12)cancelMessageLongPress()}
 function messagePressEnd(){cancelMessageLongPress()}
-function messageContextMenu(e){const bubble=e.target.closest?.('.ghp-msg[data-message-id]');if(!bubble||e.target.closest?.('button,video,a,input,textarea,select'))return;e.preventDefault();cancelMessageLongPress();const appName=bubble.dataset.messageApp;appName?appMessageActionPopup(appName,bubble.dataset.threadId,bubble.dataset.messageId):messageActionPopup(bubble.dataset.threadId,bubble.dataset.messageId)}
+function messageContextMenu(e){const bubble=e.target.closest?.('.ghp-msg[data-message-id]');if(!bubble){if(e.target.closest?.('img.ghp-social-media,img[data-media-key],.ghp-photos img')){e.preventDefault();socialPhotoMenu(e.target)}return}if(e.target.closest?.('button,video,a,input,textarea,select'))return;e.preventDefault();cancelMessageLongPress();const appName=bubble.dataset.messageApp;appName?appMessageActionPopup(appName,bubble.dataset.threadId,bubble.dataset.messageId):messageActionPopup(bubble.dataset.threadId,bubble.dataset.messageId)}
 
 function threadMenuPopup(tid){
   const t=timeline(),th=t.threads[tid];if(!th)return;const d=popup(`<div><header><b>${esc(threadTitle(th,t))}</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><button class="ghp-popup-action danger" data-delete-conversation><i class="fa-solid fa-trash"></i><span><b>Delete Conversation</b><small>Delete this chat from this phone and stop using it as Phone AI context.</small></span></button></div>`);
@@ -2235,7 +2275,7 @@ function mediaComposerPopup(tid,kind){
 function findSocialPopup(appName){
   const label=APPS[appName]?.label||appName,own=currentIdentity(),d=popup(`<div><header><b>Find on ${esc(label)}</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><p class="ghp-popup-copy">Search an existing Greyhaven identity. This does not add their phone number or change another app.</p><input class="social-search" placeholder="Exact character name"><div class="social-search-result"></div></div>`),input=d.querySelector('.social-search'),result=d.querySelector('.social-search-result');
   d.querySelector('[data-popup-close]').onclick=()=>d.close();
-  const update=()=>{const q=lc(input.value),matches=q?identityDirectory().filter(x=>lc(x.name).includes(q)).slice(0,8):[];result.innerHTML=matches.map(who=>{const state=appRelationship(timeline(),who,appName,false),status=appName==='instagram'?(state?.following?'Following':state?.followedBy?'Follows you':'Not following'):appName==='snapchat'?(state?.friends?'Friends':state?.outgoingRequest?'Pending':state?.incomingRequest?'Added you':'Not friends'):(state?.friends?'Friends':state?.outgoingRequest?'Pending':state?.incomingRequest?'Requested you':'Not friends');return`<div class="ghp-row static">${avatarHtml(who)}<span><b>${esc(who.name)}</b><small>${esc(status)}</small></span><button data-social-result="${esc(who.id)}">${appName==='instagram'?(state?.following?'Unfollow':'Follow'):appName==='snapchat'?(state?.incomingRequest?'Accept':state?.friends?'Chat':state?.outgoingRequest?'Pending':'Add'):(state?.incomingRequest?'Accept':state?.friends?'Message':state?.outgoingRequest?'Pending':'Add')}</button></div>`}).join('')||(q?'<small class="ghp-muted">No matching existing identity.</small>':'')};
+  const update=()=>{const q=lc(input.value),matches=q?identityDirectory().filter(x=>lc(x.name).includes(q)).slice(0,8):[];result.innerHTML=matches.map(who=>{const state=appRelationship(timeline(),who,appName,false),status=appName==='instagram'?(state?.following?'Following':state?.followedBy?'Follows you':'Not following'):appName==='snapchat'?(state?.friends?'Friends':state?.outgoingRequest?'Pending':state?.incomingRequest?'Added you':'Not friends'):(state?.friends?'Friends':state?.outgoingRequest?'Pending':state?.incomingRequest?'Requested you':'Not friends');return`<div class="ghp-row static">${avatarHtml(who)}<span><b data-ghsocial-open-profile="${esc(who.id)}" data-ghsocial-open-app="${esc(appName)}" tabindex="0">${esc(who.name)}</b><small>${esc(status)}</small></span><button data-social-result="${esc(who.id)}">${appName==='instagram'?(state?.following?'Unfollow':'Follow'):appName==='snapchat'?(state?.incomingRequest?'Accept':state?.friends?'Chat':state?.outgoingRequest?'Pending':'Add'):(state?.incomingRequest?'Accept':state?.friends?'Message':state?.outgoingRequest?'Pending':'Add')}</button></div>`}).join('')||(q?'<small class="ghp-muted">No matching existing identity.</small>':'')};
   input.addEventListener('input',update);result.addEventListener('click',e=>{const b=e.target.closest('[data-social-result]');if(!b)return;const who=identityById(b.dataset.socialResult);if(!who||who.id===own?.id)return;const state=appRelationship(timeline(),who,appName,false);if(appName==='instagram')setInstagramFollowing(own.id,who.id,!state?.following);else if(appName==='snapchat'){if(state?.friends){d.close();return openAppConversation('snapchat',who.id)}setSnapchatFriendRequest(own.id,who.id,state?.incomingRequest?'accept':'request')}else{if(state?.friends){d.close();return openAppConversation('facebook',who.id)}setFacebookFriendRequest(own.id,who.id,state?.incomingRequest?'accept':'request')}update();render()});
 }
 function createSocialPostPopup(appName,kind='post'){
@@ -2382,51 +2422,43 @@ function legacyPhoneHistory(){
   return out.slice(-8);
 }
 function phonePromptSummary(){
-  if(!hasChat())return'';const snap=continuitySnapshot(),legacy=legacyPhoneHistory(),fresh=snap.fresh,planIds=new Set(fresh.filter(e=>e.persistent).map(e=>e.id)),plans=snap.plans.filter(e=>!planIds.has(e.id)),older=snap.history.filter(e=>!e.persistent).slice(-5),services=activeServicePromptSummary();
-  if(!fresh.length&&!plans.length&&!older.length&&!legacy.length&&!services)return'';
-  const sections=[],cp=snap.checkpoint||{};
-  if(services)sections.push(services);
-  if(fresh.length)sections.push(`FRESH PHONE EVENTS — occurred after the last rendered main-roleplay output:\n${fresh.map(continuityLine).join('\n')}`);
-  if(plans.length)sections.push(`OLDER PHONE PLANS / COMMITMENTS — historical but may still matter if the roleplay has not resolved or cancelled them:\n${plans.map(continuityLine).join('\n')}`);
-  if(older.length)sections.push(`OLDER PHONE HISTORY — past facts only; do NOT treat transient locations/activities here as current:\n${older.map(continuityLine).join('\n')}`);
-  if(!snap.fresh.length&&!snap.plans.length&&legacy.length)sections.push(`LEGACY PHONE HISTORY FROM BEFORE THE CHRONOLOGY LEDGER — chronology is uncertain, so use only as past conversational facts, not as current location/activity:\n${legacy.join('\n')}`);
-  const body=sections.join('\n\n').slice(-8200);
-  return`[Greyhaven Phone — chronological phone ↔ roleplay continuity.]
-Current fictional time: ${continuityTime(snap.nowMs)}.
-Last rendered main-RP checkpoint: ${cp.roleplayMs?continuityTime(cp.roleplayMs):'not established yet'}.
-
-${body}
-
-STRICT CHRONOLOGY RULES:
-- Fresh phone events really happened after the last rendered main-RP output and may advance a participant's state. Example: if Aurora later texted that she got into the bath, the next RP output should not replay her getting out of bed first.
-- The newest explicit message in the CURRENT SillyTavern roleplay still wins if it contradicts Phone. Do not fight the live scene.
-- Once a newer main-RP character output happens, older transient phone states are history. Never keep someone stuck in an old bathtub, bed, car, workplace, etc. just because it is still the latest message in their phone thread.
-- Use RP timestamps sensibly: a transient activity from hours ago is not automatically still happening.
-- Plans/commitments can survive across later turns when they are still unresolved, but later cancellation, completion, time passage, Greyhaven Life state, or explicit RP overrides them.
-- Private messages/calls/media are knowledge only for their participants unless somebody shares them. They may still affect a participant's actions without making the contents public.
-- Media is known only through its written visual description.
-- Active Domino's and Uber state above is authoritative: an arrival belongs to exactly one order or ride, and a completed/cancelled service must never arrive or run again. Do not expose internal service identifiers in visible roleplay.
-- Do not mechanically recap phone history; use it only when it naturally affects the scene.`;
+  if(!hasChat())return'';
+  const speaker=identifyReplySpeaker(ctx());
+  if(!speaker)return''; // Fail closed: group speaker cannot be determined safely.
+  const who=identityForName(speaker,{create:false});
+  if(!who?.id)return'';
+  const phone=ownedPhone(metadataRoot(),who.id,speaker);
+  const nowMs=now().getTime();
+  const sequences=Object.fromEntries((metadataRoot()?.continuity?.events||[]).filter(e=>e?.mirrorId).map(e=>[e.mirrorId,e.seq]));
+  const chronological=collectOwnedChronology(phone,{ownerId:who.id,ownerName:speaker,maxEntries:105,maxChars:10500,nowMs,sequenceByMirror:sequences});
+  const snap=continuitySnapshot();
+  const outstanding=snap.plans.filter(e=>e.persistent).slice(-8).map(continuityLine);
+  const services=''; // Global service state belongs to a separate scoped/world system.
+  if(!chronological.length&&!outstanding.length)return'';
+  return `[Greyhaven Phone — PRIVATE MEMORY OF ${speaker.toUpperCase()} ONLY.]
+  Historical data is read live from ${speaker}'s existing phone. This is NOT the group-wide phone history.
+  Events are in ascending fictional time, with real-time tie-breaking for frozen-clock messages.
+  Recent phone conversations across iMessage, Instagram, Snapchat, Facebook, OnlyFans and Dark Web:
+  ${chronological.join('\n')}
+  ${outstanding.length?'\nUnresolved possible commitments (not guaranteed to happen):\n'+outstanding.join('\n'):''}
+  PRIVACY: The selected speaker knows only THEIR phone records, events personally witnessed, and disclosures they actually received. Do not reveal another person's private phone messages. Never infer that a plan happened solely because it was proposed. Latest explicit roleplay overrides outdated phone states. Do not quote the phone log unnecessarily.`;
 }
+
 function markRoleplayCheckpointIfAdvanced(){
   const box=continuityRoot(),c=ctx();if(!box||!Array.isArray(c?.chat)||!c.chat.length)return;const len=c.chat.length,last=c.chat.at(-1),cp=box.state.rpCheckpoint||{};
   if(last?.is_user||len===Number(cp.chatLength||0))return;markRoleplayCheckpoint();
 }
 
 function identityPromptSummary(){
-  if(!hasChat())return'';ensureAllIdentities();const identities=new Map(),add=x=>{if(x?.id&&validPhoneNumber(x.phoneNumber))identities.set(x.id,x)};add(currentIdentity());for(const descriptor of chatDescriptors())add(identityForName(descriptor.name,{create:true}));
-  const latest=latestUserText();for(const identity of Object.values(settingsRoot().identities||{})){const name=norm(identity?.name);if(!name)continue;const q=name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');if(new RegExp(`(^|[^\\p{L}\\p{N}])${q}([^\\p{L}\\p{N}]|$)`,'iu').test(latest))add(normalizeIdentity(identity,identity.id))}
-  const rows=[...identities.values()].slice(0,14).map(x=>`${x.name}: ${x.phoneNumber}`);if(!rows.length)return'';
-  return`[Greyhaven Phone — authoritative identity and phone-number facts.]
-${rows.join('\n')}
-
-RULES:
-- These exact 9-digit values are persistent Greyhaven phone numbers. A person always remembers their own number and must use it if directly asked; never invent a different number.
-- Do not invent, expand, or guess surnames. Preserve the exact character names above.
-- Knowing or meeting somebody does not mean possessing their number. A person may reveal their own number or explicitly exchange numbers when it fits the relationship and scene.
-- An explicit mutual number exchange can use a hidden GH_ACTION contact.exchange marker; merely mentioning, following, or meeting somebody cannot.
-- Do not expose technical identity IDs or action syntax in visible roleplay.`;
+  if(!hasChat())return'';
+  const speaker=identifyReplySpeaker(ctx());if(!speaker)return'';
+  const who=identityForName(speaker,{create:false});if(!who)return'';
+  const phone=ownedPhone(metadataRoot(),who.id,speaker);
+  const rows=[`${who.name}: ${who.phoneNumber} (own number)`];
+  for(const c of Object.values(phone?.contacts||{}))if(c?.saved===true&&validPhoneNumber(c.phoneNumber))rows.push(`${c.name}: ${c.phoneNumber} (saved contact)`);
+  return `[Greyhaven Phone — phone numbers known to ${speaker} only.]\n${rows.slice(0,45).join('\n')}\nNever invent numbers or assume following someone shares their phone number.`;
 }
+
 function updatePrompt(){
   const c=ctx();if(!c?.setExtensionPrompt)return;const summary=hasChat()?phonePromptSummary():'',identities=hasChat()?identityPromptSummary():'';
   try{c.setExtensionPrompt(GHP_PROMPT_KEY,summary,GHP_PROMPT_POSITION_IN_CHAT,1,false,GHP_PROMPT_ROLE_SYSTEM);c.setExtensionPrompt(GHP_IDENTITY_PROMPT_KEY,identities,GHP_PROMPT_POSITION_IN_CHAT,1,false,GHP_PROMPT_ROLE_SYSTEM)}catch(e){console.error(`[${GHP_MODULE}] setExtensionPrompt`,e)}
@@ -2448,13 +2480,13 @@ function observeMenu(){if(menuObserver)return;const m=document.querySelector('#e
 function onChat(){const k=chatIdentity();if(k===currentChat)return;currentChat=k;app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;if(hasChat()){timeline();seedContacts(true);reconcileServiceEvents()}if(!document.querySelector('#ghp-overlay')?.hidden)render()}
 function bind(){
   if(bound)return;const c=ctx();if(!c?.eventSource||!c.eventTypes)return;const b=(k,fn)=>{const e=c.eventTypes[k];if(e)c.eventSource.on(e,fn)};
-  b('CHAT_CHANGED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('CHAT_CREATED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('PERSONA_CHANGED',()=>setTimeout(()=>{app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;timeline();seedContacts(true);reconcileServiceEvents();updatePrompt();render()},50));b('GENERATION_STARTED',()=>updatePrompt());b('GROUP_UPDATED',()=>setTimeout(()=>seedContacts(true),50));b('CHARACTER_EDITED',()=>setTimeout(()=>{seedContacts(true);installCharacterPhoneEditor()},50));b('CHARACTER_EDITOR_OPENED',()=>setTimeout(installCharacterPhoneEditor,30));b('MESSAGE_SENT',()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()});b('CHARACTER_MESSAGE_RENDERED',()=>setTimeout(()=>{markRoleplayCheckpointIfAdvanced();reconcileServiceEvents();if(!document.querySelector('#ghp-overlay')?.hidden)render()},20));bound=true;
+  b('CHAT_CHANGED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('CHAT_CREATED',()=>setTimeout(()=>{onChat();updatePrompt()},30));b('PERSONA_CHANGED',()=>setTimeout(()=>{app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=!profile().lockScreen;timeline();seedContacts(true);reconcileServiceEvents();updatePrompt();render()},50));b('GENERATION_STARTED',()=>updatePrompt());b('GENERATION_AFTER_COMMANDS',()=>updatePrompt());b('GROUP_UPDATED',()=>setTimeout(()=>seedContacts(true),50));b('CHARACTER_EDITED',()=>setTimeout(()=>{seedContacts(true);installCharacterPhoneEditor()},50));b('CHARACTER_EDITOR_OPENED',()=>setTimeout(installCharacterPhoneEditor,30));b('MESSAGE_SENT',()=>{if(!document.querySelector('#ghp-overlay')?.hidden)render()});b('CHARACTER_MESSAGE_RENDERED',()=>setTimeout(()=>{markRoleplayCheckpointIfAdvanced();reconcileServiceEvents();if(!document.querySelector('#ghp-overlay')?.hidden)render()},20));bound=true;
 }
 function subscribeLife(){try{lifeUnsub?.()}catch{}lifeUnsub=null;if(typeof globalThis.GreyhavenLife?.subscribe==='function')lifeUnsub=globalThis.GreyhavenLife.subscribe(()=>{const changed=hasChat()?reconcileServiceEvents():false;if(changed||!document.querySelector('#ghp-overlay')?.hidden)render()})}
 function startClock(){clearInterval(clockTimer);clockTimer=setInterval(()=>{const changed=hasChat()?reconcileServiceEvents():false,o=document.querySelector('#ghp-overlay');if(o?.hidden)return;if(changed)return render();o.querySelectorAll('.ghp-status>span:first-child').forEach(x=>x.textContent=timeText());o.querySelectorAll('.ghp-lock h1').forEach(x=>x.textContent=timeText())},15000)}
 function expose(){
   globalThis.GreyhavenPhone={
-    version:GHP_VERSION,open:openPhone,close:closePhone,refresh:refreshPhone,refreshMarketplace,refreshOnlyFans,refreshDarkWeb,
+    version:GHP_VERSION,getActiveRoleplaySpeaker:()=>identifyReplySpeaker(ctx()),unlock:()=>{unlocked=true;app='';appView='';render()},open:openPhone,close:closePhone,refresh:refreshPhone,refreshMarketplace,refreshOnlyFans,refreshDarkWeb,
     getProfile:()=>clone(profile()),getTimeline:()=>clone(timeline(false)),getMarketplace:()=>clone(sharedMarketplace()),getServices:()=>clone(sharedServices()),getOnlyFansState:()=>clone(sharedOnlyFans()),getDarkWeb:()=>clone(sharedDarkWeb()),getGlobalAppRoles:()=>clone(globalAppRoles()),
     getContacts:()=>{const t=timeline(false);return clone(t?t.contactOrder.map(k=>t.contacts[k]).filter(Boolean):[])},getActivePersona:()=>clone(persona()),getContinuitySnapshot:()=>clone(continuitySnapshot()),getPromptSummary:()=>phonePromptSummary(),getIdentityPromptSummary:()=>identityPromptSummary(),
     listIdentities:()=>clone(Object.values(ensureAllIdentities())),getIdentityById:key=>clone(identityById(key)),getIdentityByName:name=>clone(identityForName(name,{create:true})),getIdentityByNumber:number=>clone(identityByNumber(number)),getCurrentIdentity:()=>clone(currentIdentity()),
@@ -2462,6 +2494,8 @@ function expose(){
     setIdentityPhoneNumber:(identityId,number)=>{const updated=updateIdentityNumber(identityId,number);propagateIdentityNumber(updated);return clone(updated)},saveContactForOwner:(owner,target,options)=>saveContactForOwner(owner,target,options),seedContacts:()=>clone(seedContacts(true)),removeContact,
     actionBus:{dispatch:(action,options)=>globalThis.GreyhavenLife?.dispatchWorldAction?.(action,options)||false},
     apps:{
+      engageLatestPost:(actor,target,app,action,text='')=>{const who=resolveIdentityRef(actor,false),peer=resolveIdentityRef(target,false);if(!who||!peer)return false;const own=phoneForIdentity(who,false)?.timeline;if(!own)return false;const latest=(appStore(own,app)?.posts||[]).filter(p=>p.identityId===peer.id).sort((a,b)=>Number(b.timeMs||0)-Number(a.timeMs||0))[0];return latest?updateSharedSocialEngagement(app,'post',latest.id,{actor:who,action,text}):false},
+      publishAsActor:(actor,app,kind,row)=>publishAppItem(app,kind,{...row,id:`ghp-auto:${hashString(JSON.stringify([actor,app,kind,row]))}`,timeMs:now().getTime(),type:'photo'},actor),
       sendMessage:mirrorAppMessage,editMessage:editMirroredAppMessage,unsendMessage:unsendAppMessageEverywhere,deleteMessageLocal:deleteAppMessageLocal,followInstagram:setInstagramFollowing,removeInstagramFollower,requestSnapchat:setSnapchatFriendRequest,requestFacebook:setFacebookFriendRequest,engagePost:updateSharedSocialEngagement,publishItem:publishAppItem,
       createMarketplaceListing:data=>{const market=sharedMarketplace(),row=addMarketplaceListing(market,data,{ownerListing:true});if(!row)return null;market.listings.unshift(row);saveSharedMarketplace(market);return clone(row)},closeMarketplaceListing:closeOwnedMarketplaceListing,
       setGlobalRole:setGlobalServiceRole,setOnlyFansCreator,setOnlyFansSubscription,publishOnlyFansPost:publishOnlyFansPostFor,updateDominosCart,placeDominosOrder,setDominosOrderStatus,requestUberRide,setUberRideStatus,reconcileServices:reconcileServiceEvents,

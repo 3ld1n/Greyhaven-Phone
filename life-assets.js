@@ -2513,8 +2513,10 @@ function openLife(appName = 'home', attempt = 0) {
 }
 
 function closeLife() {
+  const wasClock=lifeOpen&&lifeView.app==='clock';
   lifeOpen = false;
   lifeView = { app: 'home', tab: '', detailId: '' };
+  if(wasClock){try{globalThis.GreyhavenPhone?.unlock?.()}catch{}}
   syncLifeFolderBlur();
   qs('#ghla-layer')?.remove();
 }

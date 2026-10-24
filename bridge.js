@@ -12,8 +12,8 @@ import { tidyPhoneText } from './phone-reply-format.mjs';
  * - Greyhaven Life one-time plans inside Calendar
  */
 
-const BRIDGE_VERSION = '2.12.0';
-const CORE_VERSION = '2.12.0';
+const BRIDGE_VERSION = '2.13.0';
+const CORE_VERSION = '2.13.0';
 const PHONE_META_KEY = 'greyhavenPhone';
 const MAX_PROCESSED = 320;
 const DEFAULT_RELAY_TOKENS = 420;
@@ -557,7 +557,8 @@ async function materializeWorldEvent(event,{allowRelay=true}={}) {
     const from = norm(event.actor || event.from);
     const to = norm(event.target || event.to);
     const known = name => !!(findCharacter(name) || lc(ctx()?.name1) === lc(name) || globalThis.GreyhavenPhone?.getIdentityByName?.(name));
-    if (!from || !to || lc(from) === lc(to) || !known(from) || !known(to)) {
+    const broadcast=['instagram.post','instagram.story','snapchat.story','facebook.post'].includes(type);
+    if (!from || (!broadcast&&!to) || (to&&lc(from)===lc(to)) || !known(from) || (to&&!known(to))) {
         if (eid) markProcessed(eid);
         return;
     }
@@ -583,6 +584,16 @@ async function materializeWorldEvent(event,{allowRelay=true}={}) {
             );
             relayCandidate = !!result.delivered;
         }
+    } else if (broadcast) {
+        const app=type.split('.')[0],kind=type.endsWith('story')?'story':'post';
+        const visual=norm(event.data?.visual||event.data?.description||''),caption=norm(event.data?.caption||''),text=norm(event.data?.text||'');
+        if(app==='snapchat'||kind==='story')globalThis.GreyhavenPhone?.apps?.publishAsActor?.(from,app,kind,{visual,caption,text});
+        else if(!globalThis.GreyhavenSocialStudio?.publishPost?.(from,app,{visual,caption,text}))globalThis.GreyhavenPhone?.apps?.publishAsActor?.(from,app,kind,{visual,caption,text});
+    } else if (['instagram.like','instagram.comment','facebook.like','facebook.comment'].includes(type)) {
+        const app=type.split('.')[0],action=type.endsWith('comment')?'comment':'like';
+        globalThis.GreyhavenPhone?.apps?.engageLatestPost?.(from,to,app,action,norm(event.data?.text||event.text||''));
+    } else if (type === 'snapchat.remove') {
+        globalThis.GreyhavenPhone?.apps?.requestSnapchat?.(from,to,'remove',{notify:false});
     } else if (type === 'call.place') {
         mirrorCall(from,to,Number(event.roleplayMs||rpNowMs()),event.id);
     } else if (type === 'contact.block') {
@@ -921,7 +932,7 @@ function reconcileExistingWorldEvents() {
         events = globalThis.GreyhavenLife?.getWorldEvents?.({limit:80}) || [];
     } catch {}
     for (const e of events) {
-        if (!['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange','instagram.follow','instagram.unfollow','snapchat.add','snapchat.accept','snapchat.decline','facebook.friend.request','facebook.friend.accept','facebook.friend.decline'].includes(norm(e?.type))) continue;
+        if (!['message.send','media.send','call.place','contact.block','contact.unblock','contact.add','contact.exchange','instagram.follow','instagram.unfollow','snapchat.add','snapchat.accept','snapchat.decline','facebook.friend.request','facebook.friend.accept','facebook.friend.decline','snapchat.remove','instagram.like','instagram.comment','facebook.like','facebook.comment','instagram.post','instagram.story','snapchat.story','facebook.post'].includes(norm(e?.type))) continue;
         if (e.id && wasProcessed(e.id)) continue;
         // Reconciliation should materialize old RP actions but never spend tokens
         // merely because the extension/page was reloaded.

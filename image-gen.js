@@ -1114,7 +1114,8 @@ function augmentGeneratedTools(maps) {
     const item=inferGeneratedItemForContainer(container,maps);
     if (!item?.mediaKey) continue;
     container.classList.add('ghimg-tools-host');
-    container.appendChild(generatedToolsButton(item));
+    // AI controls are accessible through the picture's long-press menu instead.
+    container.dataset.ghimgToolsKey=item.key;
   }
 }
 
@@ -1438,6 +1439,8 @@ function bindSillyTavernEvents() {
 function exposeApi() {
   globalThis.GreyhavenPhoneImages = {
     version:VERSION,
+    openToolsForElement(element){const item=inferGeneratedItemForContainer(element?.closest?.('.ghp-msg.has-media,.ghp-feed article,.ghp-of-post,.ghsocial-post-card')||element,registryMaps(false));if(item)openMediaTools(item);else globalThis.toastr?.info?.('No AI metadata is registered for this photo.')},
+    openToolsForMessage(message){const map=registryMaps(false);const item=map.items?.find?.(x=>x.mediaKey&&x.mediaKey===message?.mediaKey);if(item)openMediaTools(item);else globalThis.toastr?.info?.('No AI metadata is registered for this photo.')},
     openReferenceManager,
     getSettings:()=>clone(imageSettings()),
     getReferencePack:identityId=>clone(referencePack(identityId)),

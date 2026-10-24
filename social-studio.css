@@ -51,3 +51,8 @@
 .ghsocial-of-guide textarea[data-ghsocial-of-main]{min-height:260px;font-size:11px;line-height:1.5}
 .ghsocial-of-controls{display:flex;gap:8px}.ghsocial-of-controls button{flex:1;min-width:0;font-size:11px;padding:6px}
 @media(max-width:370px){#ghsocial-profile-page .ghsocial-profile-feed.instagram{grid-template-columns:repeat(3,minmax(0,1fr))}#ghsocial-profile-page .ghsocial-profile-stats b{font-size:15px}}
+
+/* v2.13 native page: screen-fit, respect safe areas and current iPhone device corners. */
+#ghsocial-profile-page{inset:0!important;border-radius:inherit!important;overflow:hidden!important}
+#ghsocial-profile-page .ghsocial-native-header{margin-top:0!important;padding-top:max(12px,env(safe-area-inset-top))!important;height:auto!important;min-height:65px!important;box-sizing:content-box}
+#ghsocial-profile-page .ghsocial-native-main{padding-bottom:max(40px,env(safe-area-inset-bottom))!important}
