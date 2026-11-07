@@ -4,7 +4,7 @@ import { identifyReplySpeaker, ownedPhone, collectOwnedChronology, scopeContinui
 import { tidyPhoneText, limitPhonePackets } from './phone-reply-format.mjs';
 
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '2.13.0';
+const GHP_VERSION = '2.15.0';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';
@@ -24,6 +24,7 @@ const APPS = {
   instagram:{label:'Instagram',icon:'fa-brands fa-instagram',tint:'#c837ab'},
   snapchat:{label:'Snapchat',icon:'fa-brands fa-snapchat',tint:'#f6df36'},
   facebook:{label:'Facebook',icon:'fa-brands fa-facebook-f',tint:'#1877f2'},
+  circle:{label:'Circle',icon:'fa-solid fa-users',tint:'#8b5cf6'},
   dominos:{label:"Domino's",icon:'fa-solid fa-pizza-slice',tint:'#d51f35'},
   uber:{label:'Uber',icon:'fa-solid fa-car-side',tint:'#202126'},
   onlyfans:{label:'OnlyFans',icon:'fa-solid fa-lock-open',tint:'#00a8e8'},
@@ -58,7 +59,7 @@ const DEFAULT_PROFILE = {
   recentChars:12000,
   responseTokens:1600,
   crossAppMemoryEnabled:true,
-  apps:{messages:true,phone:true,contacts:true,instagram:true,snapchat:true,facebook:true,dominos:false,uber:false,onlyfans:false,darkweb:false,calendar:true,photos:true,notes:true,mail:false,settings:true}
+  apps:{messages:true,phone:true,contacts:true,instagram:true,snapchat:true,facebook:true,circle:true,dominos:false,uber:false,onlyfans:false,darkweb:false,calendar:true,photos:true,notes:true,mail:false,settings:true}
 };
 
 const DOMINOS_MENU = [
@@ -970,14 +971,14 @@ async function refreshPhone(){
   refreshBusy=true;islandText='Refreshing phone…';islandIcon='fa-solid fa-satellite-dish';render();
   try{
     seedContacts(true);
-    const t=timeline(),p=profile(),owner=persona(),w=world(),refreshable=['messages','phone','instagram','snapchat','facebook','onlyfans','mail'],enabledApps=refreshable.filter(key=>p.apps[key]),enabledSocial=enabledApps.filter(key=>['instagram','snapchat','facebook'].includes(key)),rawCandidates=refreshIdentityCandidates(t,w,p.apps),candidates=rawCandidates.map(row=>{const copy=clone(row);if(copy.sharedRelationship?.apps)copy.sharedRelationship.apps=Object.fromEntries(Object.entries(copy.sharedRelationship.apps).filter(([key])=>enabledApps.includes(key)||key==='messages'&&enabledApps.includes('phone')));if(copy.sharedRelationship?.latestInteraction&&!enabledApps.includes(copy.sharedRelationship.latestInteraction.app)&&!(copy.sharedRelationship.latestInteraction.app==='messages'&&p.apps.phone))delete copy.sharedRelationship.latestInteraction;if(!p.apps.messages&&!p.apps.phone&&copy.sharedRelationship)delete copy.sharedRelationship.knownContactInfo;return copy}),appContext=buildInstalledAppContext(t,p,candidates),allowedLines=[],relationshipLabels=[...(p.apps.messages||p.apps.phone?['phone-number messaging']:[]),...enabledSocial.map(key=>APPS[key].label),...(p.apps.onlyfans?['OnlyFans subscriptions']:[])];
-    if(p.apps.messages)allowedLines.push('- messages: message.receive');if(p.apps.phone)allowedLines.push('- phone: phone.call');if(p.apps.instagram)allowedLines.push('- instagram: instagram.follow, instagram.unfollow, instagram.post, instagram.story, instagram.dm, instagram.story.view, instagram.post.like, instagram.post.comment');if(p.apps.snapchat)allowedLines.push('- snapchat: snapchat.add, snapchat.accept, snapchat.decline, snapchat.snap, snapchat.story, snapchat.npc.request');if(p.apps.facebook)allowedLines.push('- facebook: facebook.friend.request, facebook.friend.accept, facebook.friend.decline, facebook.post, facebook.post.like, facebook.post.comment, facebook.messenger');if(p.apps.onlyfans)allowedLines.push('- onlyfans: onlyfans.post, onlyfans.dm, onlyfans.subscribe, onlyfans.npc.subscribe');if(p.apps.mail)allowedLines.push('- mail: mail.receive');
-    if(!enabledApps.length){globalThis.toastr?.warning?.('No refresh-capable apps are installed.');return}if(!candidates.length&&!p.apps.mail&&!p.apps.snapchat&&!p.apps.onlyfans){globalThis.toastr?.warning?.('No relevant phone identities yet.');return}
+    const t=timeline(),p=profile(),owner=persona(),w=world(),refreshable=['messages','phone','instagram','snapchat','facebook','onlyfans','mail','circle'],enabledApps=refreshable.filter(key=>p.apps[key]),enabledSocial=enabledApps.filter(key=>['instagram','snapchat','facebook'].includes(key)),rawCandidates=refreshIdentityCandidates(t,w,p.apps),candidates=rawCandidates.map(row=>{const copy=clone(row);if(copy.sharedRelationship?.apps)copy.sharedRelationship.apps=Object.fromEntries(Object.entries(copy.sharedRelationship.apps).filter(([key])=>enabledApps.includes(key)||key==='messages'&&enabledApps.includes('phone')));if(copy.sharedRelationship?.latestInteraction&&!enabledApps.includes(copy.sharedRelationship.latestInteraction.app)&&!(copy.sharedRelationship.latestInteraction.app==='messages'&&p.apps.phone))delete copy.sharedRelationship.latestInteraction;if(!p.apps.messages&&!p.apps.phone&&copy.sharedRelationship)delete copy.sharedRelationship.knownContactInfo;return copy}),appContext=buildInstalledAppContext(t,p,candidates),allowedLines=[],relationshipLabels=[...(p.apps.messages||p.apps.phone?['phone-number messaging']:[]),...enabledSocial.map(key=>APPS[key].label),...(p.apps.onlyfans?['OnlyFans subscriptions']:[])];
+    if(p.apps.messages)allowedLines.push('- messages: message.receive');if(p.apps.phone)allowedLines.push('- phone: phone.call');if(p.apps.instagram)allowedLines.push('- instagram: instagram.follow, instagram.unfollow, instagram.post, instagram.story, instagram.dm, instagram.story.view, instagram.post.like, instagram.post.comment');if(p.apps.snapchat)allowedLines.push('- snapchat: snapchat.add, snapchat.accept, snapchat.decline, snapchat.snap, snapchat.story, snapchat.npc.request');if(p.apps.facebook)allowedLines.push('- facebook: facebook.friend.request, facebook.friend.accept, facebook.friend.decline, facebook.post, facebook.post.like, facebook.post.comment, facebook.messenger');if(p.apps.onlyfans)allowedLines.push('- onlyfans: onlyfans.post, onlyfans.dm, onlyfans.subscribe, onlyfans.npc.subscribe');if(p.apps.mail)allowedLines.push('- mail: mail.receive');if(p.apps.circle)allowedLines.push('- circle: circle.dm (must include npcId and sender)');
+    if(!enabledApps.length){globalThis.toastr?.warning?.('No refresh-capable apps are installed.');return}if(!candidates.length&&!p.apps.mail&&!p.apps.snapchat&&!p.apps.onlyfans&&!globalThis.GreyhavenCircle?.getRefreshContext?.()?.length){globalThis.toastr?.warning?.('No relevant phone identities yet.');return}
     const minEvents=p.activityLevel==='busy'?Math.min(p.maxNewEvents,Math.max(3,Math.ceil(p.maxNewEvents*.6))):p.activityLevel==='normal'?Math.min(1,p.maxNewEvents):0;
     const systemPrompt=`You simulate ONE unified background refresh for a fictional Greyhaven Phone inside an ongoing roleplay.
 Return ONLY one valid JSON object. No markdown and no commentary.
 Use Greyhaven Life as authoritative current time/world state when available.
-Use only ALLOWED IDENTITIES for named existing characters.${p.apps.snapchat?' snapchat.npc.request may introduce one provisional account using ONE first name only.':''}
+Use only ALLOWED IDENTITIES for named existing characters, except circle.dm which must use the exact allowed NPC ID and name from CIRCLE CONNECTIONS.${p.apps.snapchat?' snapchat.npc.request may introduce one provisional account using ONE first name only.':''}
 IDENTITY LOCK: every generated sender is that named contact, never the PHONE OWNER and never another contact. Do not swap names, biographies, relationships, homes, jobs or possessions between people.
 Never invent, expand, or guess surnames. Preserve every existing name exactly.${p.apps.snapchat?' A provisional Snapchat account must have one first name such as Daniel, Sara or Leo.':''}
 Every message should sound like that contact's own private texting voice, using their character/personality and existing thread tail. Avoid generic formal customer-service/therapy language. Slang, lowercase, abbreviations, emojis, teasing, profanity, short double-texts and expressive punctuation are allowed when they fit that specific person; do not force the same style on everyone.
@@ -995,8 +996,9 @@ ${p.apps.snapchat?'An established or popular account may occasionally receive sn
 ${p.apps.onlyfans?'OnlyFans creators are explicitly assigned adults. A creator may post, receive a plausible subscription, or continue an existing private thread. Subscription never forces sexual compliance. onlyfans.npc.subscribe must use one first name only. Never assign a new creator during Refresh.':''}
 NORMAL should normally create at least ${minEvents} event. BUSY must create at least ${minEvents} unless installed apps prevent it. QUIET may return zero.
 Maximum total events: ${p.maxNewEvents}.
+${p.apps.circle?'Circle is enabled: circle.dm can only come from already-mutual matching NPC IDs listed in the CIRCLE CONNECTIONS context. Circle NPCs are not ordinary phone contacts. Replies can be playful, cautious, or absent. Include a Circle event only when a specific NPC has a reason to reach out; do not invent meetings, romance or private memories. For a Circle media message use mediaType photo/video and mediaDescription, never generate or attach any actual file.':''}
 Required JSON shape:
-{"summary":"short note","events":[{"type":"event.type","from":"Exact Name","to":"${owner.name}","text":"","mediaType":"","mediaDescription":""}]}
+{"summary":"short note","events":[{"type":"event.type","from":"Exact Name","to":"${owner.name}","text":"","mediaType":"","mediaDescription":"","npcId":"only for circle.dm: exact allowed NPC ID"}]}
 Allowed event types are limited by installed apps:
 ${allowedLines.join('\n')}
 ${p.apps.snapchat?'For snapchat.npc.request include firstName and a short accountBio. Never include a surname.':''}
@@ -1031,6 +1033,9 @@ ${JSON.stringify(candidates)}
 INSTALLED-APP STATE ONLY:
 ${JSON.stringify(appContext)}
 
+CIRCLE CONNECTIONS (private to owner in this chat; only npcId below may send circle.dm):
+${JSON.stringify(p.apps.circle?globalThis.GreyhavenCircle?.getRefreshContext?.()||[]:[])}
+
 GREYHAVEN LIFE WORLD:
 ${JSON.stringify({scene:w.scene,people:w.people,snapshot:w.snapshot,snapshotStatus:w.status})}
 
@@ -1042,8 +1047,8 @@ ${JSON.stringify(recentPhone(p.apps))}
 
 Generate plausible NEW activity now. Respect each person's own location evidence.`;
     const raw=await generate({prompt,systemPrompt,responseLength:p.responseTokens});if(!originIsCurrent(origin))return;
-    const result=normalizeRefreshResult(raw),after=applyRefresh(result);
-    globalThis.toastr?.success?.(after?`Phone refreshed · ${after} new event${after===1?'':'s'}`:'Phone refreshed · nothing new this time');
+    const result=normalizeRefreshResult(raw);const circleEvents=result.events.filter(e=>e.type==='circle.dm');result.events=result.events.filter(e=>e.type!=='circle.dm');const after=applyRefresh(result);const circleAdded=p.apps.circle!==false?Number(globalThis.GreyhavenCircle?.applyPhoneEvents?.(circleEvents)||0):0;const total=after+circleAdded;
+    globalThis.toastr?.success?.(total?`Phone refreshed · ${total} new event${total===1?'':'s'}`:'Phone refreshed · nothing new this time');
   }catch(e){
     console.error(`[${GHP_MODULE}] refresh`,e);
     globalThis.toastr?.error?.(`Phone refresh failed: ${e?.message||e}`)
@@ -1781,7 +1786,7 @@ function stale(){
   return{stale:!t?.refresh?.lastAt||d>=profile().staleAfterMessages||timeStale,newMessages:d,elapsedRoleplayMinutes:Math.floor(elapsed)};
 }
 function wallpaper(){const p=profile();if(p.wallpaperUrl)return`background-image:linear-gradient(rgba(5,6,10,.12),rgba(5,6,10,.28)),url("${String(p.wallpaperUrl).replace(/["'()]/g,'')}");`;return`background:${WALLPAPERS[p.wallpaper]||WALLPAPERS.aurora};`}
-function appUnread(a){const t=timeline(false);if(!t)return 0;if(a==='messages')return Object.values(t.threads).reduce((s,th)=>s+unread(th),0);if(a==='mail')return t.mail.filter(x=>!x.read).length;return t.notifications.filter(x=>x.app===a&&!x.read).length}
+function appUnread(a){if(a==='circle')return Number(globalThis.GreyhavenCircle?.getUnreadCount?.()||0);const t=timeline(false);if(!t)return 0;if(a==='messages')return Object.values(t.threads).reduce((s,th)=>s+unread(th),0);if(a==='mail')return t.mail.filter(x=>!x.read).length;return t.notifications.filter(x=>x.app===a&&!x.read).length}
 function icon(a,dock=false){const x=APPS[a],b=appUnread(a);return`<button class="ghp-app-icon ${dock?'is-dock':''}" data-open-app="${a}"><span class="ghp-app-square" style="--t:${x.tint}"><i class="${x.icon}"></i>${b?`<b class="ghp-badge">${b>99?'99+':b}</b>`:''}</span>${dock?'':`<small>${esc(x.label)}</small>`}</button>`}
 function statusBar(){return`<div class="ghp-status"><span>${esc(timeText())}</span><button class="ghp-island ${islandText?'wide':''}" type="button"><i class="${islandIcon||'fa-solid fa-circle'}"></i><em>${esc(islandText)}</em></button><span><i class="fa-solid fa-signal"></i><i class="fa-solid fa-wifi"></i><i class="fa-solid fa-battery-three-quarters"></i></span></div>`}
 function notifCards(){const t=timeline(),p=profile(),n=t.notifications.filter(x=>!x.read&&p.apps[x.app]!==false).slice(0,3);return n.length?n.map(x=>`<button class="ghp-lock-notif" data-notif="${esc(x.id)}"><i class="${APPS[x.app]?.icon||'fa-solid fa-bell'}"></i><span><b>${esc(x.title)}</b><small>${p.notificationPreviews?esc(x.text):'Notification'}</small></span><time>${esc(rel(x.timeMs))}</time></button>`).join(''):`<div class="ghp-lock-empty">No new notifications</div>`}
@@ -2027,7 +2032,7 @@ function goBack(){
 
 async function openPhone(){if(!hasChat()){globalThis.toastr?.warning?.('Open a SillyTavern chat first.');return}buildOverlay();seedContacts(true);reconcileServiceEvents();unlocked=!profile().lockScreen;app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};const o=document.querySelector('#ghp-overlay');o.hidden=false;document.body.classList.add('ghp-open');render();if(profile().refreshMode==='stale-open'&&stale().stale)setTimeout(refreshPhone,250)}
 function closePhone(){const o=document.querySelector('#ghp-overlay');if(o)o.hidden=true;document.body.classList.remove('ghp-open');app='';appView='';itemId='';threadId='';contactId='';callId='';composeRequest={threadId:'',kind:''};unlocked=false}
-function openApp(a){if(a==='settings'||profile().apps[a]){if(a==='phone')mutate(t=>{for(const n of t.notifications)if(n.app===a)n.read=true},false);unlocked=true;app=a;appView='';itemId='';threadId='';contactId='';composeRequest={threadId:'',kind:''};render()}}
+function openApp(a){if(a==='circle' && profile().apps.circle!==false)return globalThis.GreyhavenCircle?.open?.();if(a==='settings'||profile().apps[a]){if(a==='phone')mutate(t=>{for(const n of t.notifications)if(n.app===a)n.read=true},false);unlocked=true;app=a;appView='';itemId='';threadId='';contactId='';composeRequest={threadId:'',kind:''};render()}}
 function startCall(cid){
   const t=timeline(),c=t.contacts[cid];if(!c||c.blocked)return;if(c.blockedByContact){globalThis.toastr?.info?.('Call did not connect.');return;}const stamp=now().getTime(),sharedCallId=`call:${id()}`,call={id:id(),sharedCallId,contactId:cid,contactName:c.name,direction:'outgoing',status:'active',timeMs:stamp,durationSec:0,transcript:[]};t.calls.unshift(call);mirrorCallToOwner({phoneOwner:c.name,phoneOwnerAvatar:c.avatar,peerName:persona().name,peerAvatar:persona().avatar,peerDescription:persona().description,direction:'incoming',status:'active',timeMs:stamp,sharedCallId});persist(t,false);callId=call.id;app='call';render();const th=directThread(cid);if(th&&!replyBusy)setTimeout(()=>generateReply(th,'call'),180);
 }
@@ -2333,6 +2338,7 @@ function notePopup(nid=''){
 function openMail(mid){const t=timeline(),m=t.mail.find(x=>x.id===mid);if(!m)return;m.read=true;persist(t,false);const d=popup(`<div><header><b>${esc(m.subject)}</b><button data-popup-close><i class="fa-solid fa-xmark"></i></button></header><small>From: ${esc(m.from)}</small><p>${esc(m.body)}</p></div>`);d.querySelector('[data-popup-close]').onclick=()=>d.close()}
 function notification(nid){
   const t=timeline(),n=t.notifications.find(x=>x.id===nid);if(!n)return;n.read=true;unlocked=true;const appName=n.app==='social'?'instagram':n.app==='snap'?'snapchat':n.app;
+  if(appName==='circle'){app='';appView='';persist(t,false);render();globalThis.GreyhavenCircle?.openThread?.(String(n.targetId||''));return}
   if(appName==='messages'&&n.targetId){app='thread';threadId=n.targetId}
   else if(appName==='phone'&&n.targetId){const c=t.calls.find(x=>x.id===n.targetId);if(c&&c.status==='incoming'){c.status='active';callId=c.id;app='call';updateSharedCallStatus(c.sharedCallId,'active')}else app='phone'}
   else if(appName==='mail')app='mail';

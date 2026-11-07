@@ -58,26 +58,51 @@ export function normalProfile(raw={},who={}) {
     updatedAt:Number(raw.updatedAt||0),
   };
 }
-/** A right swipe can match immediately; pending likes only evolve on a manual refresh. */
-/** A right swipe can match immediately; pending likes change only on explicit Refresh. */
-export function preparePending(like, nowMs, random=Math.random()) {
-  const immediate = random < 0.31;
-  return {...like, status:immediate?'matched':'pending', attempts:0, likedAt:nowMs,
-    lastCheckedAt:null, matchedAt:immediate?nowMs:null};
+/** One immutable eventual outcome per like. Never reroll on Refresh. */
+export function preparePending(like, nowMs, random=Math.random, options={}) {
+  const draw=typeof random==='function'?random:()=>Number(random);
+  const chance=Math.max(.03,Math.min(.25,Number(options?.chance ?? .15)));
+  const success=draw()<chance;
+  const immediate=success && draw()<.34;
+  const lagHours=2+Math.floor(draw()*46); // fictional hours; no timers
+  return {...like,status:immediate?'matched':'pending',willMatch:success,
+    resolvedOnce:true,attempts:0,likedAt:nowMs,matchChance:chance,
+    resolveAt:immediate?nowMs:nowMs+lagHours*3600000,
+    lastCheckedAt:null,matchedAt:immediate?nowMs:null};
 }
-/** Exactly one chance per button press; never invoked by a timer or phone refresh. */
+/** For v1 data, establish the outcome ONCE, including already-pending likes. */
+export function migratePending(pending, nowMs, random=Math.random){
+  for(const p of pending||[]){
+    if(p.status!=='pending'||typeof p.willMatch==='boolean')continue;
+    p.willMatch=random()<.15;
+    p.resolvedOnce=true;
+    const base=Number(p.likedAt||nowMs);
+    p.resolveAt=Math.max(base+2*3600000,Number(nowMs||base));
+    p.matchChance=.15;
+  }
+  return pending;
+}
+/** Refresh reveals a predecided outcome only once the fictional time is eligible. */
 export function refreshPending(pending, nowMs, random=Math.random) {
   const events=[];
-  for (const p of pending) {
-    if (p.status!=='pending') continue;
-    p.attempts=Number(p.attempts||0)+1;
-    const elapsed=Math.max(0,Number(nowMs)-Number(p.likedAt??nowMs));
-    const chance=Math.min(.58,.25+Math.min(48,elapsed/3600000)*.006);
+  migratePending(pending,nowMs,random);
+  for(const p of pending||[]){
+    if(p.status!=='pending')continue;
     p.lastCheckedAt=nowMs;
-    if (random()<chance) {p.status='matched';p.matchedAt=nowMs;events.push({id:p.npcId,status:'matched'});}
-    else if(p.attempts>=5) {p.status='no-match';events.push({id:p.npcId,status:'no-match'});}
+    p.attempts=Number(p.attempts||0)+1;
+    if(Number(nowMs)<Number(p.resolveAt||0))continue;
+    p.status=p.willMatch===true?'matched':'no-match';
+    if(p.status==='matched')p.matchedAt=nowMs;
+    events.push({id:p.npcId,status:p.status});
   }
   return events;
+}
+/** A blocked/unmatched participant never becomes a match through a refresh. */
+export function closeConnection(pending,id,status='unmatched'){
+  const row=(pending||[]).find(x=>x.npcId===id);
+  if(!row)return null;
+  row.status=status==='blocked'?'blocked':'unmatched';
+  row.willMatch=false;return row;
 }
 export function chatKey(ctx) {
   const raw=String(ctx?.getCurrentChatId?.()||ctx?.chatId||'');

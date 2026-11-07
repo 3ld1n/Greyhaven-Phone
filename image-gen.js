@@ -13,7 +13,7 @@ import {
 } from './image-gen-core.js';
 
 const MODULE = 'greyhaven-phone-imagegen';
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const SETTINGS_KEY = 'greyhavenPhone';
 const META_KEY = 'greyhavenPhone';
 const REF_DB_NAME = 'GreyhavenPhoneImageGen';
@@ -477,9 +477,9 @@ function senderIdentity(row, identityIndex=null) {
 }
 
 function makeItem({app,scope,row,ownerId,manualOnly=false,source='metadata',threadId='',storeName='',getTarget=null,identityIndex=null}) {
-  if (!row || row.type === 'video' || row.mediaType === 'video') return null;
+  if (!row || (app!=='circle' && (row.type === 'video' || row.mediaType === 'video'))) return null;
   const description = mediaDescription(row);
-  const isPhoto = row.type === 'photo' || row.mediaType === 'photo' || (!!description && !row.type && !row.mediaType) || (!!row.visual && row.type !== 'video');
+  const isPhoto = (app==='circle' && (row.type==='video'||row.mediaType==='video')) || row.type === 'photo' || row.mediaType === 'photo' || (!!description && !row.type && !row.mediaType) || (!!row.visual && row.type !== 'video');
   if (!isPhoto || !description || !row.id) return null;
   const sender = senderIdentity(row, identityIndex);
   return {
@@ -530,6 +530,13 @@ function buildCurrentMediaRegistry(box=currentTimelineBox()) {
     for (const app of ['instagram','facebook']) {
       for (const row of profile?.[app]?.posts || []) add(makeItem({...common,app,scope:'post',row,manualOnly:true,source:'settings',getTarget:() => ctx()?.extensionSettings?.[SETTINGS_KEY]?.socialStudioProfiles?.[identityId]?.[app]?.posts?.find(x=>x.id===row.id)}));
     }
+  }
+
+  // Circle media lives in chat-specific Circle storage, never in a second iMessage/Snapchat timeline.
+  for (const entry of globalThis.GreyhavenCircle?.getMediaItems?.() || []) {
+    if(!entry?.message || !entry?.npcId)continue;
+    add(makeItem({...common,app:'circle',scope:'dm',row:entry.message,threadId:entry.npcId,manualOnly:true,
+      getTarget:()=>globalThis.GreyhavenCircle?.getMediaMessage?.(entry.npcId,entry.message.id)}));
   }
 
   const unique = new Map();
