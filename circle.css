@@ -1,0 +1,95 @@
+/* Greyhaven Circle v1.0 — self-contained iPhone-sized app screen.
+   Explicitly scoped to #ghc-screen: no body-wide selectors or global observers. */
+#ghc-screen{position:absolute;inset:5px;z-index:62;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:#0d0e16;color:#f7f7fb;border-radius:43px;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Inter,system-ui,sans-serif;font-size:14px;line-height:1.45;isolation:isolate}
+#ghc-screen,#ghc-screen *{box-sizing:border-box}
+#ghc-screen button,#ghc-screen input,#ghc-screen textarea,#ghc-screen select{font:inherit}
+#ghc-screen button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+#ghc-screen button:disabled{opacity:.48;cursor:default}
+#ghc-screen .ghc-header{flex:0 0 auto;min-height:120px;padding:55px 12px 9px;display:flex;align-items:center;gap:9px;border-bottom:1px solid rgba(255,255,255,.075);background:#171922}
+#ghc-screen .ghc-header>button{height:36px;min-width:36px;border-radius:12px;border:1px solid rgba(255,255,255,.09);background:#252734;color:#fff}
+#ghc-screen .ghc-header .ghc-sync{display:flex;gap:6px;align-items:center;justify-content:center;padding:0 11px;font-size:12px;font-weight:700;white-space:nowrap;background:#302848;color:#d7c9ff}
+#ghc-screen .ghc-brand{min-width:0;display:flex;flex:1;flex-direction:column;gap:0}
+#ghc-screen .ghc-brand b{font-size:21px;line-height:1.1}
+#ghc-screen .ghc-brand small{color:#9d9dab;font-size:10px;white-space:nowrap}
+#ghc-screen .ghc-tabs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;padding:8px 9px;border-bottom:1px solid rgba(255,255,255,.06);background:#14151d;flex:0 0 auto}
+#ghc-screen .ghc-tabs button{border:0;background:transparent;color:#a4a4b2;border-radius:10px;padding:9px 4px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;min-width:0;white-space:nowrap}
+#ghc-screen .ghc-tabs button.active{background:#38304d;color:#f3eaff;font-weight:700}
+#ghc-screen .ghc-tabs button i{font-size:12px}
+#ghc-screen .ghc-scroll{flex:1;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:13px 12px max(20px,env(safe-area-inset-bottom));scrollbar-color:#413b59 transparent}
+#ghc-screen .ghc-switch{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:4px;border-radius:13px;background:#1c1d27}
+#ghc-screen .ghc-switch button{min-width:0;border:0;padding:10px 8px;border-radius:10px;background:transparent;color:#b3b3bf;font-size:13px;font-weight:600}
+#ghc-screen .ghc-switch button.active{background:#7151ce;color:#fff}
+#ghc-screen .ghc-intro{display:flex;flex-direction:column;gap:3px;margin:14px 2px 11px}
+#ghc-screen .ghc-intro b{font-size:18px}
+#ghc-screen .ghc-intro small{font-size:12px;color:#a9a9b8;line-height:1.42}
+#ghc-screen .ghc-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0;min-width:0}
+#ghc-screen .ghc-actions>button,#ghc-screen .ghc-text-back{border:1px solid rgba(255,255,255,.11);border-radius:12px;background:#252735;color:#eee;padding:10px 12px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:0}
+#ghc-screen .ghc-actions .ghc-primary,#ghc-screen button.ghc-primary{background:#7551d5;color:#fff;border-color:#8764e7}
+#ghc-screen .ghc-count{color:#a8a8b7;font-size:11px}
+#ghc-screen .ghc-filter{background:#181a23;border:1px solid rgba(255,255,255,.07);border-radius:14px;overflow:hidden}
+#ghc-screen .ghc-filter-toggle{width:100%;padding:13px 12px;background:transparent;color:#e6e2f8;display:flex;align-items:center;gap:9px;border:0;text-align:left}
+#ghc-screen .ghc-filter-toggle b{flex:1;font-size:12px}
+#ghc-screen .ghc-filter-toggle i:last-child{color:#9999a8;font-size:11px}
+#ghc-screen .ghc-filter-body{padding:0 12px 12px;border-top:1px solid rgba(255,255,255,.06)}
+#ghc-screen .ghc-filter-body p,#ghc-screen .ghc-hint{font-size:11px;color:#a2a2b1;line-height:1.55}
+#ghc-screen .ghc-card{margin-top:10px;padding:16px 14px 10px;border-radius:20px;background:linear-gradient(148deg,#282341,#1d1b2c 45%,#181a25);border:1px solid rgba(189,168,245,.23);touch-action:pan-y;min-width:0}
+#ghc-screen .ghc-cardhead{display:flex;align-items:center;gap:11px;min-width:0}
+#ghc-screen .ghc-cardhead>div:last-child{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+#ghc-screen .ghc-cardhead b{font-size:20px;white-space:normal;overflow-wrap:anywhere}
+#ghc-screen .ghc-cardhead span{font-size:12px;color:#bbb4d3;overflow-wrap:anywhere}
+#ghc-screen .ghc-avatar{flex:0 0 66px;width:66px;height:66px;border-radius:20px;background:linear-gradient(145deg,#916bdd,#5b47aa);color:white;display:grid;place-items:center;font-size:28px;font-weight:750;border:1px solid rgba(255,255,255,.12)}
+#ghc-screen .ghc-avatar.small{flex:0 0 42px;width:42px;height:42px;border-radius:14px;font-size:17px}
+#ghc-screen .ghc-card>p,#ghc-screen .ghc-section>p{color:#dddbe8;font-size:13px;line-height:1.58;overflow-wrap:anywhere}
+#ghc-screen .ghc-tags{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 4px}
+#ghc-screen .ghc-tags span{display:inline-block;max-width:100%;overflow-wrap:anywhere;color:#d5c8f2;background:rgba(142,108,221,.14);font-size:11px;border-radius:100px;padding:5px 9px}
+#ghc-screen .ghc-swipe-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}
+#ghc-screen .ghc-swipe-actions button{font-size:12px;white-space:nowrap;padding:11px 5px}
+#ghc-screen .ghc-swipe-actions .ghc-like{background:#6e3e77;color:#fff;border-color:#a263ab}
+#ghc-screen .ghc-empty{display:flex;flex-direction:column;gap:8px;align-items:center;text-align:center;justify-content:center;padding:35px 12px;margin:12px 0;border:1px dashed rgba(255,255,255,.14);background:#161821;border-radius:17px;color:#a2a2b1;min-height:170px}
+#ghc-screen .ghc-empty i{font-size:24px;color:#a98af7}
+#ghc-screen .ghc-empty b{font-size:14px;color:#f4f2f9}
+#ghc-screen .ghc-empty span{font-size:12px}
+#ghc-screen .ghc-empty.compact{min-height:90px;padding:14px}
+#ghc-screen .ghc-notice{border-radius:12px;background:#302949;color:#e3d9ff;font-size:12px;margin:1px 0 12px;padding:10px 12px;overflow-wrap:anywhere}
+#ghc-screen .ghc-section{display:flex;flex-direction:column;gap:10px;min-width:0}
+#ghc-screen .ghc-heading{display:flex;flex-direction:column;gap:4px;margin:6px 0 8px}
+#ghc-screen .ghc-heading b{font-size:17px}
+#ghc-screen .ghc-heading small{font-size:12px;color:#aaaab7;line-height:1.45}
+#ghc-screen .ghc-field{display:flex;flex-direction:column;gap:5px;min-width:0;margin:0 0 9px}
+#ghc-screen .ghc-field>span{font-size:12px;color:#c9c7d5;font-weight:600}
+#ghc-screen .ghc-field input,#ghc-screen .ghc-field textarea,#ghc-screen .ghc-field select{display:block;width:100%;max-width:100%;min-width:0;border:1px solid rgba(255,255,255,.14);border-radius:11px;background:#242630;color:#f5f5fb;padding:10px 11px;font-size:13px;outline:none}
+#ghc-screen .ghc-field textarea{resize:vertical;min-height:76px}
+#ghc-screen .ghc-field input:focus,#ghc-screen .ghc-field textarea:focus,#ghc-screen .ghc-field select:focus{border-color:#9a80f0}
+#ghc-screen .ghc-formgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;min-width:0}
+#ghc-screen .ghc-formgrid>*{min-width:0}
+#ghc-screen .ghc-matchrow{display:flex;align-items:center;gap:9px;width:100%;min-width:0;border:1px solid rgba(255,255,255,.08);background:#1c1d27;color:#fff;border-radius:14px;padding:10px;text-align:left}
+#ghc-screen .ghc-matchrow>span:nth-child(2){flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+#ghc-screen .ghc-matchrow b{font-size:13px}
+#ghc-screen .ghc-matchrow small{font-size:11px;color:#a6a6b6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ghc-screen .ghc-matchrow>i{font-size:11px;color:#9694a8}
+#ghc-screen .ghc-pending{border-bottom:1px solid rgba(255,255,255,.07);padding:10px 3px;display:flex;flex-direction:column;gap:2px}
+#ghc-screen .ghc-pending small{font-size:11px;color:#a0a0af}
+#ghc-screen .ghc-subtitle{font-size:13px;font-weight:700;color:#cdbefc;margin:12px 0 0}
+#ghc-screen .ghc-text-back{align-self:flex-start;background:transparent;border:0;color:#c8b6ff;padding:4px 0}
+#ghc-screen .ghc-detailhead{padding:14px 0}
+#ghc-screen .ghc-block{padding:12px;border-radius:14px;background:#181a23;border:1px solid rgba(255,255,255,.06);min-width:0}
+#ghc-screen .ghc-block b{font-size:13px}
+#ghc-screen .ghc-block p{margin:7px 0 1px;font-size:12px;color:#b6b6c5;overflow-wrap:anywhere}
+#ghc-screen .ghc-fullcard{font-family:inherit;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:12px;line-height:1.6;color:#dddce6;padding:10px;background:#11121a;border-radius:11px;max-width:100%;max-height:400px;overflow-y:auto}
+#ghc-screen .ghc-thread{display:flex;flex-direction:column;height:100%;min-height:0;min-width:0}
+#ghc-screen .ghc-threadhead{display:flex;gap:9px;align-items:center;padding:4px 0 10px;border-bottom:1px solid rgba(255,255,255,.07)}
+#ghc-screen .ghc-threadhead>button{border:0;background:transparent;color:#cdbcfb;font-size:14px}
+#ghc-screen .ghc-threadhead>div:last-child{display:flex;flex-direction:column;min-width:0}
+#ghc-screen .ghc-threadhead small{font-size:11px;color:#aaa9ba}
+#ghc-screen .ghc-messages{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:9px;padding:12px 0}
+#ghc-screen .ghc-bubble{max-width:88%;align-self:flex-start;background:#292936;border-radius:16px 16px 16px 4px;padding:9px 11px;overflow-wrap:anywhere}
+#ghc-screen .ghc-bubble.mine{align-self:flex-end;background:#6446c0;border-radius:16px 16px 4px 16px}
+#ghc-screen .ghc-bubble p{margin:0 0 5px;font-size:13px;white-space:pre-wrap}
+#ghc-screen .ghc-bubble small{color:#ddd6ef;font-size:9px;opacity:.7;display:block;text-align:right}
+#ghc-screen .ghc-compose{display:flex;gap:7px;padding:10px 0 3px;border-top:1px solid rgba(255,255,255,.07);flex:0 0 auto}
+#ghc-screen .ghc-compose input{flex:1;min-width:0;border-radius:22px;border:1px solid rgba(255,255,255,.15);background:#252632;color:#fff;font-size:13px;padding:11px 12px}
+#ghc-screen .ghc-compose button{border-radius:50%;width:41px;height:41px;flex:0 0 41px;background:#7653d8;border:0;color:#fff}
+@media(max-width:365px){#ghc-screen .ghc-tabs button{font-size:10px;gap:3px}#ghc-screen .ghc-header{padding-left:9px;padding-right:9px}#ghc-screen .ghc-header .ghc-sync{padding:0 7px}#ghc-screen .ghc-swipe-actions button{font-size:11px}#ghc-screen .ghc-scroll{padding-left:9px;padding-right:9px}}
+
+#ghc-screen .ghc-time{position:absolute;left:21px;top:18px;font-size:12px;font-weight:800;color:#fff;z-index:3;pointer-events:none;font-variant-numeric:tabular-nums}
+@media(max-width:600px){#ghc-screen{inset:0;border-radius:0}#ghc-screen .ghc-time{top:calc(18px + env(safe-area-inset-top))}#ghc-screen .ghc-header{padding-top:calc(56px + env(safe-area-inset-top));}}
