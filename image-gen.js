@@ -1443,6 +1443,32 @@ function bindSillyTavernEvents() {
   for (const key of ['CHAT_CHANGED','CHAT_CREATED','PERSONA_CHANGED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SENT','MESSAGE_EDITED','GROUP_UPDATED','CHARACTER_EDITED']) bind(key);
 }
 
+async function attachLocalCircleMedia(key,file) {
+  const item=registryItem(key);
+  if(!item||item.app!=='circle')throw new Error('This Circle media message cannot be found.');
+  if(!(file instanceof Blob))throw new Error('Select a local photo or video.');
+  const mime=String(file.type||'').toLowerCase();
+  if(!mime.startsWith('image/')&&!mime.startsWith('video/'))throw new Error('Only photos and videos are supported.');
+  if(file.size<=0||file.size>55*1024*1024)throw new Error('Preview must be between 1 byte and 55 MB.');
+  const before=currentChatKey(),who=currentIdentity()?.id||'';
+  const target=item.getTarget?.();if(!target)throw new Error('Message no longer exists.');
+  const mediaKey=`${before}|ghcircle-local|${item.id}|${uuid()}`;
+  await dbPut(phoneMediaDb,PHONE_MEDIA_STORE,mediaKey,file);
+  if(currentChatKey()!==before||(currentIdentity()?.id||'')!==who){
+    await dbDelete(phoneMediaDb,PHONE_MEDIA_STORE,mediaKey).catch(()=>{});
+    throw new Error('Chat/persona changed while attaching. Try again.');
+  }
+  const oldKey=String(target.mediaKey||'');
+  target.mediaKey=mediaKey;target.localPreviewType=mime.startsWith('video/')?'video':'image';
+  target.mediaWidth=0;target.mediaHeight=0;
+  saveItemSource(item);item.mediaKey=mediaKey;
+  invalidateRegistry();
+  document.dispatchEvent(new CustomEvent('greyhaven:image-metadata-changed',{detail:{key:item.key,id:item.id,mediaKey,localPreview:true}}));
+  scheduleAugment();
+  // Old previews may be present in a different chat export; do not delete them automatically.
+  return mediaKey;
+}
+
 function exposeApi() {
   globalThis.GreyhavenPhoneImages = {
     version:VERSION,
@@ -1451,6 +1477,7 @@ function exposeApi() {
     openReferenceManager,
     getSettings:()=>clone(imageSettings()),
     getReferencePack:identityId=>clone(referencePack(identityId)),
+    attachLocalMedia:(key,file)=>attachLocalCircleMedia(key,file),
     generateMedia:key=>queueGeneration(key,'manual'),
     regenerateMedia:key=>queueGeneration(key,'manual',{force:true}),
     getMediaUrl:mediaKey=>mediaUrlForKey(mediaKey),

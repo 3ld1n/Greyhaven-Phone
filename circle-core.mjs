@@ -60,43 +60,36 @@ export function normalProfile(raw={},who={}) {
 }
 /** One immutable eventual outcome per like. Never reroll on Refresh. */
 export function preparePending(like, nowMs, random=Math.random, options={}) {
-  const draw=typeof random==='function'?random:()=>Number(random);
-  const chance=Math.max(.03,Math.min(.25,Number(options?.chance ?? .15)));
-  const success=draw()<chance;
-  const immediate=success && draw()<.34;
-  const lagHours=2+Math.floor(draw()*46); // fictional hours; no timers
-  return {...like,status:immediate?'matched':'pending',willMatch:success,
-    resolvedOnce:true,attempts:0,likedAt:nowMs,matchChance:chance,
-    resolveAt:immediate?nowMs:nowMs+lagHours*3600000,
-    lastCheckedAt:null,matchedAt:immediate?nowMs:null};
+  const draw = typeof random === 'function' ? random : () => Number(random);
+  const chance = Math.max(.03, Math.min(.25, Number(options?.chance ?? .15)));
+  const success = draw() < chance;
+  return {...like, status:'pending', willMatch:success, resolvedOnce:true, attempts:0,
+    likedAt:nowMs, matchChance:chance, resolveAt:nowMs, lastCheckedAt:null, matchedAt:null};
 }
-/** For v1 data, establish the outcome ONCE, including already-pending likes. */
-export function migratePending(pending, nowMs, random=Math.random){
-  for(const p of pending||[]){
-    if(p.status!=='pending'||typeof p.willMatch==='boolean')continue;
-    p.willMatch=random()<.15;
-    p.resolvedOnce=true;
-    const base=Number(p.likedAt||nowMs);
-    p.resolveAt=Math.max(base+2*3600000,Number(nowMs||base));
-    p.matchChance=.15;
+/** For older v1 pending likes, decide only once if no decision exists. */
+export function migratePending(pending,nowMs,random=Math.random) {
+  for (const p of pending || []) {
+    if (p.status !== 'pending') continue;
+    if (typeof p.willMatch !== 'boolean') p.willMatch=random()<.15;
+    p.resolvedOnce=true;p.matchChance=Number(p.matchChance||.15);
+    p.resolveAt=nowMs;
   }
   return pending;
 }
-/** Refresh reveals a predecided outcome only once the fictional time is eligible. */
-export function refreshPending(pending, nowMs, random=Math.random) {
-  const events=[];
+/** Every pending like is resolved exactly once on the next explicit refresh. */
+export function refreshPending(pending,nowMs,random=Math.random) {
   migratePending(pending,nowMs,random);
-  for(const p of pending||[]){
-    if(p.status!=='pending')continue;
-    p.lastCheckedAt=nowMs;
-    p.attempts=Number(p.attempts||0)+1;
-    if(Number(nowMs)<Number(p.resolveAt||0))continue;
+  const events=[];
+  for (const p of pending || []) {
+    if (p.status!=='pending') continue;
+    p.lastCheckedAt=nowMs;p.attempts=Number(p.attempts||0)+1;
     p.status=p.willMatch===true?'matched':'no-match';
     if(p.status==='matched')p.matchedAt=nowMs;
     events.push({id:p.npcId,status:p.status});
   }
   return events;
 }
+
 /** A blocked/unmatched participant never becomes a match through a refresh. */
 export function closeConnection(pending,id,status='unmatched'){
   const row=(pending||[]).find(x=>x.npcId===id);

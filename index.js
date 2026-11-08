@@ -4,7 +4,7 @@ import { identifyReplySpeaker, ownedPhone, collectOwnedChronology, scopeContinui
 import { tidyPhoneText, limitPhonePackets } from './phone-reply-format.mjs';
 
 const GHP_MODULE = 'greyhaven-phone';
-const GHP_VERSION = '2.15.0';
+const GHP_VERSION = '2.15.1';
 const GHP_META_KEY = 'greyhavenPhone';
 const GHP_SETTINGS_KEY = 'greyhavenPhone';
 const GHP_PROMPT_KEY = 'greyhaven_phone_continuity';

@@ -4,7 +4,7 @@
  */
 import {clean,nameKey,looseJson,within,normalProfile,validatedBatch,refreshPending,preparePending,chatKey} from './circle-core.mjs';
 
-const VERSION='2.0.0', KEY='greyhavenPhone';
+const VERSION='2.1.0', KEY='greyhavenPhone';
 const h=v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;');
 const uuid=()=>{try{return crypto.randomUUID()}catch{return `circle-${Date.now()}-${Math.random().toString(36).slice(2)}`}};
 const context=()=>{try{return globalThis.SillyTavern?.getContext?.()||null}catch{return null}};
@@ -44,13 +44,13 @@ function owner(){
  const who=me(),s=localState();if(!who?.id||!s)return null;
  if(!s.owners[who.id])s.owners[who.id]={feeds:{meet:{ids:[],index:0},dating:{ids:[],index:0}},pending:[],messages:{},filters:{},createdAt:now()};
  const o=s.owners[who.id];o.feeds ||= {};for(const m of ['meet','dating']){o.feeds[m] ||= {ids:[],index:0};o.feeds[m].ids=arr(o.feeds[m].ids);o.feeds[m].index=Math.max(0,Number(o.feeds[m].index||0))}
- o.pending=arr(o.pending);o.messages ||= {};o.filters ||= {};o.meetings ||= {};o.blocked=arr(o.blocked);
+ o.pending=arr(o.pending);o.messages ||= {};o.filters ||= {};o.meetings ||= {};o.blocked=arr(o.blocked);o.circleRefreshCount=Number(o.circleRefreshCount||0);
  return o;
 }
 function getMyProfile(){const who=me(),g=globalState();if(!g||!who?.id)return null;return normalProfile(g.profiles[who.id]||{},who)}
 function storeMyProfile(raw){const who=me(),g=globalState();if(!who?.id||!g)return;g.profiles[who.id]=normalProfile({...raw,updatedAt:Date.now()},who);saveGlobal()}
 function npc(id){return localState()?.npcs?.[id]||null}
-let opened=false,view='discover',mode='meet',detailId='',filtersOpen=false,busy='',notice='',observer=null,seenChat='',tStart=null,lockRender=false;
+let opened=false,view='discover',mode='meet',detailId='',filtersOpen=false,busy='',notice='',observer=null,seenChat='',tStart=null,lockRender=false,holdTimer=null,holdStart=null,holdTriggered=false;
 function filtered(){const o=owner();return o?.filters?.[mode]||{}}
 function colorInitial(name){return h(String(name||'?')[0].toUpperCase())}
 function tokenCheck(){return !!context()?.generateRaw}
@@ -88,7 +88,7 @@ function ensureIcon(){
  b.innerHTML='<span class="ghp-app-square" style="--t:#8b5cf6"><i class="fa-solid fa-users"></i></span><small>Circle</small>';grid.appendChild(b);
 }
 function mount(){if(!active())return;const device=document.querySelector('#ghp-overlay .ghp-device');if(!device)return;let screen=device.querySelector('#ghc-screen');if(!screen){screen=document.createElement('section');screen.id='ghc-screen';screen.className='ghc-screen';device.appendChild(screen)}opened=true;paint({resetScroll:true})}
-function close(){opened=false;busy='';notice='';const screen=document.querySelector('#ghc-screen');if(screen)screen.remove()}
+function close(){resetCircleHold();closeCircleMessageMenu();opened=false;busy='';notice='';const screen=document.querySelector('#ghc-screen');if(screen)screen.remove()}
 function launch(){
  const c=context();if(!c||!chatKey(c)||!me()){notify('Open a SillyTavern chat first.','warning');return}
  if(phone()?.getProfile?.()?.apps?.circle===false){notify('Enable Circle in Greyhaven Phone Settings first.','warning');return}
@@ -118,17 +118,52 @@ function swipe(like,idFromDetail=''){
  if(like&&!o.pending.some(x=>x.npcId===n.id)){
   const chance=.15;
   const p=preparePending({npcId:n.id,mode},now(),Math.random,{chance});o.pending.push(p);
-  notice=p.status==='matched'?`It's a mutual match with ${n.name}!`:`Liked ${n.name}. Their response was decided now and will not be rerolled by Refresh.`;
+  notice=`Liked ${n.name}. Check Circle on your next refresh.`;
  }else if(!like)notice=`Passed on ${n.name}.`;
  if(!idFromDetail)feed.index=Math.min(feed.ids.length,feed.index+1);
  else{if(feed.ids[feed.index]===id)feed.index++;view='discover';detailId=''}
  saveLocal();paint({resetScroll:false});
 }
+function pruneCircleNpc(id) {
+ const s=localState(),o=owner(),g=globalState();if(!s||!o||!g)return;
+ o.pending=o.pending.filter(p=>p.npcId!==id);
+ for(const f of Object.values(o.feeds||{})){
+  if(!f?.ids)continue;
+  const old=f.ids.slice(0,f.index);f.ids=f.ids.filter(x=>x!==id);f.index=Math.min(f.ids.length,old.filter(x=>x!==id).length);
+ }
+ if(!g.links?.[id]){delete o.messages[id];delete o.meetings?.[id];}
+ o.blocked=arr(o.blocked).filter(x=>x!==id);
+ if(g.links?.[id])return; // Linked characters retain their Circle history and full card.
+ const referenced=Object.values(s.owners||{}).some(other=>arr(other.pending).some(p=>p.npcId===id)||Object.values(other.feeds||{}).some(f=>arr(f?.ids).includes(id))||arr(other.blocked).includes(id)||arr(other.messages?.[id]).length>0);
+ if(referenced)return;
+ const n=s.npcs[id];if(!n)return;
+ if(g.nameRegistry?.[nameKey(n.name)]?.id===id)delete g.nameRegistry[nameKey(n.name)];
+ delete s.npcs[id];
+}
 function manualRefresh(){
  if(busy)return;const o=owner();if(!o)return;
- const events=refreshPending(o.pending,now()),matched=events.filter(e=>e.status==='matched').map(e=>npc(e.id)?.name).filter(Boolean),rejected=events.filter(e=>e.status==='no-match').length;
- saveLocal();notice=matched.length?`New mutual match${matched.length===1?'':'es'}: ${matched.join(', ')}!`:rejected?`${rejected} liked profile${rejected===1?'':'s'} did not become mutual.`:'No new matches yet. Repeated Refresh never increases your chances.';paint();
+ const current=++o.circleRefreshCount;
+ // A rejected/unmatched profile is visible for exactly one review interval.
+ const old=o.pending.filter(p=>['no-match','unmatched'].includes(p.status)&&p.expiresOnRefresh!==undefined&&Number(p.expiresOnRefresh)<=current).map(p=>p.npcId);
+ for(const id of old)pruneCircleNpc(id);
+ // Older completed likes from previous versions get a single review interval.
+ for(const p of o.pending)if(['no-match','unmatched'].includes(p.status)&&p.expiresOnRefresh===undefined)p.expiresOnRefresh=current+1;
+ const events=refreshPending(o.pending,now());
+ for(const e of events)if(e.status==='no-match'){
+  const p=relationFor(e.id);if(p)p.expiresOnRefresh=current+1;
+ }
+ const matched=events.filter(e=>e.status==='matched').map(e=>npc(e.id)?.name).filter(Boolean);
+ const rejected=events.filter(e=>e.status==='no-match').length;
+ // Remove stale passed/swiped-left cards no longer referenced by any feed; pass never creates a long-lived identity.
+ const keepIds=new Set(o.pending.map(p=>p.npcId));
+ for(const f of Object.values(o.feeds))for(const id of arr(f.ids).slice(0,f.index))if(!keepIds.has(id)&&!globalState()?.links?.[id])pruneCircleNpc(id);
+ const feedIds=new Set(Object.values(o.feeds).flatMap(f=>arr(f.ids)));
+ for(const [id,n] of Object.entries(localState()?.npcs||{}))if(!feedIds.has(id)&&!keepIds.has(id)&&!globalState()?.links?.[id])pruneCircleNpc(id);
+ saveGlobal();saveLocal();
+ notice=matched.length?`New match${matched.length===1?'':'es'}: ${matched.join(', ')}!`:rejected?`${rejected} ${rejected===1?'person was':'people were'} not interested this time.`:'No new matches yet.';
+ paint();
 }
+
 async function generateCard(){
  await busyGuard('card',async stamp=>{const n=npc(detailId);if(!n)return;
   const {systemPrompt,prompt}=v2GenerateCardPrompt(n);
@@ -144,10 +179,14 @@ function openThread(id){return v2OpenThread(id)}
 function openDetails(id){return v2OpenDetails(id)}
 function handleScreenClick(e){
  const root=e.target.closest('#ghc-screen'),launcher=e.target.closest('[data-ghc-launch]');if(!root&&!launcher)return;
- e.stopPropagation();if(launcher){e.preventDefault();return launch()}
+ e.stopPropagation();if(e.target.hasAttribute('data-ghc-menu-close')){e.preventDefault();closeCircleMessageMenu();return;}if(launcher){e.preventDefault();return launch()}
  const b=e.target.closest('button');if(!b)return;
  if(b.type==='submit')return; // form submit handles text and edits exactly once
  e.preventDefault();
+ if(b.hasAttribute('data-ghc-menu-close')){closeCircleMessageMenu();return;}
+ if(b.dataset.ghcReplacePreview){closeCircleMessageMenu();return circleReplacePreview(b.dataset.ghcReplacePreview)}
+ if(b.dataset.ghcViewMetadata){const m=allCircleMessages(detailId).find(x=>x.id===b.dataset.ghcViewMetadata);closeCircleMessageMenu();if(m)alert(m.mediaDescription||'No description available.');return;}
+ if(b.dataset.ghcGenerate||b.dataset.ghcMediaTools||b.dataset.ghcSaveImage||b.dataset.ghcEdit)closeCircleMessageMenu();
  if(b.hasAttribute('data-ghc-home'))return close();
  if(b.hasAttribute('data-ghc-refresh'))return manualRefresh();
  if(b.hasAttribute('data-ghc-thread-back')){view='matches';detailId='';notice='';return paint({resetScroll:true})}
@@ -183,15 +222,60 @@ function handleScreenClick(e){
  if(b.hasAttribute('data-ghc-card'))return generateCard();
  if(b.hasAttribute('data-ghc-copy'))return copyCard();
 }
+function closeCircleMessageMenu(){document.querySelector('#ghc-message-menu')?.remove();}
+function openCircleMessageMenu(mid){
+ closeCircleMessageMenu();const m=allCircleMessages(detailId).find(x=>x.id===mid);if(!m||!opened||view!=='thread')return;
+ const lastOwn=[...allCircleMessages(detailId)].reverse().find(x=>x.mine),isMedia=['photo','video'].includes(m.type);
+ const rows=[];
+ if(m.mine&&m.type==='text'&&m.id===lastOwn?.id&&canChat(detailId))rows.push(['Edit text','pen','data-ghc-edit',mid]);
+ if(isMedia){
+  rows.push([m.mediaKey?'Regenerate with Wiro':'Generate with Wiro','wand-magic-sparkles','data-ghc-generate',mid]);
+  rows.push(['Edit description','pen-to-square','data-ghc-media-tools',mid]);
+  rows.push(['Replace local preview','image','data-ghc-replace-preview',mid]);
+  if(m.mediaKey)rows.push(['Save to Photos / Files','download','data-ghc-save-image',mid]);
+  rows.push(['View description','circle-info','data-ghc-view-metadata',mid]);
+ }
+ if(!rows.length)return;
+ const screen=document.querySelector('#ghc-screen');if(!screen)return;
+ const menu=document.createElement('div');menu.id='ghc-message-menu';menu.className='ghc-action-overlay';
+ menu.innerHTML=`<div class="ghc-action-scrim" data-ghc-menu-close></div><section class="ghc-action-sheet"><header><b>${isMedia?(m.type==='video'?'Video':'Photo'):'Message'} options</b><button type="button" data-ghc-menu-close aria-label="Close"><i class="fa-solid fa-xmark"></i></button></header>${rows.map(([label,ico,key,id])=>`<button type="button" ${key}="${h(id)}"><i class="fa-solid fa-${ico}"></i>${h(label)}</button>`).join('')}</section>`;
+ screen.appendChild(menu);
+}
+function resetCircleHold(){if(holdTimer)clearTimeout(holdTimer);holdTimer=null;holdStart=null;}
+function handleMessageHoldDown(e){
+ const el=e.target.closest('#ghc-screen [data-ghc-message]');if(!el||!opened||view!=='thread'||e.target.closest('button,input,textarea,a,video'))return;
+ if(e.button!==undefined&&e.button!==0)return;
+ resetCircleHold();holdTriggered=false;
+ holdStart={x:Number(e.clientX||0),y:Number(e.clientY||0),id:el.dataset.ghcMessage};
+ holdTimer=setTimeout(()=>{if(!holdStart)return;const id=holdStart.id;holdTriggered=true;resetCircleHold();openCircleMessageMenu(id);},520);
+}
+function handleMessageHoldMove(e){if(!holdStart)return;if(Math.abs(Number(e.clientX||0)-holdStart.x)>12||Math.abs(Number(e.clientY||0)-holdStart.y)>12)resetCircleHold();}
+function handleMessageHoldUp(e){if(holdTriggered){e.preventDefault();e.stopPropagation();holdTriggered=false;}resetCircleHold();}
+function handleMessageContextMenu(e){const msg=e.target.closest('#ghc-screen [data-ghc-message]');if(!msg||e.target.closest('input,textarea,video'))return;e.preventDefault();e.stopPropagation();resetCircleHold();openCircleMessageMenu(msg.dataset.ghcMessage);}
+function circleReplacePreview(mid){const m=allCircleMessages(detailId).find(x=>x.id===mid);if(!m||!['photo','video'].includes(m.type))return;
+ let input=document.querySelector('#ghc-replacement-picker');if(!input){input=document.createElement('input');input.type='file';input.id='ghc-replacement-picker';input.hidden=true;document.body.appendChild(input)}
+ input.value='';input.accept=m.type==='video'?'video/*,image/*':'image/*';
+ input.onchange=async()=>{const file=input.files?.[0];if(!file)return;if(file.size>55*1024*1024)return notify('Choose a file smaller than 55 MB.','warning');
+  if(!(file.type.startsWith('image/')||(m.type==='video'&&file.type.startsWith('video/'))))return notify('Unsupported file format.','warning');
+  const stamp=origin(),id=detailId;const api=globalThis.GreyhavenPhoneImages,key=circleMediaKey(m);
+  try{if(!api?.attachLocalMedia||!key)throw Error('Local media storage unavailable.');const mediaKey=await api.attachLocalMedia(key,file);
+   if(stamp!==origin()||id!==detailId)return;m.mediaKey=mediaKey;m.localPreviewType=file.type.startsWith('video/')?'video':'image';saveLocal();paint({preserveThread:true});notify('Local preview replaced.','success');
+  }catch(e){notify('Could not attach preview: '+(e?.message||e),'error')}
+ };
+ input.click();
+}
+
 function launchApp(){launch()}
 function handleSubmit(e){
  const f=e.target;if(!f.closest('#ghc-screen'))return;
  if(f.matches('[data-ghc-media-form]')){
   e.preventDefault();e.stopPropagation();const kind=f.querySelector('[name=kind]')?.value||'';
-  const desc=clean(f.querySelector('[name=description]')?.value||'');const caption=clean(f.querySelector('[name=caption]')?.value||'');const request=clean(f.querySelector('[name=request]')?.value||'');
+  const desc=clean(f.querySelector('[name=description]')?.value||'');const caption=clean(f.querySelector('[name=caption]')?.value||'');const request=clean(f.querySelector('[name=request]')?.value||'');const localFile=f.querySelector('[name=localFile]')?.files?.[0]||null;
   if(kind.startsWith('request')){f.closest('#ghc-media-popup')?.remove();if(request)v2SendMessage({querySelector:()=>({value:request})});return;}
   if(!desc){notify('Describe the visible content first.','warning');return;}
-  f.closest('#ghc-media-popup')?.remove();return v2SendMessage({text:caption},{kind,mediaDescription:desc});
+  if(localFile&&!(kind==='video'?localFile.type.startsWith('video/'):localFile.type.startsWith('image/'))){notify('Choose a matching photo or video file.','warning');return;}
+  if(localFile?.size>55*1024*1024){notify('The local file is larger than 55 MB; please use a smaller preview.','warning');return;}
+  f.closest('#ghc-media-popup')?.remove();return v2SendMessage({text:caption},{kind,mediaDescription:desc,localFile});
  }
  if(f.matches('[data-ghc-edit-form]')){
   e.preventDefault();e.stopPropagation();const id=String(f.dataset.ghcEditForm),text=f.querySelector('[name=edit]')?.value||'';
@@ -271,29 +355,37 @@ function circleApplyPhoneEvents(rows){
 }
 function renderCircleBubble(m,id){
  const editing=editingMessageId===m.id;
- if(editing){return `<form class="ghc-editbox" data-ghc-edit-form="${h(m.id)}"><textarea name="edit" rows="3" maxlength="1200">${h(m.text)}</textarea><div><button type="button" data-ghc-cancel-edit>Cancel</button><button type="submit" class="ghc-primary">Save & regenerate</button></div></form>`}
- const isMedia=['photo','video'].includes(m.type);
- const url=!!m.mediaKey;
- return `<article class="ghc-bubble ${m.mine?'mine':''}" data-ghc-message="${h(m.id)}">
- ${m.text?`<p>${h(m.text)}</p>`:''}
- ${isMedia?`<div class="ghc-media"><div class="ghc-media-label"><i class="fa-solid ${m.type==='video'?'fa-video':'fa-image'}"></i> ${m.type==='video'?'Video':'Photo'} metadata${m.type==='video'?' · still preview only':''}</div><p>${h(m.mediaDescription)}</p>${url?`<img data-ghc-preview="${h(m.mediaKey)}" alt="Generated local preview" loading="lazy">`:''}<div class="ghc-media-actions"><button type="button" data-ghc-generate="${h(m.id)}"><i class="fa-solid fa-wand-magic-sparkles"></i> ${url?'Retry':'Generate'}</button><button type="button" data-ghc-media-tools="${h(m.id)}"><i class="fa-solid fa-pen"></i> Edit metadata</button>${url?`<button type="button" data-ghc-save-image="${h(m.id)}"><i class="fa-solid fa-download"></i> Save</button>`:''}</div></div>`:''}
- <small>${m.editedAt?'Edited · ':''}${h(when(m.timeMs))}</small></article>`;
+ if(editing)return `<form class="ghc-editbox" data-ghc-edit-form="${h(m.id)}"><textarea name="edit" rows="3" maxlength="1200">${h(m.text)}</textarea><div><button type="button" data-ghc-cancel-edit>Cancel</button><button type="submit" class="ghc-primary">Save & regenerate</button></div></form>`;
+ const isMedia=['photo','video'].includes(m.type),hasPreview=!!m.mediaKey;
+ const isLocalVideo=m.type==='video' && m.localPreviewType==='video';
+ const visual=hasPreview?(isLocalVideo?`<video data-ghc-preview="${h(m.mediaKey)}" controls playsinline preload="metadata" aria-label="Local video preview"></video>`:`<img data-ghc-preview="${h(m.mediaKey)}" alt="${m.type==='video'?'Local video still preview':'Local photo preview'}" loading="lazy">`):`<div class="ghc-media-placeholder"><i class="fa-regular ${m.type==='video'?'fa-circle-play':'fa-image'}"></i><span>${m.type==='video'?'Video':'Photo'}</span><button type="button" data-ghc-generate="${h(m.id)}"><i class="fa-solid fa-wand-magic-sparkles"></i> Generate</button></div>`;
+ return `<div class="ghc-message-row ${m.mine?'mine':'theirs'}"><article class="ghc-bubble ${m.mine?'mine':''} ${isMedia?'ghc-has-media':''}" data-ghc-message="${h(m.id)}" aria-label="${isMedia?'Hold for media options':'Hold for message options'}">
+ ${isMedia?`<div class="ghc-media-view">${visual}</div>${m.text?`<p class="ghc-caption">${h(m.text)}</p>`:''}`:`<p>${h(m.text)}</p>`}
+ </article><time class="ghc-message-time">${m.editedAt?'Edited · ':''}${h(when(m.timeMs))}</time></div>`;
 }
+
 function v2RenderThread(){
  const n=npc(detailId),o=owner();if(!n||!o)return '<div class="ghc-empty">Conversation not found.</div>';
  const rel=relationFor(n.id);const messages=allCircleMessages(n.id);
- const allowed=canChat(n.id);const lastOwn=[...messages].reverse().find(m=>m.mine);
+ const allowed=canChat(n.id);
  return `<section class="ghc-full-thread"><header class="ghc-full-thread-head"><button type="button" data-ghc-thread-back aria-label="Back to Connections"><i class="fa-solid fa-chevron-left"></i></button><button type="button" data-ghc-profile-from-thread class="ghc-thread-person"><span class="ghc-avatar small">${colorInitial(n.name)}</span><span><b>${h(n.name)}</b><small>${h(n.occupation||'Circle connection')}${busy==='reply'?' · typing…':''}</small></span></button><button type="button" data-ghc-thread-menu aria-label="Options"><i class="fa-solid fa-ellipsis"></i></button></header>
- <div class="ghc-thread-scroll" data-ghc-thread-scroll>${messages.length?messages.map(m=>`${renderCircleBubble(m,n.id)}${m.id===lastOwn?.id&&lastOwn.type==='text'&&allowed?`<button type="button" class="ghc-edit-link" data-ghc-edit="${h(m.id)}"><i class="fa-solid fa-pen"></i> Edit latest text</button>`:''}`).join(''):`<div class="ghc-empty compact">You matched with ${h(n.name)}. Say hello whenever you're ready.</div>`}${busy==='reply'?`<div class="ghc-typing"><span></span><span></span><span></span><small>${h(n.name)} is typing…</small></div>`:''}</div>
+ <div class="ghc-thread-scroll" data-ghc-thread-scroll>${messages.length?messages.map(m=>renderCircleBubble(m,n.id)).join(''):`<div class="ghc-empty compact">You matched with ${h(n.name)}. Say hello whenever you're ready.</div>`}${busy==='reply'?`<div class="ghc-typing"><span></span><span></span><span></span><small>${h(n.name)} is typing…</small></div>`:''}</div>
  ${allowed?`<form class="ghc-compose" data-ghc-send><button type="button" class="ghc-compose-media" data-ghc-add-media title="Send or request photo/video"><i class="fa-solid fa-plus"></i></button><input autocomplete="off" maxlength="1200" name="message" placeholder="Message ${h(n.name)}…" ${busy?'disabled':''}><button type="submit" ${busy?'disabled':''} aria-label="Send"><i class="fa-solid fa-paper-plane"></i></button></form>`:`<div class="ghc-thread-closed"><i class="fa-solid fa-ban"></i> ${rel?.status==='npc-blocked'?'This character has blocked you.':rel?.status==='blocked'?'You blocked this character.':'This connection is no longer active.'}</div>`}</section>`;
 }
 function v2RenderMatches(){const o=owner();if(!o)return '';
- const current=o.pending.filter(x=>x.status==='matched'),pending=o.pending.filter(x=>x.status==='pending'),past=o.pending.filter(x=>['no-match','unmatched','blocked','npc-blocked'].includes(x.status));
- return `<section class="ghc-section"><div class="ghc-heading"><b>Connections</b><small>Conversation history stays here. Refresh never rerolls a rejected like.</small></div>
- ${current.length?current.map(x=>{const n=npc(x.npcId),msgs=allCircleMessages(x.npcId);const unread=msgs.filter(m=>!m.mine&&!m.read).length;return n?`<div class="ghc-match-split"><button type="button" class="ghc-matchrow" data-ghc-thread="${h(n.id)}"><span class="ghc-avatar small">${colorInitial(n.name)}</span><span><b>${h(n.name)}, ${n.age} ${unread?`<em>${unread}</em>`:''}</b><small>${h(msgs.at(-1)?.text||msgs.at(-1)?.mediaDescription||'Mutual match · Say hello')}</small></span><i class="fa-solid fa-chevron-right"></i></button><button type="button" class="ghc-open-profile" data-ghc-detail="${h(n.id)}" aria-label="View ${h(n.name)}'s profile"><i class="fa-regular fa-id-card"></i></button></div>`:''}).join(''):`<div class="ghc-empty compact">No connections yet. Keep discovering—most likes won't match.</div>`}
- ${pending.length?`<h3 class="ghc-subtitle">Waiting (${pending.length})</h3>${pending.map(x=>{const n=npc(x.npcId);return n?`<button type="button" class="ghc-pending" data-ghc-detail="${h(n.id)}"><b>${h(n.name)}</b><small>Liked ${h(when(x.likedAt))} · Check with Refresh</small></button>`:''}).join('')}`:''}
- ${past.length?`<h3 class="ghc-subtitle">Previous likes (${past.length})</h3>${past.map(x=>{const n=npc(x.npcId);return n?`<button type="button" class="ghc-pending" data-ghc-detail="${h(n.id)}"><b>${h(n.name)}</b><small>${x.status==='blocked'?'Blocked':x.status==='npc-blocked'?'They blocked you':x.status==='unmatched'?'Disconnected':'Not mutual'}</small></button>`:''}).join('')}`:''}</section>`;
+ const current=o.pending.filter(x=>x.status==='matched'),pending=o.pending.filter(x=>x.status==='pending');
+ const denied=o.pending.filter(x=>x.status==='no-match'),disconnected=o.pending.filter(x=>x.status==='unmatched');
+ const blocked=o.pending.filter(x=>['blocked','npc-blocked'].includes(x.status));
+ const list=(rows,subtitle,renderInfo)=>rows.length?`<h3 class="ghc-subtitle">${subtitle} (${rows.length})</h3>${rows.map(x=>{const n=npc(x.npcId);return n?`<button type="button" class="ghc-pending" data-ghc-detail="${h(n.id)}"><b>${h(n.name)}</b><small>${h(renderInfo(x))}</small></button>`:''}).join('')}`:'';
+ return `<section class="ghc-section"><div class="ghc-heading"><b>Connections</b><small>Review new matches and people you've liked.</small></div>
+ ${current.length?current.map(x=>{const n=npc(x.npcId),msgs=allCircleMessages(x.npcId);const unread=msgs.filter(m=>!m.mine&&!m.read).length;return n?`<div class="ghc-match-split"><button type="button" class="ghc-matchrow" data-ghc-thread="${h(n.id)}"><span class="ghc-avatar small">${colorInitial(n.name)}</span><span><b>${h(n.name)}, ${n.age} ${unread?`<em>${unread}</em>`:''}</b><small>${h(msgs.at(-1)?.text|| (msgs.at(-1)?.type!=='text'?'Photo/video':'') || 'Mutual match · Say hello')}</small></span><i class="fa-solid fa-chevron-right"></i></button><button type="button" class="ghc-open-profile" data-ghc-detail="${h(n.id)}" aria-label="View ${h(n.name)}'s profile"><i class="fa-regular fa-id-card"></i></button></div>`:''}).join(''):`<div class="ghc-empty compact">No matches yet.</div>`}
+ ${list(pending,'Awaiting refresh',x=>`Liked ${when(x.likedAt)} · Check with Refresh`)}
+ ${list(denied,'Denied',()=>`Not mutual · Available to review until next Refresh`)}
+ ${list(disconnected,'Disconnected',()=>`No longer connected · Available until next Refresh`)}
+ ${list(blocked,'Blocked',x=>x.status==='npc-blocked'?'They blocked you':'Blocked by you')}
+ </section>`;
 }
+
 function v2RenderDetail(){const n=npc(detailId);if(!n)return '<div class="ghc-empty">Profile unavailable.</div>';const relation=relationFor(n.id);const link=globalState()?.links?.[n.id];const meetingList=arr(owner()?.meetings?.[n.id]).slice(-4).reverse();
  return `<section class="ghc-section"><button type="button" class="ghc-text-back" data-ghc-detail-back><i class="fa-solid fa-chevron-left"></i> Back</button><div class="ghc-cardhead ghc-detailhead"><span class="ghc-avatar">${colorInitial(n.name)}</span><div><b>${h(n.name)}, ${h(n.age)}</b><span>${h(n.occupation||'Greyhaven resident')} · ${h(n.location)}</span></div></div><p>${h(n.bio||'')}</p><div class="ghc-tags">${n.gender?`<span>${h(n.gender)}</span>`:''}${arr(n.interests).map(v=>`<span>${h(v)}</span>`).join('')}</div><div class="ghc-block"><b>Personality</b><p>${h(n.personality||'Not disclosed yet.')}</p></div><div class="ghc-block"><b>Looking for</b><p>${h(n.lookingFor||'Open to new connections.')}</p></div><div class="ghc-actions">${relation?.status==='matched'?`<button type="button" class="ghc-primary" data-ghc-thread="${h(n.id)}">Open conversation</button>`:!relation?`<button type="button" class="ghc-primary" data-ghc-like-id="${h(n.id)}">Like</button>`:`<span class="ghc-hint">${h(relation.status==='pending'?'Like pending':relation.status==='no-match'?'Not mutual':relation.status)}</span>`}
  ${relation&&relation.status!=='blocked'?`<button type="button" data-ghc-remove-like="${h(n.id)}">${relation.status==='matched'?'Unmatch':'Remove like'}</button>`:''}
@@ -313,17 +405,17 @@ function v2Paint({resetScroll=false,preserveThread=false}={}){
 }
 async function hydrateCircleMedia(){const api=globalThis.GreyhavenPhoneImages;
  if(!api?.getMediaUrl)return;
- const images=[...document.querySelectorAll('#ghc-screen img[data-ghc-preview]')].slice(-35);
+ const images=[...document.querySelectorAll('#ghc-screen [data-ghc-preview]')].slice(-35);
  for(const image of images){const key=image.dataset.ghcPreview;if(image.dataset.loaded===key)continue;image.dataset.loaded=key;
-  const url=await api.getMediaUrl(key).catch(()=>null);if(image.isConnected&&image.dataset.ghcPreview===key&&url)image.src=url;}
+  const url=await api.getMediaUrl(key).catch(()=>null);if(image.isConnected&&image.dataset.ghcPreview===key&&url){image.src=url;if(image.tagName==='VIDEO')image.load?.();}}
 }
 function v2OpenThread(id){if(!npc(id))return;if(!opened)launch();if(!opened)return;markCircleRead(id);view='thread';detailId=id;notice='';editingMessageId='';paint({resetScroll:true});}
 function v2OpenDetails(id){if(!npc(id))return;detailReturn=view;view='detail';detailId=id;notice='';paint({resetScroll:true});}
 function v2BackDetails(){view=detailReturn==='thread'?'thread':detailReturn==='matches'?'matches':'discover';if(view==='thread'){markCircleRead(detailId)}else detailId='';notice='';paint({resetScroll:true})}
 function circleRemoveLike(id){const rel=relationFor(id);if(!rel)return;if(!confirm(`Disconnect from ${npc(id)?.name||'this person'}? Existing Circle conversation history will be kept, but messaging will stop.`))return;
- rel.status='unmatched';rel.willMatch=false;saveLocal();if(view==='thread')view='detail';notice='Connection removed; messages are kept for your records.';paint({resetScroll:true});}
+ rel.status='unmatched';rel.willMatch=false;rel.expiresOnRefresh=Number(owner()?.circleRefreshCount||0)+1;saveLocal();if(view==='thread')view='detail';notice='Disconnected. You can review the profile until the next Circle refresh.';paint({resetScroll:true});}
 function circleBlock(id){const n=npc(id),o=owner();if(!n||!o)return;if(!confirm(`Block ${n.name} on Circle? You will not receive messages from them.`))return;let rel=relationFor(id);if(!rel){rel={npcId:id,mode:n.mode,status:'blocked',willMatch:false,likedAt:now(),resolvedOnce:true};o.pending.push(rel)}else{rel.status='blocked';rel.willMatch=false;}o.blocked ||= [];if(!o.blocked.includes(id))o.blocked.push(id);saveLocal();if(view==='thread')view='detail';notice='Blocked. This character cannot contact this phone on Circle.';paint({resetScroll:true})}
-function circleUnblock(id){const o=owner();o.blocked=arr(o.blocked).filter(x=>x!==id);const r=relationFor(id);if(r)r.status='unmatched';saveLocal();notice='Unblocked. Previous messages remain, but the connection is no longer active.';paint()}
+function circleUnblock(id){const o=owner();o.blocked=arr(o.blocked).filter(x=>x!==id);const r=relationFor(id);if(r){r.status='unmatched';r.expiresOnRefresh=Number(o.circleRefreshCount||0)+1;}saveLocal();notice='Unblocked. Previous messages remain, but the connection is no longer active.';paint()}
 function v2ReplyPrompt(id){const n=npc(id),p=getMyProfile(),o=owner(),history=arr(o.messages[id]).slice(-18).map(x=>({from:x.mine?p.name:n.name,type:x.type,text:String(x.text||'').slice(0,450),mediaDescription:String(x.mediaDescription||'').slice(0,450),timeMs:x.timeMs}));
  const life=globalThis.GreyhavenLife,person=life?.getPerson?.(n.name)||null,ownerLife=life?.getPerson?.(p.name)||null;
  const systemPrompt=`You roleplay ${n.name}, a fictional adult on Circle (friendship/dating app). You are independent, not obedient. Return one JSON object ONLY: {"action":"reply|ignore|block","messages":[{"type":"text|photo|video","text":"brief natural in-character text","mediaDescription":"only for photo/video: exact scene and visible content"}],"meeting":{"status":"none|proposed|agreed|declined","location":"","timeISO":"","details":""}}.\nFor ordinary speech return 1–2 short natural messages. You may choose NOT to reply or BLOCK the contact if their behavior or your personality warrants it. Never force flirting, intimacy or agreement. You may independently send a photo/video when plausible; refuse media requests if you prefer. For photo/video, only give metadata: no URL, image file, attachment or tool calls. The user may later use Wiro's manual Generate button to create a local still-image preview. Do not send unsolicited media on every turn. Only mark meetings agreed if both people clearly confirmed time and place; otherwise proposed or none. No third-person narration, no impersonation, no gratuitous sexual content.`;
@@ -380,12 +472,13 @@ async function v2GenerateReply(id,stamp=origin(),{skipBusyGuard=false}={}){
  for(const x of parsed.messages)addCircleMessage(id,x,{incoming:true,notifyPhone:!opened||view!=='thread'});
  applyNpcMeeting(id,parsed.meeting);saveLocal();
 }
-async function v2SendMessage(form,{kind='text',mediaDescription='',requestMedia=''}={}){
+async function v2SendMessage(form,{kind='text',mediaDescription='',requestMedia='',localFile=null}={}){
  const id=detailId,n=npc(id);if(!n||!canChat(id)||busy)return;
  const val=kind==='text'?clean(typeof form?.querySelector==='function'?form.querySelector('input[name=message]')?.value||'':form?.text||'').slice(0,1200):clean(form?.text||'').slice(0,1200);
  if(kind==='text'&&!val)return;
  const type=['photo','video'].includes(kind)?kind:'text';if(type!=='text'&&!mediaDescription)return;
- const stamp=origin();addCircleMessage(id,{type,text:val,mediaDescription});
+ const stamp=origin();const sent=addCircleMessage(id,{type,text:val,mediaDescription});
+ if(sent&&localFile){const api=globalThis.GreyhavenPhoneImages,key=circleMediaKey(sent);try{if(!api?.attachLocalMedia||!key)throw Error('Local media storage unavailable.');const mediaKey=await api.attachLocalMedia(key,localFile);sent.mediaKey=mediaKey;sent.localPreviewType=localFile.type.startsWith('video/')?'video':'image';saveLocal();if(opened&&view==='thread')paint({preserveThread:true});}catch(e){notify('Message sent, but preview could not be saved: '+(e?.message||e),'warning')}}
  if(typeof form?.querySelector==='function'&&form.querySelector('input[name=message]'))form.querySelector('input[name=message]').value='';
  await busyGuard('reply',async()=>{await v2GenerateReply(id,stamp)});
 }
@@ -404,13 +497,14 @@ function v2MediaAction(){
  layer.innerHTML=`<form data-ghc-media-form><header><b>Circle media</b><button type="button" data-ghc-media-close aria-label="Close"><i class="fa-solid fa-xmark"></i></button></header>
  <label>What would you like to do?<select name="kind"><option value="request photo">Request a photo</option><option value="request video">Request a video</option><option value="photo">Send photo metadata</option><option value="video">Send video metadata</option></select></label>
  <label class="ghc-media-request">Request message<textarea name="request" rows="2">Could you send me a photo?</textarea></label>
- <label class="ghc-media-description" hidden>Visible content (description only — no file)<textarea name="description" rows="4" placeholder="Describe exactly what the photo or video shows…"></textarea></label>
+ <label class="ghc-media-description" hidden>Photo/video description (for character context and optional Wiro generation)<textarea name="description" rows="4" placeholder="Describe exactly what the photo or video shows…"></textarea></label>
+ <label class="ghc-media-file" hidden>Optional local preview (no AI needed)<input name="localFile" type="file" accept="image/*"><small>Photo or video file stays on this device. No preview is generated automatically.</small></label>
  <label class="ghc-media-caption" hidden>Optional caption<input name="caption" maxlength="700" placeholder="Caption…"></label>
- <p class="ghc-hint">Sending media creates metadata only. Wiro can generate a local still preview later, when you tap Generate.</p>
+ <p class="ghc-hint">Only the description is used as roleplay metadata. You can attach an optional local file for preview or generate a still with Wiro later.</p>
  <button type="submit" class="ghc-primary">Continue</button></form>`;
  screen.appendChild(layer);
  const select=layer.querySelector('select[name=kind]'),request=layer.querySelector('textarea[name=request]');
- select.addEventListener('change',()=>{const ask=select.value.startsWith('request');layer.querySelector('.ghc-media-request').hidden=!ask;layer.querySelector('.ghc-media-description').hidden=ask;layer.querySelector('.ghc-media-caption').hidden=ask;if(ask)request.value=`Could you send me a ${select.value.endsWith('video')?'video':'photo'}?`});
+ select.addEventListener('change',()=>{const ask=select.value.startsWith('request');layer.querySelector('.ghc-media-request').hidden=!ask;layer.querySelector('.ghc-media-description').hidden=ask;layer.querySelector('.ghc-media-caption').hidden=ask;layer.querySelector('.ghc-media-file').hidden=ask;layer.querySelector('[name=localFile]').accept=select.value==='video'?'video/*':'image/*';if(ask)request.value=`Could you send me a ${select.value.endsWith('video')?'video':'photo'}?`});
  layer.querySelector('[data-ghc-media-close]').addEventListener('click',()=>layer.remove());
 }
 function circleMediaKey(m){const api=globalThis.GreyhavenPhoneImages;api?.invalidate?.();const x=arr(api?.listCurrentMedia?.()).find(x=>x.app==='circle'&&x.id===m.id);return x?.key||'';}
@@ -418,12 +512,12 @@ async function circleGenerateMedia(mid,tools=false){const m=allCircleMessages(de
  const api=globalThis.GreyhavenPhoneImages,key=circleMediaKey(m);if(!api||!key)return notify('Wiro image tools are unavailable. Check Greyhaven Phone Image Settings.','warning');
  if(tools){api.openMediaTools(key);return;}
  if(m.mediaKey && !confirm('Regenerate the local preview? This makes another paid Wiro request.'))return;
- try{await (m.mediaKey?api.regenerateMedia(key):api.generateMedia(key));const updated=api.getMediaMetadata?.(key);if(updated?.mediaKey)m.mediaKey=updated.mediaKey;if(opened&&view==='thread')paint({preserveThread:true})}
+ try{await (m.mediaKey?api.regenerateMedia(key):api.generateMedia(key));const updated=api.getMediaMetadata?.(key);if(updated?.mediaKey){m.mediaKey=updated.mediaKey;m.localPreviewType='image';saveLocal();}if(opened&&view==='thread')paint({preserveThread:true})}
  catch(e){notify('Wiro generation error: '+(e.message||e),'error')}
 }
 async function circleSaveImage(mid){const m=allCircleMessages(detailId).find(x=>x.id===mid);if(!m?.mediaKey)return;
  const url=await globalThis.GreyhavenPhoneImages?.getMediaUrl?.(m.mediaKey);if(!url)return notify('Local preview is unavailable on this device.','warning');
- const blob=await fetch(url).then(r=>r.blob()),file=new File([blob],`${npc(detailId)?.name||'Circle'}-${mid}.jpg`,{type:blob.type||'image/jpeg'});
+ const blob=await fetch(url).then(r=>r.blob()),isVideo=blob.type.startsWith('video/'),ext=isVideo?'mp4':'jpg',file=new File([blob],`${npc(detailId)?.name||'Circle'}-${mid}.${ext}`,{type:blob.type||(isVideo?'video/mp4':'image/jpeg')});
  if(navigator.canShare?.({files:[file]})&&navigator.share){await navigator.share({files:[file],title:'Circle image'});return;}
  const a=document.createElement('a');a.href=url;a.download=file.name;document.body.appendChild(a);a.click();a.remove();
 }
@@ -495,6 +589,11 @@ function boot(){const c=context();if(!c||!phone()||!document.querySelector('#ghp
  document.addEventListener('submit',handleSubmit,true);
  document.addEventListener('pointerdown',handleDown,{capture:true,passive:true});
  document.addEventListener('pointerup',handleUp,{capture:true,passive:false});
+ document.addEventListener('pointerdown',handleMessageHoldDown,{capture:true,passive:true});
+ document.addEventListener('pointermove',handleMessageHoldMove,{capture:true,passive:true});
+ document.addEventListener('pointerup',handleMessageHoldUp,{capture:true,passive:false});
+ document.addEventListener('pointercancel',resetCircleHold,{capture:true,passive:true});
+ document.addEventListener('contextmenu',handleMessageContextMenu,true);
  const events=c.eventSource,types=c.eventTypes;for(const k of ['CHAT_CHANGED','CHAT_CREATED','PERSONA_CHANGED'])if(events&&types?.[k])events.on(types[k],()=>{close();seenChat=origin();circleUpdateRpPrompt()});
  globalThis.GreyhavenCircle={version:VERSION,open:launch,openThread:v2OpenThread,close,getProfile:getMyProfile,getNpc:id=>npc(id),getChatState:()=>owner(),getUnreadCount:circleUnread,getRefreshContext:circleRefreshContext,applyPhoneEvents:circleApplyPhoneEvents,getMediaItems:mediaItemsForImageGen,getMediaMessage:(id,mid)=>allCircleMessages(id).find(m=>m.id===mid)||null,getMeetings:id=>arr(owner()?.meetings?.[id]),getPromptSummary:speakerCircleMemory};
  circleUpdateRpPrompt();
