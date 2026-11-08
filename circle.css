@@ -171,3 +171,8 @@
 #ghc-screen .ghc-media-file input[type=file]{padding:8px;background:#252635;border:1px dashed #715b9b}
 #ghc-screen .ghc-media-file small{font-size:10px;line-height:1.4;color:#aaa2c3;font-weight:400}
 #ghc-screen .ghc-action-overlay [data-ghc-menu-close]{cursor:pointer}
+
+/* v2.15.2: Archived chat rows retain normal full-width navigation; destructive action is distinct. */
+#ghc-screen .ghc-archive-row{margin-bottom:7px}
+#ghc-screen .ghc-action-sheet>button.ghc-danger{color:#ffb8ba}
+#ghc-screen .ghc-action-sheet>button.ghc-danger i{color:#ff959a}

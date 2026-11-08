@@ -4,7 +4,7 @@
  */
 import {clean,nameKey,looseJson,within,normalProfile,validatedBatch,refreshPending,preparePending,chatKey} from './circle-core.mjs';
 
-const VERSION='2.1.0', KEY='greyhavenPhone';
+const VERSION='2.1.1', KEY='greyhavenPhone';
 const h=v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;');
 const uuid=()=>{try{return crypto.randomUUID()}catch{return `circle-${Date.now()}-${Math.random().toString(36).slice(2)}`}};
 const context=()=>{try{return globalThis.SillyTavern?.getContext?.()||null}catch{return null}};
@@ -125,29 +125,37 @@ function swipe(like,idFromDetail=''){
  saveLocal();paint({resetScroll:false});
 }
 function pruneCircleNpc(id) {
- const s=localState(),o=owner(),g=globalState();if(!s||!o||!g)return;
+ const s=localState(),o=owner(),g=globalState();if(!s||!o||!g)return false;
+ // Fail CLOSED: protect every conversation, meeting and permanently linked character.
+ // The prior implementation deleted owner.messages BEFORE checking references.
+ if(isCircleHistoryProtected(id))return false;
+ // Never prune an active or blocked relationship. Blocked people must stay blocked
+ // so refreshing cannot rediscover or unblock them by accident.
+ const referencedByOthers=Object.values(s.owners||{}).some(other=>
+   arr(other.pending).some(p=>p.npcId===id&&['pending','matched','blocked','npc-blocked'].includes(p.status)) ||
+   Object.values(other.feeds||{}).some(f=>arr(f?.ids).includes(id) && arr(f?.ids).indexOf(id)>=Number(f?.index||0)) ||
+   arr(other.blocked).includes(id));
+ if(referencedByOthers)return false;
  o.pending=o.pending.filter(p=>p.npcId!==id);
  for(const f of Object.values(o.feeds||{})){
-  if(!f?.ids)continue;
-  const old=f.ids.slice(0,f.index);f.ids=f.ids.filter(x=>x!==id);f.index=Math.min(f.ids.length,old.filter(x=>x!==id).length);
+   if(!f?.ids)continue;
+   const consumed=f.ids.slice(0,f.index);f.ids=f.ids.filter(x=>x!==id);
+   f.index=Math.min(f.ids.length,consumed.filter(x=>x!==id).length);
  }
- if(!g.links?.[id]){delete o.messages[id];delete o.meetings?.[id];}
  o.blocked=arr(o.blocked).filter(x=>x!==id);
- if(g.links?.[id])return; // Linked characters retain their Circle history and full card.
- const referenced=Object.values(s.owners||{}).some(other=>arr(other.pending).some(p=>p.npcId===id)||Object.values(other.feeds||{}).some(f=>arr(f?.ids).includes(id))||arr(other.blocked).includes(id)||arr(other.messages?.[id]).length>0);
- if(referenced)return;
- const n=s.npcs[id];if(!n)return;
+ delete o.messages[id];if(o.meetings)delete o.meetings[id];
+ const n=s.npcs[id];if(!n)return true;
  if(g.nameRegistry?.[nameKey(n.name)]?.id===id)delete g.nameRegistry[nameKey(n.name)];
- delete s.npcs[id];
+ delete s.npcs[id];return true;
 }
 function manualRefresh(){
  if(busy)return;const o=owner();if(!o)return;
  const current=++o.circleRefreshCount;
  // A rejected/unmatched profile is visible for exactly one review interval.
- const old=o.pending.filter(p=>['no-match','unmatched'].includes(p.status)&&p.expiresOnRefresh!==undefined&&Number(p.expiresOnRefresh)<=current).map(p=>p.npcId);
+ const old=o.pending.filter(p=>['no-match','unmatched'].includes(p.status)&&p.expiresOnRefresh!==undefined&&Number(p.expiresOnRefresh)<=current&&!isCircleHistoryProtected(p.npcId)).map(p=>p.npcId);
  for(const id of old)pruneCircleNpc(id);
  // Older completed likes from previous versions get a single review interval.
- for(const p of o.pending)if(['no-match','unmatched'].includes(p.status)&&p.expiresOnRefresh===undefined)p.expiresOnRefresh=current+1;
+ for(const p of o.pending)if(['no-match','unmatched'].includes(p.status)&&p.expiresOnRefresh===undefined&&!isCircleHistoryProtected(p.npcId))p.expiresOnRefresh=current+1;
  const events=refreshPending(o.pending,now());
  for(const e of events)if(e.status==='no-match'){
   const p=relationFor(e.id);if(p)p.expiresOnRefresh=current+1;
@@ -183,6 +191,7 @@ function handleScreenClick(e){
  const b=e.target.closest('button');if(!b)return;
  if(b.type==='submit')return; // form submit handles text and edits exactly once
  e.preventDefault();
+ if(b.closest('#ghc-message-menu'))closeCircleMessageMenu();
  if(b.hasAttribute('data-ghc-menu-close')){closeCircleMessageMenu();return;}
  if(b.dataset.ghcReplacePreview){closeCircleMessageMenu();return circleReplacePreview(b.dataset.ghcReplacePreview)}
  if(b.dataset.ghcViewMetadata){const m=allCircleMessages(detailId).find(x=>x.id===b.dataset.ghcViewMetadata);closeCircleMessageMenu();if(m)alert(m.mediaDescription||'No description available.');return;}
@@ -192,6 +201,8 @@ function handleScreenClick(e){
  if(b.hasAttribute('data-ghc-thread-back')){view='matches';detailId='';notice='';return paint({resetScroll:true})}
  if(b.hasAttribute('data-ghc-profile-from-thread'))return openDetails(detailId);
  if(b.hasAttribute('data-ghc-thread-menu'))return circleEditingMenu();
+ if(b.hasAttribute('data-ghc-propose-meeting'))return circleProposeMeeting();
+ if(b.hasAttribute('data-ghc-delete-chat'))return deleteCircleChat(b.dataset.ghcDeleteChat);
  if(b.hasAttribute('data-ghc-media-close')){b.closest('#ghc-media-popup')?.remove();return}
  if(b.hasAttribute('data-ghc-detail-back'))return v2BackDetails();
  if(b.hasAttribute('data-ghc-add-media'))return v2MediaAction();
@@ -289,6 +300,14 @@ function handleUp(e){if(!tStart)return;const x=e.clientX-tStart.x,y=e.clientY-tS
 let detailReturn='discover', editingMessageId='', pendingEditText='', aiReplyEpoch=0, circleSaveBusy=false;
 const circleMeId=()=>String(me()?.id||'');
 const relationFor=id=>owner()?.pending?.find(x=>x.npcId===id)||null;
+// Chat history is valuable even after unmatching or blocking. Never let a routine
+// refresh delete a conversation or its meeting arrangements. This also protects
+// chats belonging to another persona in the same chat.
+function hasCircleHistory(o,id){return arr(o?.messages?.[id]).length>0 || arr(o?.meetings?.[id]).length>0;}
+function isCircleHistoryProtected(id){
+ const s=localState();const g=globalState();
+ return !!g?.links?.[id] || Object.values(s?.owners||{}).some(o=>hasCircleHistory(o,id));
+}
 const canChat=id=>relationFor(id)?.status==='matched' && !(owner()?.blocked||[]).includes(id);
 function allCircleMessages(id){return arr(owner()?.messages?.[id]);}
 function mediaItemsForImageGen(){
@@ -369,16 +388,18 @@ function v2RenderThread(){
  const rel=relationFor(n.id);const messages=allCircleMessages(n.id);
  const allowed=canChat(n.id);
  return `<section class="ghc-full-thread"><header class="ghc-full-thread-head"><button type="button" data-ghc-thread-back aria-label="Back to Connections"><i class="fa-solid fa-chevron-left"></i></button><button type="button" data-ghc-profile-from-thread class="ghc-thread-person"><span class="ghc-avatar small">${colorInitial(n.name)}</span><span><b>${h(n.name)}</b><small>${h(n.occupation||'Circle connection')}${busy==='reply'?' · typing…':''}</small></span></button><button type="button" data-ghc-thread-menu aria-label="Options"><i class="fa-solid fa-ellipsis"></i></button></header>
- <div class="ghc-thread-scroll" data-ghc-thread-scroll>${messages.length?messages.map(m=>renderCircleBubble(m,n.id)).join(''):`<div class="ghc-empty compact">You matched with ${h(n.name)}. Say hello whenever you're ready.</div>`}${busy==='reply'?`<div class="ghc-typing"><span></span><span></span><span></span><small>${h(n.name)} is typing…</small></div>`:''}</div>
+ <div class="ghc-thread-scroll" data-ghc-thread-scroll>${messages.length?messages.map(m=>renderCircleBubble(m,n.id)).join(''):`<div class="ghc-empty compact">No messages yet with ${h(n.name)}.</div>`}${busy==='reply'?`<div class="ghc-typing"><span></span><span></span><span></span><small>${h(n.name)} is typing…</small></div>`:''}</div>
  ${allowed?`<form class="ghc-compose" data-ghc-send><button type="button" class="ghc-compose-media" data-ghc-add-media title="Send or request photo/video"><i class="fa-solid fa-plus"></i></button><input autocomplete="off" maxlength="1200" name="message" placeholder="Message ${h(n.name)}…" ${busy?'disabled':''}><button type="submit" ${busy?'disabled':''} aria-label="Send"><i class="fa-solid fa-paper-plane"></i></button></form>`:`<div class="ghc-thread-closed"><i class="fa-solid fa-ban"></i> ${rel?.status==='npc-blocked'?'This character has blocked you.':rel?.status==='blocked'?'You blocked this character.':'This connection is no longer active.'}</div>`}</section>`;
 }
 function v2RenderMatches(){const o=owner();if(!o)return '';
  const current=o.pending.filter(x=>x.status==='matched'),pending=o.pending.filter(x=>x.status==='pending');
- const denied=o.pending.filter(x=>x.status==='no-match'),disconnected=o.pending.filter(x=>x.status==='unmatched');
- const blocked=o.pending.filter(x=>['blocked','npc-blocked'].includes(x.status));
+ const archived=o.pending.filter(x=>x.status!=='matched'&&hasCircleHistory(o,x.npcId));
+ const denied=o.pending.filter(x=>x.status==='no-match'&&!hasCircleHistory(o,x.npcId)),disconnected=o.pending.filter(x=>x.status==='unmatched'&&!hasCircleHistory(o,x.npcId));
+ const blocked=o.pending.filter(x=>['blocked','npc-blocked'].includes(x.status)&&!hasCircleHistory(o,x.npcId));
  const list=(rows,subtitle,renderInfo)=>rows.length?`<h3 class="ghc-subtitle">${subtitle} (${rows.length})</h3>${rows.map(x=>{const n=npc(x.npcId);return n?`<button type="button" class="ghc-pending" data-ghc-detail="${h(n.id)}"><b>${h(n.name)}</b><small>${h(renderInfo(x))}</small></button>`:''}).join('')}`:'';
  return `<section class="ghc-section"><div class="ghc-heading"><b>Connections</b><small>Review new matches and people you've liked.</small></div>
  ${current.length?current.map(x=>{const n=npc(x.npcId),msgs=allCircleMessages(x.npcId);const unread=msgs.filter(m=>!m.mine&&!m.read).length;return n?`<div class="ghc-match-split"><button type="button" class="ghc-matchrow" data-ghc-thread="${h(n.id)}"><span class="ghc-avatar small">${colorInitial(n.name)}</span><span><b>${h(n.name)}, ${n.age} ${unread?`<em>${unread}</em>`:''}</b><small>${h(msgs.at(-1)?.text|| (msgs.at(-1)?.type!=='text'?'Photo/video':'') || 'Mutual match · Say hello')}</small></span><i class="fa-solid fa-chevron-right"></i></button><button type="button" class="ghc-open-profile" data-ghc-detail="${h(n.id)}" aria-label="View ${h(n.name)}'s profile"><i class="fa-regular fa-id-card"></i></button></div>`:''}).join(''):`<div class="ghc-empty compact">No matches yet.</div>`}
+ ${archived.length?`<h3 class="ghc-subtitle">Saved conversations (${archived.length})</h3>${archived.map(x=>{const n=npc(x.npcId),msgs=allCircleMessages(x.npcId);if(!n)return '';const status=x.status==='npc-blocked'?'They blocked you':x.status==='blocked'?'Blocked by you':x.status==='unmatched'?'Unmatched':'Not connected';return `<div class="ghc-match-split ghc-archive-row"><button type="button" class="ghc-matchrow" data-ghc-thread="${h(n.id)}"><span class="ghc-avatar small">${colorInitial(n.name)}</span><span><b>${h(n.name)}</b><small>${h(status)} · ${msgs.length} saved message${msgs.length===1?'':'s'}</small></span><i class="fa-solid fa-chevron-right"></i></button><button type="button" class="ghc-open-profile" data-ghc-detail="${h(n.id)}" aria-label="View ${h(n.name)}'s profile"><i class="fa-regular fa-id-card"></i></button></div>`;}).join('')}`:''}
  ${list(pending,'Awaiting refresh',x=>`Liked ${when(x.likedAt)} · Check with Refresh`)}
  ${list(denied,'Denied',()=>`Not mutual · Available to review until next Refresh`)}
  ${list(disconnected,'Disconnected',()=>`No longer connected · Available until next Refresh`)}
@@ -387,7 +408,7 @@ function v2RenderMatches(){const o=owner();if(!o)return '';
 }
 
 function v2RenderDetail(){const n=npc(detailId);if(!n)return '<div class="ghc-empty">Profile unavailable.</div>';const relation=relationFor(n.id);const link=globalState()?.links?.[n.id];const meetingList=arr(owner()?.meetings?.[n.id]).slice(-4).reverse();
- return `<section class="ghc-section"><button type="button" class="ghc-text-back" data-ghc-detail-back><i class="fa-solid fa-chevron-left"></i> Back</button><div class="ghc-cardhead ghc-detailhead"><span class="ghc-avatar">${colorInitial(n.name)}</span><div><b>${h(n.name)}, ${h(n.age)}</b><span>${h(n.occupation||'Greyhaven resident')} · ${h(n.location)}</span></div></div><p>${h(n.bio||'')}</p><div class="ghc-tags">${n.gender?`<span>${h(n.gender)}</span>`:''}${arr(n.interests).map(v=>`<span>${h(v)}</span>`).join('')}</div><div class="ghc-block"><b>Personality</b><p>${h(n.personality||'Not disclosed yet.')}</p></div><div class="ghc-block"><b>Looking for</b><p>${h(n.lookingFor||'Open to new connections.')}</p></div><div class="ghc-actions">${relation?.status==='matched'?`<button type="button" class="ghc-primary" data-ghc-thread="${h(n.id)}">Open conversation</button>`:!relation?`<button type="button" class="ghc-primary" data-ghc-like-id="${h(n.id)}">Like</button>`:`<span class="ghc-hint">${h(relation.status==='pending'?'Like pending':relation.status==='no-match'?'Not mutual':relation.status)}</span>`}
+ return `<section class="ghc-section"><button type="button" class="ghc-text-back" data-ghc-detail-back><i class="fa-solid fa-chevron-left"></i> Back</button><div class="ghc-cardhead ghc-detailhead"><span class="ghc-avatar">${colorInitial(n.name)}</span><div><b>${h(n.name)}, ${h(n.age)}</b><span>${h(n.occupation||'Greyhaven resident')} · ${h(n.location)}</span></div></div><p>${h(n.bio||'')}</p><div class="ghc-tags">${n.gender?`<span>${h(n.gender)}</span>`:''}${arr(n.interests).map(v=>`<span>${h(v)}</span>`).join('')}</div><div class="ghc-block"><b>Personality</b><p>${h(n.personality||'Not disclosed yet.')}</p></div><div class="ghc-block"><b>Looking for</b><p>${h(n.lookingFor||'Open to new connections.')}</p></div><div class="ghc-actions">${(relation?.status==='matched'||hasCircleHistory(owner(),n.id))?`<button type="button" class="ghc-primary" data-ghc-thread="${h(n.id)}">${relation?.status==='matched'?'Open conversation':'View saved conversation'}</button>`:!relation?`<button type="button" class="ghc-primary" data-ghc-like-id="${h(n.id)}">Like</button>`:`<span class="ghc-hint">${h(relation.status==='pending'?'Like pending':relation.status==='no-match'?'Not mutual':relation.status)}</span>`}
  ${relation&&relation.status!=='blocked'?`<button type="button" data-ghc-remove-like="${h(n.id)}">${relation.status==='matched'?'Unmatch':'Remove like'}</button>`:''}
  ${relation?.status!=='blocked'?`<button type="button" data-ghc-block="${h(n.id)}"><i class="fa-solid fa-ban"></i> Block</button>`:`<button type="button" data-ghc-unblock="${h(n.id)}">Unblock</button>`}</div>
  <div class="ghc-block"><b>SillyTavern character creator</b><p>Private first-person character card. Review or edit it before creating the character.</p><div class="ghc-actions"><button type="button" data-ghc-card ${busy?'disabled':''}>${n.fullCard?'Regenerate card':'Generate character card'}</button>${n.fullCard?`<button type="button" data-ghc-copy>Copy card</button>`:''}</div>
@@ -413,9 +434,9 @@ function v2OpenThread(id){if(!npc(id))return;if(!opened)launch();if(!opened)retu
 function v2OpenDetails(id){if(!npc(id))return;detailReturn=view;view='detail';detailId=id;notice='';paint({resetScroll:true});}
 function v2BackDetails(){view=detailReturn==='thread'?'thread':detailReturn==='matches'?'matches':'discover';if(view==='thread'){markCircleRead(detailId)}else detailId='';notice='';paint({resetScroll:true})}
 function circleRemoveLike(id){const rel=relationFor(id);if(!rel)return;if(!confirm(`Disconnect from ${npc(id)?.name||'this person'}? Existing Circle conversation history will be kept, but messaging will stop.`))return;
- rel.status='unmatched';rel.willMatch=false;rel.expiresOnRefresh=Number(owner()?.circleRefreshCount||0)+1;saveLocal();if(view==='thread')view='detail';notice='Disconnected. You can review the profile until the next Circle refresh.';paint({resetScroll:true});}
-function circleBlock(id){const n=npc(id),o=owner();if(!n||!o)return;if(!confirm(`Block ${n.name} on Circle? You will not receive messages from them.`))return;let rel=relationFor(id);if(!rel){rel={npcId:id,mode:n.mode,status:'blocked',willMatch:false,likedAt:now(),resolvedOnce:true};o.pending.push(rel)}else{rel.status='blocked';rel.willMatch=false;}o.blocked ||= [];if(!o.blocked.includes(id))o.blocked.push(id);saveLocal();if(view==='thread')view='detail';notice='Blocked. This character cannot contact this phone on Circle.';paint({resetScroll:true})}
-function circleUnblock(id){const o=owner();o.blocked=arr(o.blocked).filter(x=>x!==id);const r=relationFor(id);if(r){r.status='unmatched';r.expiresOnRefresh=Number(o.circleRefreshCount||0)+1;}saveLocal();notice='Unblocked. Previous messages remain, but the connection is no longer active.';paint()}
+ rel.status='unmatched';rel.willMatch=false;rel.expiresOnRefresh=isCircleHistoryProtected(id)?null:Number(owner()?.circleRefreshCount||0)+1;saveLocal();circleUpdateRpPrompt();if(view==='thread')view='matches';notice=hasCircleHistory(owner(),id)?'Disconnected. The full conversation is saved in Archived conversations.':'Disconnected. You can review the profile until the next refresh.';paint({resetScroll:true});}
+function circleBlock(id){const n=npc(id),o=owner();if(!n||!o)return;if(!confirm(`Block ${n.name} on Circle? You will not receive messages from them.`))return;let rel=relationFor(id);if(!rel){rel={npcId:id,mode:n.mode,status:'blocked',willMatch:false,likedAt:now(),resolvedOnce:true};o.pending.push(rel)}else{rel.status='blocked';rel.willMatch=false;}o.blocked ||= [];if(!o.blocked.includes(id))o.blocked.push(id);saveLocal();circleUpdateRpPrompt();if(view==='thread')view='matches';notice=hasCircleHistory(o,id)?'Blocked. Your conversation is saved as read-only history.':'Blocked. This character cannot contact this phone on Circle.';paint({resetScroll:true})}
+function circleUnblock(id){const o=owner();o.blocked=arr(o.blocked).filter(x=>x!==id);const r=relationFor(id);if(r){r.status='unmatched';r.expiresOnRefresh=isCircleHistoryProtected(id)?null:Number(o.circleRefreshCount||0)+1;}saveLocal();notice='Unblocked. Previous messages remain, but the connection is no longer active.';paint()}
 function v2ReplyPrompt(id){const n=npc(id),p=getMyProfile(),o=owner(),history=arr(o.messages[id]).slice(-18).map(x=>({from:x.mine?p.name:n.name,type:x.type,text:String(x.text||'').slice(0,450),mediaDescription:String(x.mediaDescription||'').slice(0,450),timeMs:x.timeMs}));
  const life=globalThis.GreyhavenLife,person=life?.getPerson?.(n.name)||null,ownerLife=life?.getPerson?.(p.name)||null;
  const systemPrompt=`You roleplay ${n.name}, a fictional adult on Circle (friendship/dating app). You are independent, not obedient. Return one JSON object ONLY: {"action":"reply|ignore|block","messages":[{"type":"text|photo|video","text":"brief natural in-character text","mediaDescription":"only for photo/video: exact scene and visible content"}],"meeting":{"status":"none|proposed|agreed|declined","location":"","timeISO":"","details":""}}.\nFor ordinary speech return 1–2 short natural messages. You may choose NOT to reply or BLOCK the contact if their behavior or your personality warrants it. Never force flirting, intimacy or agreement. You may independently send a photo/video when plausible; refuse media requests if you prefer. For photo/video, only give metadata: no URL, image file, attachment or tool calls. The user may later use Wiro's manual Generate button to create a local still-image preview. Do not send unsolicited media on every turn. Only mark meetings agreed if both people clearly confirmed time and place; otherwise proposed or none. No third-person narration, no impersonation, no gratuitous sexual content.`;
@@ -466,7 +487,7 @@ async function v2GenerateReply(id,stamp=origin(),{skipBusyGuard=false}={}){
    const rel=relationFor(id);rel.status='npc-blocked';rel.willMatch=false;
    const o=owner();o.blocked ||= [];if(!o.blocked.includes(id))o.blocked.push(id);
    if(parsed.messages.length){for(const x of parsed.messages)addCircleMessage(id,x,{incoming:true,notifyPhone:!opened});}
-   notice=`${npc(id).name} ended the connection and blocked you.`;saveLocal();return;
+   notice=`${npc(id).name} ended the connection and blocked you. The conversation was saved.`;saveLocal();circleUpdateRpPrompt();return;
  }
  if(parsed.action==='ignore'){notice=`${npc(id).name} hasn't replied.`;return;}
  for(const x of parsed.messages)addCircleMessage(id,x,{incoming:true,notifyPhone:!opened||view!=='thread'});
@@ -521,9 +542,34 @@ async function circleSaveImage(mid){const m=allCircleMessages(detailId).find(x=>
  if(navigator.canShare?.({files:[file]})&&navigator.share){await navigator.share({files:[file],title:'Circle image'});return;}
  const a=document.createElement('a');a.href=url;a.download=file.name;document.body.appendChild(a);a.click();a.remove();
 }
-function circleEditingMenu(){const id=detailId,n=npc(id);if(!n)return;const choices='Profile / Propose meeting / Unmatch / Block';const result=prompt(`${n.name} · Choose: ${choices}`,'Profile');if(!result)return;
- const choice=result.trim().toLowerCase();if(choice==='profile')return openDetails(id);if(choice==='unmatch')return circleRemoveLike(id);if(choice==='block')return circleBlock(id);
- if(choice==='propose meeting')return circleProposeMeeting();
+function deleteCircleChat(id){
+ const n=npc(id),o=owner();if(!n||!o)return;
+ const messages=arr(o.messages?.[id]),meetings=arr(o.meetings?.[id]);
+ if(!messages.length&&!meetings.length){notify('There is no conversation history to delete.','info');return;}
+ if(!confirm(`Permanently delete the Circle conversation with ${n.name}?\n\nThis removes ${messages.length} messages and ${meetings.length} saved meeting notes from this chat and from Circle's roleplay memory. This cannot be undone. It will NOT delete an existing SillyTavern character.`))return;
+ delete o.messages[id];if(o.meetings)delete o.meetings[id];
+ // Clear Circle-specific lock-screen notices for this conversation.
+ const root=context()?.chatMetadata?.[KEY];const identity=me()?.id;
+ const t=root?.phones?.[`phone-id:${encodeURIComponent(String(identity||''))}`]||Object.values(root?.phones||{}).find(x=>x?.identityId===identity);
+ if(t?.notifications)t.notifications=arr(t.notifications).filter(x=>!(x.app==='circle'&&x.targetId===id));
+ // Preserve block / match / identity state. Only the user explicitly deletes history.
+ saveLocal();globalThis.GreyhavenPhoneImages?.invalidate?.();circleUpdateRpPrompt();
+ closeCircleMessageMenu();view='matches';detailId='';notice=`Conversation with ${n.name} deleted.`;paint({resetScroll:true});notify('Circle conversation deleted.','success');
+}
+function circleEditingMenu(){
+ const id=detailId,n=npc(id),r=relationFor(id),o=owner();if(!n)return;
+ closeCircleMessageMenu();const blocked=r?.status==='blocked'||arr(o?.blocked).includes(id);
+ const rows=[
+  ['View profile','address-card','data-ghc-profile-from-thread'],
+  ...(canChat(id)?[['Propose a meeting','calendar-plus','data-ghc-propose-meeting']]:[]),
+  ...(r?.status==='matched'?[['Unmatch','heart-crack','data-ghc-remove-like']]:[]),
+  ...(blocked?[['Unblock','shield','data-ghc-unblock']]:r?.status!=='npc-blocked'?[['Block','ban','data-ghc-block']]:[]),
+  ...(hasCircleHistory(o,id)?[['Delete conversation','trash','data-ghc-delete-chat']]:[]),
+ ];
+ const screen=document.querySelector('#ghc-screen');if(!screen)return;
+ const menu=document.createElement('div');menu.id='ghc-message-menu';menu.className='ghc-action-overlay';
+ menu.innerHTML=`<div class="ghc-action-scrim" data-ghc-menu-close></div><section class="ghc-action-sheet" role="dialog" aria-label="${h(n.name)} conversation options"><header><b>${h(n.name)} · Options</b><button type="button" data-ghc-menu-close aria-label="Close"><i class="fa-solid fa-xmark"></i></button></header>${rows.map(([label,icon,action])=>`<button type="button" ${action}="${h(id)}" ${action==='data-ghc-delete-chat'?'class="ghc-danger"':''}><i class="fa-solid fa-${icon}"></i>${h(label)}</button>`).join('')}</section>`;
+ screen.appendChild(menu);
 }
 function circleProposeMeeting(){const n=npc(detailId);if(!n||!canChat(n.id))return;
  const place=prompt('Where would you like to meet?','Greyhaven downtown coffee shop');if(!clean(place))return;
