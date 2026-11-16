@@ -2,6 +2,7 @@ export const GHIMG_MODELS = Object.freeze({
   'seedream-v5-lite-uncensored': { label: 'Seedream v5 Lite Uncensored · $0.035/image', owner: 'ByteDance', resolution: '2k', maxReferences: 14 },
   'seedream-v5-pro-uncensored': { label: 'Seedream v5 Pro Uncensored · $0.045/image', owner: 'ByteDance', resolution: '2k', maxReferences: 10 },
   'seedream-v4-5-uncensored': { label: 'Seedream v4.5 Uncensored · $0.040/image', owner: 'ByteDance', resolution: '2k', maxReferences: 14 },
+  'seedream-5-5-uncensored-advanced': { label: 'Seedream 5.5 Uncensored Advanced', owner: 'ByteDance', resolution: '2k', maxReferences: 10 },
 });
 
 export const DEFAULT_IMAGE_MODEL = 'seedream-v5-lite-uncensored';
@@ -38,42 +39,40 @@ export function resolveImageSubjects({ description='', sender=null, identities=[
     if (nameKey) uniqueByName.set(nameKey, identity);
   };
 
-  // Canonicalize the sender against the supplied identity directory. Greyhaven
-  // character names are unique, so this also protects older chats that may have
-  // a duplicate/legacy phone identity for the same person.
+  // Use one canonical character, even for legacy/duplicated phone identities.
   const senderIdentity = sender?.id
     ? identities.find(x => x?.id === sender.id)
       || identities.find(x => lower(x?.name) === lower(sender?.name))
       || sender
     : identities.find(x => lower(x?.name) === lower(sender?.name));
 
-  // First-person wording always belongs to the sender of the media packet.
+  // 'I / me / my' in an attachment refers to the person sending it.
   if (senderIdentity && /\b(?:i|me|my|mine|myself)\b/iu.test(text)) add(senderIdentity);
 
-  // Exact known names only. No fuzzy guessing, partial-name matching or
-  // group-membership inference. Longer names are tested first.
+  // Add every explicitly named character; do not infer unrelated contacts.
   const sorted = [...identities]
     .filter(x => x?.id && cleanText(x?.name))
     .sort((a,b) => cleanText(b.name).length - cleanText(a.name).length);
-
   for (const identity of sorted) {
     const rx = exactNameRegex(identity.name);
     if (rx?.test(text)) add(identity);
   }
 
+  // Even without a name in the caption, a sender's photo should use their pack.
+  if (!uniqueIds.size && senderIdentity) add(senderIdentity);
   return [...uniqueByName.values()];
 }
 
+// Kept for backwards compatibility with other Greyhaven modules. Wardrobe
+// details are NOT added to the Wiro prompt unless they already exist in metadata.
 export function describeWardrobeForImage({ identity, outfit, catalog }={}) {
   const name = cleanText(identity?.name || 'Person');
   if (!outfit || outfit.mode === 'unknown') return '';
   if (outfit.mode === 'naked') return `${name} is naked.`;
   if (outfit.mode !== 'set') return '';
-
   const worn = [];
   const categories = catalog && typeof catalog === 'object' ? catalog : {};
   const items = outfit.items && typeof outfit.items === 'object' ? outfit.items : {};
-
   for (const [categoryId, rows] of Object.entries(items)) {
     const category = categories[categoryId];
     for (const row of Array.isArray(rows) ? rows : []) {
@@ -85,16 +84,13 @@ export function describeWardrobeForImage({ identity, outfit, catalog }={}) {
       worn.push(color ? `${color} ${label}` : label);
     }
   }
-
   if (outfit.coverage !== 'partial') {
     if (!worn.length) return `${name} is naked.`;
     return `${name} is ONLY wearing: ${worn.join('; ')}. Nothing else is being worn.`;
   }
-
   const knownAbsent = (Array.isArray(outfit.knownAbsent) ? outfit.knownAbsent : [])
     .map(id => cleanText(categories[id]?.label || id.replaceAll('_',' ')))
     .filter(Boolean);
-
   const pieces = [];
   if (worn.length) pieces.push(`${name} is currently known to be wearing: ${worn.join('; ')}.`);
   if (knownAbsent.length) pieces.push(`${name} is explicitly not wearing: ${knownAbsent.join(', ')}.`);
@@ -107,7 +103,6 @@ export function selectReferenceAssignments({ subjects=[], packs={}, maxTotal=MAX
     const ordered = [...rows].sort((a,b) => Number(b?.primary === true) - Number(a?.primary === true) || Number(b?.createdAt || 0) - Number(a?.createdAt || 0));
     return { subject, rows: ordered, selected: [] };
   });
-
   const seen = new Set();
   const assignments = [];
   let round = 0;
@@ -132,68 +127,27 @@ export function selectReferenceAssignments({ subjects=[], packs={}, maxTotal=MAX
   return assignments;
 }
 
-// Seedream 4.5 does better with one coherent photographed moment than with long
-// keyword stacks. Never mention an accessory that the scene/wardrobe did not.
-// This is the EXACT original prompt structure, now user-editable in Settings.
-// Dynamic fields in braces are populated separately for every photographed moment.
-export const DEFAULT_IMAGE_PROMPT_TEMPLATE = [
-  'Create one genuine-looking photograph of the described person and moment. The person, pose, expression and framing are the priority; the setting is only quiet visual context.',
-  '{scene}',
-  '{continuity}',
-  '{identity_references}',
-  '{camera}',
-  "Follow age, clothing, accessories and props only when they are explicitly stated in the scene metadata. Do not import outfit details from reference photos or from a character's general style.",
-  'Prioritize believable human photography: natural skin tone and modest skin texture, small real imperfections, facial asymmetry, naturally directed eyes, fine hair detail, consistent shadows, plausible depth of field and realistic fabric. Avoid plastic skin, excessive smoothing, fashion retouching, synthetic glow, HDR and artificial cinematic lighting unless the camera metadata specifically asks for it.',
-  '{accessories}',
-  'Keep attention on the subject; the background should be understated and consistent only with the named location, without elaborate invented scenery. Names identify characters; they are not instructions to print text. Natural hands, anatomy, perspective and reflections; no invented people, labels, watermarks or logos.',
-].join('\n\n');
+// Compatibility export. Previously this contained many extra descriptions;
+// those instructions are intentionally NOT used for image generation anymore.
+export const DEFAULT_IMAGE_PROMPT_TEMPLATE = '{scene}';
 
-export function buildImagePrompt({ description='', subjects=[], referenceAssignments=[], wardrobeLines=[], app='messages', scope='message', continuity='', promptTemplate=DEFAULT_IMAGE_PROMPT_TEMPLATE }={}) {
-  const scene = cleanText(description);
-  const context = cleanText(continuity);
-  const text = scene;
-  const socialPhoto = ['snapchat','messages','instagram','facebook','onlyfans'].includes(app);
-  const professional = /(?:professional (?:camera|photo|portrait|shoot)|studio (?:camera|photograph|shoot)|dslr|mirrorless camera)/i.test(scene);
-  const filter = /(?:snapchat|face|beauty|cat ears|dog ears|AR)\s+(?:filter|lens)|(?:filter|lens)\s+(?:on|with|showing)|filtered selfie/i.test(scene);
-  const mirror = /mirror selfie|selfie in (?:a|the) mirror/i.test(scene);
-  const front = /front[- ]facing|front camera|handheld selfie|selfie camera|selfie/i.test(scene);
-  const rear = /rear camera|back camera|taken by (?:a friend|someone)|third[- ]person (?:phone|photo)/i.test(scene);
-  const camera = professional
-    ? 'Use the specifically requested professional camera and lighting, without exaggerated retouching.'
-    : mirror ? 'Use an authentic handheld phone mirror selfie, with coherent mirror reflections and ordinary phone exposure.'
-    : front ? `Use a believable front-facing smartphone selfie with slight natural phone-lens perspective and handheld composition.${filter?' Apply only the specific camera filter described in the metadata; otherwise keep the image unfiltered.':' Keep it unfiltered unless a filter is explicitly described.'}`
-    : rear ? 'Use an authentic rear-camera phone snapshot taken by another person, with realistic framing and ordinary automatic exposure.'
-    : socialPhoto ? 'Unless specified otherwise, frame it like a casual unedited smartphone photo taken for this app, not an editorial shoot.'
-    : 'Use a plausible real camera angle and physically coherent lighting.';
-
-  let identityReferences='';
-  if (referenceAssignments.length) {
-    const grouped = new Map();
-    referenceAssignments.forEach((assignment,index) => {
-      const list = grouped.get(assignment.subject.id) || { subject: assignment.subject, refs: [] };
-      list.refs.push(`[Image ${index + 1}]`);
-      grouped.set(assignment.subject.id,list);
-    });
-    const lines=['IDENTITY REFERENCES:'];
-    for (const {subject,refs} of grouped.values()) {
-      lines.push(`${cleanText(subject.name)} = ${refs.join(', ')}. Maintain this person’s real facial proportions, hair, skin tone, apparent age and overall build. References establish identity, not the current outfit, scene, pose or camera.`);
-    }
-    identityReferences=lines.join('\n\n');
+// The metadata itself is the entire image request. Its punctuation, spacing,
+// line breaks and wording remain unchanged. Append ONLY reference-image labels,
+// numbered in the exact sequence sent in the "references" request field.
+// Additional legacy arguments (camera, location, continuity, template, etc.)
+// are intentionally ignored.
+export function buildImagePrompt({ description='', referenceAssignments=[] }={}) {
+  const metadata = String(description ?? '');
+  const referencesByName = new Map();
+  for (const [index, assignment] of referenceAssignments.entries()) {
+    const name = cleanText(assignment?.subject?.name);
+    if (!name) continue;
+    if (!referencesByName.has(name)) referencesByName.set(name, []);
+    referencesByName.get(name).push(`[Image ${index + 1}]`);
   }
-  // Deliberately do NOT list possible jewelry (nose rings, belly piercings etc.)
-  // in every prompt: Seedream can hallucinate those merely from the reminder.
-  const accessoryRegex = /\b(?:nose (?:ring|stud|piercing)|navel (?:ring|piercing)|belly (?:ring|piercing)|earrings?|necklaces?|pendants?|bracelets?|rings?|watches?|piercings?)\b/gi;
-  const explicitAccessories = [...new Set([...text.matchAll(accessoryRegex)]
-    .filter(match => !/(?:\b(?:no|without|remove|removed|absent|not wearing|isn't wearing|not wearing:)\s*(?:any\s+)?[\w,; ]{0,25})$/i.test(text.slice(Math.max(0,match.index-50),match.index)))
-    .map(match=>match[0].toLowerCase()))];
-  const fields={
-    scene:scene?`SCENE (follow the photographed action and camera type):\n${scene}`:'',
-    continuity:context?`LOCATION/TIME CONTINUITY (use only where not contradicted by the scene; do not invent scenery):\n${context}`:'',
-    identity_references:identityReferences,
-    camera,
-    accessories:explicitAccessories.length?`Only if actually described: render the specified ${explicitAccessories.join(', ')} at normal real-world scale, never oversized or duplicated. Do not introduce extra accessories.`:'',
-  };
-  return String(promptTemplate||DEFAULT_IMAGE_PROMPT_TEMPLATE)
-    .replace(/\{(scene|continuity|identity_references|camera|accessories)\}/g,(_,key)=>fields[key])
-    .split(/\n{2,}/).map(line=>line.trim()).filter(Boolean).join('\n\n');
+  if (!referencesByName.size) return metadata;
+  const mapping = [...referencesByName]
+    .map(([name, refs]) => `${name} = ${refs.join(', ')}.`)
+    .join('\n');
+  return `${metadata}\n\n${mapping}`;
 }

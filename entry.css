@@ -2,3 +2,7 @@
 @import url('./image-gen.css');
 @import url('./social-studio.css');
 @import url('./circle.css');
+
+/* The legacy editable prompt template is deliberately disabled.
+   Wiro receives the phone image metadata, without injected prose. */
+#ghimg-settings-section .ghimg-final-prompt { display: none !important; }
